@@ -1,0 +1,49 @@
+name: CI
+on:
+  push: { branches: [main] }
+  pull_request:
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ["8.4", "8.5"]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with: { persist-credentials: false }
+
+      # Official ZTS devel pack (headers + php8ts.lib) + matching binary zip
+      # (php8ts.dll + dependency DLLs). Pick the ts-*-x64 variant of the branch.
+      - name: Provision PHP (ZTS devel pack + runtime)
+        shell: pwsh
+        run: |
+          $releases = Invoke-RestMethod -Uri 'https://downloads.php.net/~windows/releases/releases.json'
+          $branch   = $releases.'${{ matrix.php }}'
+          $variant  = $branch.PSObject.Properties.Name | Where-Object { $_ -like 'ts-*-x64' } | Select-Object -First 1
+          if (-not $variant) { throw "no ts x64 build for PHP ${{ matrix.php }}" }
+          Invoke-WebRequest "https://downloads.php.net/~windows/releases/$($branch.$variant.devel_pack.path)" -OutFile "$env:RUNNER_TEMP\devel.zip"
+          Invoke-WebRequest "https://downloads.php.net/~windows/releases/$($branch.$variant.zip.path)"        -OutFile "$env:RUNNER_TEMP\bin.zip"
+          Expand-Archive "$env:RUNNER_TEMP\devel.zip" -DestinationPath "$env:RUNNER_TEMP\devel"
+          Expand-Archive "$env:RUNNER_TEMP\bin.zip"   -DestinationPath "$env:RUNNER_TEMP\phpbin"
+          $devel = (Get-ChildItem "$env:RUNNER_TEMP\devel" -Directory | Select-Object -First 1).FullName
+          "PHP_DEVEL_DIR=$devel"                    | Out-File $env:GITHUB_ENV  -Append -Encoding utf8
+          "RUSTFLAGS=-L native=$devel\lib"          | Out-File $env:GITHUB_ENV  -Append -Encoding utf8
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File $env:GITHUB_ENV  -Append -Encoding utf8
+          # php8ts.dll + its dependency DLLs must resolve when the smoke test spawns rapira.exe.
+          "$env:RUNNER_TEMP\phpbin" | Out-File $env:GITHUB_PATH -Append -Encoding utf8
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-on-failure: true
+
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo build --workspace
+      - run: cargo test --workspace

@@ -1,6 +1,60 @@
 [package]
-name = "rapira-windows"
+name = "rapira_windows"
 version = "0.1.0"
 edition = "2024"
+rust-version.workspace = true
+
+# Single product = single binary. The root package owns the `rapira` bin directly
+# (no extra `crates/rapira` wrapper): mirrors the upstream layout and keeps one fewer dir.
+[[bin]]
+name = "rapira"
+path = "src/main.rs"
+
+[workspace]
+# Minimal member set — worker-mode only. No master/scoreboard crates.
+members = [
+    "crates/config",
+    "crates/extension_host",
+    "crates/extensions_api",
+    "crates/integration_tests",
+    "crates/php_sys",
+    "crates/plugins/pingora",
+]
+
+[workspace.package]
+rust-version = "1.97.1"
+
+[workspace.dependencies]
+php_sys        = { path = "crates/php_sys" }
+extension_host = { path = "crates/extension_host" }
+extension_api  = { path = "crates/extensions_api" }
+rapira_config  = { path = "crates/config" }
+rapira_pingora = { path = "crates/plugins/pingora" }
+anyhow     = "1"
+log        = { version = "0.4", features = ["std"] }
+tokio      = { version = "1", features = ["sync"] }
+bytes      = "1"
+env_logger = "0.11"
+
+[workspace.lints.clippy]
+all = "warn"
+
+[profile.release]
+# Cross-crate thin LTO + one codegen unit: the hot path is many small cross-crate calls.
+# panic stays "unwind" (default) — php_sys wraps PHP bailouts in catch_unwind.
+lto = "thin"
+codegen-units = 1
+
+[lints]
+workspace = true
 
 [dependencies]
+anyhow         = { workspace = true }
+clap           = { version = "4", features = ["derive", "env"] }
+env_logger     = { workspace = true }
+log            = { workspace = true }
+mimalloc       = "0.1"
+extension_host = { workspace = true }
+php_sys        = { workspace = true }
+rapira_config  = { workspace = true }
+rapira_pingora = { workspace = true }

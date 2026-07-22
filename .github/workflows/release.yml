@@ -1,0 +1,172 @@
+name: Release
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+*']
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Create a draft GitHub release from this run'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Fail fast (before the expensive builds) if the tag disagrees with Cargo.toml.
+  guard:
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with: { persist-credentials: false }
+      - id: v
+        shell: bash
+        run: |
+          set -euo pipefail
+          CARGO_VER=$(awk -F'"' '/^\[package\]/{p=1} p && /^version[[:space:]]*=/{print $2; exit}' Cargo.toml)
+          test -n "$CARGO_VER"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG_VER="${GITHUB_REF#refs/tags/v}"
+            [[ "$TAG_VER" == "$CARGO_VER" ]] || { echo "::error::tag v$TAG_VER != Cargo.toml version $CARGO_VER"; exit 1; }
+          fi
+          echo "version=$CARGO_VER" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: guard
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        php_branch: ['8.4', '8.5']
+    env:
+      VERSION: ${{ needs.guard.outputs.version }}
+      STEM: rapira-v${{ needs.guard.outputs.version }}-php${{ matrix.php_branch }}-windows-x86_64
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with: { persist-credentials: false }
+
+      # Official devel pack (link: php8ts.lib + headers) + official binary zip
+      # (runtime: php8ts.dll, dependency DLLs, ext\php_*.dll).
+      - name: Provision PHP (Windows official)
+        id: phpwin
+        shell: pwsh
+        run: |
+          $releases = Invoke-RestMethod -Uri 'https://downloads.php.net/~windows/releases/releases.json'
+          $branch   = $releases.'${{ matrix.php_branch }}'
+          $variant  = $branch.PSObject.Properties.Name | Where-Object { $_ -like 'ts-*-x64' } | Select-Object -First 1
+          if (-not $variant) { throw "no ts x64 build for PHP ${{ matrix.php_branch }}" }
+          "full=$($branch.version)" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Invoke-WebRequest "https://downloads.php.net/~windows/releases/$($branch.$variant.devel_pack.path)" -OutFile "$env:RUNNER_TEMP\devel.zip"
+          Invoke-WebRequest "https://downloads.php.net/~windows/releases/$($branch.$variant.zip.path)"        -OutFile "$env:RUNNER_TEMP\bin.zip"
+          Expand-Archive "$env:RUNNER_TEMP\devel.zip" -DestinationPath "$env:RUNNER_TEMP\devel"
+          Expand-Archive "$env:RUNNER_TEMP\bin.zip"   -DestinationPath "$env:RUNNER_TEMP\phpbin"
+          $devel = (Get-ChildItem "$env:RUNNER_TEMP\devel" -Directory | Select-Object -First 1).FullName
+          "PHP_DEVEL_DIR=$devel"                    | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "PHP_RUNTIME=$env:RUNNER_TEMP\phpbin"     | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "RUSTFLAGS=-L native=$devel\lib"          | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with: { cache-on-failure: true }
+
+      - name: Build rapira
+        run: cargo build --release --locked --bin rapira
+
+      - name: Assemble layout
+        shell: pwsh
+        run: |
+          $root = "dist\$env:STEM"
+          New-Item -ItemType Directory -Force "$root","$root\ext" | Out-Null
+          Copy-Item target\release\rapira.exe "$root\"
+          Copy-Item README.md,LICENSE "$root\"
+          "${{ steps.phpwin.outputs.full }}" | Out-File "$root\PHP_VERSION.txt" -Encoding ascii
+          # php8ts.dll + all dependency DLLs sit at the official binary zip's root.
+          Get-ChildItem "$env:PHP_RUNTIME\*.dll" | Copy-Item -Destination "$root\"
+          # Bundled extension set: single source of truth in ci\windows-extensions.txt.
+          $exts = Get-Content ci\windows-extensions.txt |
+                  ForEach-Object { $_.Trim() } |
+                  Where-Object { $_ -and $_ -notmatch '^#' }
+          foreach ($e in $exts) {
+            $p = "$env:PHP_RUNTIME\ext\php_$e.dll"
+            if (Test-Path $p) { Copy-Item $p "$root\ext\" }
+          }
+          # opcache: PHP <= 8.4 ships it as a DLL needing a zend_extension line;
+          # PHP >= 8.5 compiles it into core.
+          $iniLines = @('extension_dir=ext')
+          $opcache = "$env:PHP_RUNTIME\ext\php_opcache.dll"
+          if (Test-Path $opcache) {
+            Copy-Item $opcache "$root\ext\"
+            $iniLines += 'zend_extension=opcache'
+          } elseif (-not (& "$env:PHP_RUNTIME\php.exe" -n -m | Select-String -Quiet 'Zend OPcache')) {
+            throw "OPcache neither shipped as php_opcache.dll nor built into php"
+          }
+          $ini = $iniLines +
+                 ($exts | Where-Object { Test-Path "$root\ext\php_$_.dll" } | ForEach-Object { "extension=$_" })
+          Set-Content "$root\php.ini" ($ini -join "`n") -Encoding ascii
+
+      # Hard gate: strip everything but System32 from PATH so only the bundled DLLs
+      # can satisfy the loader when rapira.exe resolves php8ts.dll.
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          $root = "dist\$env:STEM"
+          $env:PATH = "$env:SystemRoot;$env:SystemRoot\System32"
+          & "$root\rapira.exe" --help
+          if ($LASTEXITCODE -ne 0) { throw "rapira.exe --help failed rc=$LASTEXITCODE (DLL resolution?)" }
+
+      - name: Archive
+        shell: pwsh
+        run: |
+          Set-Location dist
+          7z a "$env:STEM.zip" "$env:STEM" > $null
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: art-php${{ matrix.php_branch }}
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: [guard, build]
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.guard.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        shell: pwsh
+        run: |
+          $out = "rapira-v$env:VERSION-windows-x86_64-SHA256SUMS.txt"
+          Get-ChildItem dist\*.zip | ForEach-Object {
+            "{0}  {1}" -f (Get-FileHash $_ -Algorithm SHA256).Hash.ToLower(), $_.Name
+          } | Set-Content "dist\$out" -Encoding ascii
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/') || inputs.publish
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}', env.VERSION) }}
+          draft: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.zip
+            dist/*SHA256SUMS.txt
