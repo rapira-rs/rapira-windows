@@ -106,10 +106,10 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
 /// default. Initialized once, after config is resolved.
 fn init_logger(config_level: Option<&str>) {
     let mut builder = env_logger::Builder::from_env(env_logger::Env::default());
-    if std::env::var_os("RUST_LOG").is_none() {
-        if let Some(level) = config_level {
-            builder.parse_filters(level);
-        }
+    if std::env::var_os("RUST_LOG").is_none()
+        && let Some(level) = config_level
+    {
+        builder.parse_filters(level);
     }
     builder.init();
 }
