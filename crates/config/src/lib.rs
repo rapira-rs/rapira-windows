@@ -1,149 +1,61 @@
-//! Resolves rapira-windows runtime settings from three layers, in precedence order:
-//! CLI flags > `rapira.toml` > built-in defaults. Everything collapses into one validated
-//! [`Settings`], the single struct `main` consumes.
-
 use anyhow::{Context, bail};
 use serde::Deserialize;
-use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
+use std::time::Duration;
 
-/// A validated bind address. TCP only (`host:port` / `:port`). Parsing lives in [`FromStr`];
-/// [`Display`] round-trips back to that syntax.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Listen {
-    Tcp(SocketAddr),
-}
+mod http;
+mod listen;
+mod log;
+mod pool;
+mod supervisor;
 
-impl fmt::Display for Listen {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Listen::Tcp(addr) => write!(f, "{addr}"),
-        }
-    }
-}
+pub use http::{
+    HttpSettings, MiddlewareSettings, StaticSettings, UnsafeFieldNames, UploadSettings,
+};
+pub use listen::{Listen, ListenParseError};
+pub use log::{LogFormat, LogLevel, LogSettings};
+pub use pool::{PoolSettings, RunMode};
+pub use supervisor::SupervisorSettings;
 
-/// A listen address failed to parse. Implements [`std::error::Error`] so clap's derived value
-/// parser accepts `Option<Listen>` via this `FromStr`.
-#[derive(Debug)]
-pub struct ListenParseError(String);
+use http::{HttpSection, resolve_middleware, resolve_static, resolve_uploads};
+use log::{LogSection, resolve_log};
+use pool::{PoolSection, resolve_pool};
+use supervisor::{SupervisorSection, resolve_supervisor};
 
-impl fmt::Display for ListenParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for ListenParseError {}
-
-impl FromStr for Listen {
-    type Err = ListenParseError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let s = s.trim();
-        if s.starts_with("unix:") {
-            return Err(ListenParseError(
-                "unix sockets are unsupported on rapira-windows: use host:port or :port".into(),
-            ));
-        }
-        // A bare port ("8000") has no interface; both TCP forms carry a ':'.
-        if !s.contains(':') {
-            return Err(ListenParseError(format!(
-                "`{s}` is not a listen address: use host:port or :port"
-            )));
-        }
-        // `:port` → all interfaces. An IPv6 literal (`[::1]:8000`) has a ':' but never leads
-        // with one, so it falls through to the SocketAddr parse below.
-        if let Some(port) = s.strip_prefix(':') {
-            let port: u16 = port
-                .parse()
-                .map_err(|_| ListenParseError(format!("`{s}` has an invalid port")))?;
-            return Ok(Listen::Tcp(SocketAddr::from((Ipv4Addr::UNSPECIFIED, port))));
-        }
-        s.parse::<SocketAddr>().map(Listen::Tcp).map_err(|_| {
-            ListenParseError(format!(
-                "`{s}` is not host:port (expected an IP literal, e.g. 127.0.0.1:8000)"
-            ))
-        })
-    }
-}
-
-/// CLI-supplied overrides, layered on top of the config file. `None` means "not overridden".
 #[derive(Debug, Default)]
 pub struct Overrides {
     pub listen: Option<Listen>,
-    pub threads: Option<usize>,
-    /// Positional `SCRIPT`; overrides `pool.entrypoint`.
+    pub processes: Option<usize>,
+    pub mode: Option<RunMode>,
     pub entrypoint: Option<PathBuf>,
 }
 
-/// The one validated settings struct the server boots from.
 #[derive(Debug)]
 pub struct Settings {
     pub http: HttpSettings,
     pub pool: PoolSettings,
-    /// `env_logger` filter (e.g. "info"); `None` falls back to `RUST_LOG`.
-    pub log_level: Option<String>,
+    pub supervisor: SupervisorSettings,
+    pub log: LogSettings,
 }
 
-#[derive(Debug)]
-pub struct HttpSettings {
-    pub listen: Listen,
-    pub server_name: String,
-    /// What PHP sees as SERVER_PORT; defaults to the listen TCP port.
-    pub server_port: u16,
-    /// Bytes, converted from the config's `max_body_size_mb`.
-    pub max_body_size: usize,
-}
-
-#[derive(Debug)]
-pub struct PoolSettings {
-    pub threads: usize,
-    /// Absolute path to the resident PHP worker script.
-    pub entrypoint: PathBuf,
-}
-
-/// `rapira.toml` as written. Every field optional so absence stays distinct from a set value.
-/// `deny_unknown_fields` at every level turns a typo into a hard error.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileConfig {
-    log_level: Option<String>,
     #[serde(default)]
     http: HttpSection,
     #[serde(default)]
     pool: PoolSection,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct HttpSection {
-    listen: Option<String>,
-    server_name: Option<String>,
-    server_port: Option<u16>,
-    max_body_size_mb: Option<usize>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PoolSection {
-    threads: Option<usize>,
-    entrypoint: Option<String>,
-}
-
-/// Default worker count: one per logical CPU. Falls back to 1 if the platform can't report it.
-fn default_threads() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
+    #[serde(default)]
+    supervisor: SupervisorSection,
+    #[serde(default)]
+    log: LogSection,
 }
 
 fn default_listen() -> Listen {
     Listen::Tcp(SocketAddr::from((Ipv4Addr::LOCALHOST, 8000)))
 }
 
-/// Load `rapira.toml` (if given), merge CLI overrides on top, and validate.
 pub fn resolve(config_path: Option<&Path>, cli: Overrides) -> anyhow::Result<Settings> {
     let (file, config_dir) = match config_path {
         Some(path) => {
@@ -162,10 +74,9 @@ fn load_str(text: &str) -> anyhow::Result<FileConfig> {
     Ok(toml::from_str(text)?)
 }
 
-/// Apply precedence (CLI > file > default) and produce a validated [`Settings`].
 fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow::Result<Settings> {
-    let listen = match cli.listen {
-        Some(l) => l,
+    let listen = match &cli.listen {
+        Some(l) => l.clone(),
         None => match file.http.listen.as_deref() {
             Some(s) => s
                 .parse::<Listen>()
@@ -174,7 +85,6 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
         },
     };
 
-    // SERVER_PORT should match what clients connect to, so an unset server_port follows listen.
     let server_port = match file.http.server_port {
         Some(p) => p,
         None => match &listen {
@@ -190,25 +100,40 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
         .checked_mul(1024 * 1024)
         .ok_or_else(|| anyhow::anyhow!("http.max_body_size_mb {max_body_size_mb} is too large"))?;
 
-    let threads = cli
-        .threads
-        .or(file.pool.threads)
-        .unwrap_or_else(default_threads);
-    if threads == 0 {
-        bail!("threads must be at least 1");
+    let write_timeout_secs = file.http.write_timeout_secs.unwrap_or(30);
+    if write_timeout_secs == 0 {
+        bail!("http.write_timeout_secs must be at least 1");
     }
+    let write_timeout = capped_timeout("http", "write_timeout_secs", write_timeout_secs)?;
 
-    // Positional SCRIPT is cwd-relative; a config `pool.entrypoint` is resolved against the
-    // config file's directory so the config is relocatable. `.filter` routes an empty
-    // `entrypoint = ""` to the clear bail below instead of resolving to the config directory.
-    let entrypoint = if let Some(script) = cli.entrypoint {
-        std::path::absolute(&script)?
-    } else if let Some(ep) = file.pool.entrypoint.as_deref().filter(|s| !s.is_empty()) {
-        let base = config_dir.unwrap_or_else(|| Path::new("."));
-        std::path::absolute(base.join(ep))?
-    } else {
-        bail!("no entrypoint: pass a SCRIPT argument or set pool.entrypoint in the config file");
+    let keepalive_timeout_secs = file.http.keepalive_timeout_secs.unwrap_or(60);
+    if keepalive_timeout_secs == 0 {
+        bail!("http.keepalive_timeout_secs must be at least 1");
+    }
+    let keepalive_timeout =
+        capped_timeout("http", "keepalive_timeout_secs", keepalive_timeout_secs)?;
+
+    let sendfile_root = match file.http.sendfile.root.filter(|r| !r.is_empty()) {
+        Some(r) => Some(config_relative(config_dir, &r)?),
+        None => None,
     };
+
+    let static_files = match file.http.r#static {
+        Some(section) => Some(resolve_static(section, config_dir)?),
+        None => None,
+    };
+
+    let pool = resolve_pool(file.pool, &cli, config_dir, "pool")?;
+    if file.http.uploads.is_some() && pool.mode != RunMode::Dispatcher {
+        bail!(
+            "http.uploads applies to dispatcher mode only (pool.mode = \"{}\")",
+            pool.mode.as_str()
+        );
+    }
+    let uploads = resolve_uploads(file.http.uploads.unwrap_or_default(), config_dir)?;
+    let supervisor = resolve_supervisor(file.supervisor, config_dir)?;
+    let log = resolve_log(file.log)?;
+    let middleware = resolve_middleware(file.http.middleware, static_files)?;
 
     Ok(Settings {
         http: HttpSettings {
@@ -219,39 +144,36 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
                 .unwrap_or_else(|| "localhost".to_owned()),
             server_port,
             max_body_size,
+            write_timeout,
+            keepalive_timeout,
+            unsafe_field_names: file.http.unsafe_field_names.unwrap_or_default(),
+            uploads,
+            sendfile_root,
+            middleware,
         },
-        pool: PoolSettings {
-            threads,
-            entrypoint,
-        },
-        log_level: file.log_level,
+        pool,
+        supervisor,
+        log,
     })
+}
+
+/// Caps every `*_secs` key so deadline arithmetic cannot overflow.
+const MAX_TIMEOUT_SECS: u64 = 86_400;
+
+fn capped_timeout(table: &str, key: &str, secs: u64) -> anyhow::Result<Duration> {
+    if secs > MAX_TIMEOUT_SECS {
+        bail!("{table}.{key} {secs} is too large (max {MAX_TIMEOUT_SECS})");
+    }
+    Ok(Duration::from_secs(secs))
+}
+
+fn config_relative(config_dir: Option<&Path>, value: &str) -> std::io::Result<PathBuf> {
+    std::path::absolute(config_dir.unwrap_or_else(|| Path::new(".")).join(value))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn listen_parses_tcp_forms_and_rejects_unix() {
-        assert_eq!(
-            "127.0.0.1:8000".parse::<Listen>().unwrap(),
-            Listen::Tcp(SocketAddr::from(([127, 0, 0, 1], 8000)))
-        );
-        assert_eq!(
-            ":8080".parse::<Listen>().unwrap(),
-            Listen::Tcp(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 8080)))
-        );
-        assert!(matches!("[::1]:8000".parse::<Listen>(), Ok(Listen::Tcp(_))));
-        assert!("unix:/run/rapira.sock".parse::<Listen>().is_err());
-    }
-
-    #[test]
-    fn listen_rejects_invalid() {
-        for bad in ["8080", "", ":", "unix:", "localhost:8000"] {
-            assert!(bad.parse::<Listen>().is_err(), "`{bad}` should not parse");
-        }
-    }
 
     #[test]
     fn precedence_cli_over_file_over_default() {
@@ -260,19 +182,20 @@ mod tests {
             [http]
             listen = "0.0.0.0:9000"
             [pool]
-            threads = 2
+            processes = 2
             entrypoint = "app.php"
         "#,
         )
         .unwrap();
         let cli = Overrides {
             listen: Some("127.0.0.1:1234".parse().unwrap()),
-            threads: Some(7),
+            processes: Some(7),
+            mode: None,
             entrypoint: Some(PathBuf::from("cli.php")),
         };
-        let s = merge(file, cli, Some(Path::new("C:\\rapira"))).unwrap();
+        let s = merge(file, cli, Some(Path::new("/etc/rapira"))).unwrap();
         assert_eq!(s.http.listen.to_string(), "127.0.0.1:1234");
-        assert_eq!(s.pool.threads, 7);
+        assert_eq!(s.pool.processes, 7);
         assert!(s.pool.entrypoint.is_absolute());
         assert!(s.pool.entrypoint.ends_with("cli.php"));
     }
@@ -283,9 +206,58 @@ mod tests {
             "[http]\nlisten = \":9000\"\nmax_body_size_mb = 2\n[pool]\nentrypoint = \"a.php\"\n",
         )
         .unwrap();
-        let s = merge(file, Overrides::default(), Some(Path::new("C:\\w"))).unwrap();
+        let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
         assert_eq!(s.http.server_port, 9000);
         assert_eq!(s.http.max_body_size, 2 * 1024 * 1024);
+
+        let file =
+            load_str("[http]\nlisten = \"unix:/run/r.sock\"\n[pool]\nentrypoint = \"a.php\"\n")
+                .unwrap();
+        let err = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap_err();
+        assert!(format!("{err:#}").contains("use an IP address with a port or :port"));
+    }
+
+    #[test]
+    fn unsafe_field_names_parses_and_defaults_to_drop() {
+        for (text, want) in [
+            ("drop", UnsafeFieldNames::Drop),
+            ("reject", UnsafeFieldNames::Reject),
+        ] {
+            let file = load_str(&format!(
+                "[http]\nunsafe_field_names = \"{text}\"\n[pool]\nentrypoint = \"a.php\"\n"
+            ))
+            .unwrap();
+            let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
+            assert_eq!(s.http.unsafe_field_names, want, "{text}");
+        }
+
+        let file = load_str("[pool]\nentrypoint = \"a.php\"\n").unwrap();
+        let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
+        assert_eq!(s.http.unsafe_field_names, UnsafeFieldNames::Drop);
+    }
+
+    /// `allow` is invalid because this check cannot be disabled.
+    #[test]
+    fn unknown_unsafe_field_names_value_is_rejected() {
+        for value in ["dorp", "allow"] {
+            assert!(
+                load_str(&format!(
+                    "[http]\nunsafe_field_names = \"{value}\"\n[pool]\nentrypoint = \"a.php\"\n"
+                ))
+                .is_err(),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn file_entrypoint_is_config_dir_relative() {
+        let file = load_str("[pool]\nentrypoint = \"public/index.php\"\n").unwrap();
+        let s = merge(file, Overrides::default(), Some(Path::new("/srv/app"))).unwrap();
+        assert_eq!(
+            s.pool.entrypoint,
+            std::path::absolute("/srv/app/public/index.php").unwrap()
+        );
     }
 
     #[test]
@@ -294,7 +266,7 @@ mod tests {
         assert!(err.to_string().contains("entrypoint"));
 
         let file = load_str("[pool]\nentrypoint = \"\"\n").unwrap();
-        let err = merge(file, Overrides::default(), Some(Path::new("C:\\app"))).unwrap_err();
+        let err = merge(file, Overrides::default(), Some(Path::new("/srv/app"))).unwrap_err();
         assert!(err.to_string().contains("no entrypoint"));
     }
 
@@ -303,7 +275,7 @@ mod tests {
         let file =
             load_str("[http]\nmax_body_size_mb = 17592186044416\n[pool]\nentrypoint = \"a.php\"\n")
                 .unwrap();
-        let err = merge(file, Overrides::default(), Some(Path::new("C:\\w"))).unwrap_err();
+        let err = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap_err();
         assert!(err.to_string().contains("too large"));
     }
 
@@ -311,6 +283,347 @@ mod tests {
     fn unknown_keys_are_rejected() {
         assert!(load_str("[pool]\nbogus = 1\n").is_err());
         assert!(load_str("[nope]\nx = 1\n").is_err());
-        assert!(load_str("[pool]\nclassic = true\n").is_err()); // removed knob is now unknown
+        assert!(load_str("[supervisor]\nbogus = 1\n").is_err());
+        assert!(load_str("[pool]\nthreads = 1\n").is_err());
+        assert!(load_str("[pool]\nclassic = true\n").is_err());
+        assert!(load_str("[pm]\nmode = \"static\"\n").is_err());
+        assert!(load_str("[pool]\npidfile = \"r.pid\"\n").is_err());
+        assert!(load_str("[supervisor]\nmax_requests = 1\n").is_err());
+        assert!(load_str("[log]\nbogus = 1\n").is_err());
+        assert!(load_str("[log]\nlevel = \"verbose\"\n").is_err());
+        assert!(load_str("[log]\nformat = \"pretty\"\n").is_err());
+        assert!(load_str("[http.static]\nbogus = 1\n").is_err());
+    }
+
+    #[test]
+    fn removed_pool_keys_are_unknown_fields() {
+        for (key, value) in [
+            ("scaling", "\"static\""),
+            ("min_spare", "1"),
+            ("max_spare", "2"),
+            ("process_idle_timeout_secs", "10"),
+            ("request_terminate_timeout_secs", "30"),
+        ] {
+            let err = load_str(&format!(
+                "[pool]\nentrypoint = \"a.php\"\n{key} = {value}\n"
+            ))
+            .unwrap_err()
+            .to_string();
+            assert!(
+                err.contains(&format!("unknown field `{key}`")),
+                "{key}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn timeout_caps_name_the_key_that_broke() {
+        for (toml, key) in [
+            (
+                "[pool]\nentrypoint = \"a.php\"\n[supervisor]\nprocess_control_timeout_secs = 100000\n",
+                "supervisor.process_control_timeout_secs",
+            ),
+            (
+                "[http]\nwrite_timeout_secs = 100000\n[pool]\nentrypoint = \"a.php\"\n",
+                "http.write_timeout_secs",
+            ),
+            (
+                "[http]\nkeepalive_timeout_secs = 100000\n[pool]\nentrypoint = \"a.php\"\n",
+                "http.keepalive_timeout_secs",
+            ),
+        ] {
+            let err = merge(
+                load_str(toml).unwrap(),
+                Overrides::default(),
+                Some(Path::new("/w")),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                err.contains(key) && err.contains("too large"),
+                "{key}: {err}"
+            );
+        }
+
+        let file = load_str(
+            "[pool]\nentrypoint = \"a.php\"\n[supervisor]\nprocess_control_timeout_secs = 86400\n",
+        )
+        .unwrap();
+        assert!(merge(file, Overrides::default(), Some(Path::new("/w"))).is_ok());
+    }
+
+    /// The drain requires a positive stop budget.
+    #[test]
+    fn supervisor_control_timeout_zero_is_rejected() {
+        let file = load_str(
+            "[pool]\nentrypoint = \"a.php\"\n[supervisor]\nprocess_control_timeout_secs = 0\n",
+        )
+        .unwrap();
+        let err = merge(file, Overrides::default(), Some(Path::new("/w")))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("supervisor.process_control_timeout_secs must be at least 1"),
+            "{err}"
+        );
+    }
+
+    /// Validation runs after precedence. Therefore, a CLI value of 0 is invalid even when the file contains a valid value.
+    #[test]
+    fn pool_processes_zero_is_rejected_from_either_layer() {
+        let file = load_str("[pool]\nprocesses = 0\nentrypoint = \"a.php\"\n").unwrap();
+        let err = merge(file, Overrides::default(), Some(Path::new("/w")))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("pool.processes must be at least 1"), "{err}");
+
+        let file = load_str("[pool]\nprocesses = 4\nentrypoint = \"a.php\"\n").unwrap();
+        let err = merge(
+            file,
+            Overrides {
+                processes: Some(0),
+                ..Default::default()
+            },
+            Some(Path::new("/w")),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("pool.processes must be at least 1"), "{err}");
+    }
+
+    /// The resolver converts all units and resolves the directory relative to the configuration file. A zero `max_files` value would reject every file part after a successful start.
+    #[test]
+    fn http_uploads_resolve_and_reject_zero_files() {
+        let file = load_str(
+            "[pool]\nentrypoint = \"a.php\"\n[http.uploads]\ndir = \"spool\"\n\
+             max_file_size_mb = 3\nmax_field_size_kb = 7\nmax_files = 4\n\
+             max_parts = 9\nmax_part_headers = 5\n",
+        )
+        .unwrap();
+        let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
+        let u = &s.http.uploads;
+        assert_eq!(u.dir, std::path::absolute("/w/spool").unwrap());
+        assert_eq!(u.max_file_size, 3 * 1024 * 1024);
+        assert_eq!(u.max_field_size, 7 * 1024);
+        assert_eq!(u.max_files, 4);
+        assert_eq!(u.max_parts, 9);
+        assert_eq!(u.max_part_headers, 5);
+
+        let file =
+            load_str("[pool]\nentrypoint = \"a.php\"\n[http.uploads]\nmax_files = 0\n").unwrap();
+        let err = merge(file, Overrides::default(), Some(Path::new("/w")))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("http.uploads.max_files must be at least 1"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn pool_max_requests_resolves_for_worker_and_dispatcher() {
+        for mode in ["worker", "dispatcher"] {
+            for max_requests in [0, 500] {
+                let file = load_str(&format!(
+                    "[pool]\nentrypoint = \"a.php\"\nmode = \"{mode}\"\nmax_requests = {max_requests}\n"
+                ))
+                .unwrap();
+                let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
+                assert_eq!(s.pool.max_requests, max_requests, "{mode}");
+            }
+        }
+    }
+
+    /// The CLI mode has precedence over the file mode in all cases.
+    #[test]
+    fn pool_run_mode_resolves_with_cli_precedence() {
+        for (key, want) in [
+            ("classic", RunMode::Classic),
+            ("worker", RunMode::Worker),
+            ("dispatcher", RunMode::Dispatcher),
+        ] {
+            let file = load_str(&format!(
+                "[pool]\nentrypoint = \"a.php\"\nmode = \"{key}\"\n"
+            ))
+            .unwrap();
+            let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
+            assert_eq!(s.pool.mode, want, "{key}");
+        }
+
+        let file = load_str("[pool]\nentrypoint = \"a.php\"\n").unwrap();
+        let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
+        assert_eq!(s.pool.mode, RunMode::Dispatcher, "default");
+
+        let file = load_str("[pool]\nentrypoint = \"a.php\"\nmode = \"classic\"\n").unwrap();
+        let s = merge(
+            file,
+            Overrides {
+                mode: Some(RunMode::Dispatcher),
+                ..Default::default()
+            },
+            Some(Path::new("/w")),
+        )
+        .unwrap();
+        assert_eq!(s.pool.mode, RunMode::Dispatcher, "CLI beats file");
+
+        assert!(load_str("[pool]\nentrypoint = \"a.php\"\nmode = \"async\"\n").is_err());
+    }
+
+    /// The table is valid only in dispatcher mode.
+    #[test]
+    fn http_uploads_require_dispatcher_mode() {
+        for mode in ["classic", "worker"] {
+            let file = load_str(&format!(
+                "[pool]\nentrypoint = \"a.php\"\nmode = \"{mode}\"\n[http.uploads]\nmax_files = 4\n"
+            ))
+            .unwrap();
+            let err = merge(file, Overrides::default(), Some(Path::new("/w")))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("dispatcher mode only") && err.contains(mode),
+                "{err}"
+            );
+        }
+
+        let file = load_str("[pool]\nentrypoint = \"a.php\"\n[http.uploads]\n").unwrap();
+        assert!(merge(file, Overrides::default(), Some(Path::new("/w"))).is_ok());
+
+        let file = load_str("[pool]\nentrypoint = \"a.php\"\nmode = \"classic\"\n").unwrap();
+        assert!(merge(file, Overrides::default(), Some(Path::new("/w"))).is_ok());
+    }
+
+    #[test]
+    fn supervisor_pidfile_resolves_against_config_dir() {
+        let file =
+            load_str("[pool]\nentrypoint = \"a.php\"\n[supervisor]\npidfile = \"rapira.pid\"\n")
+                .unwrap();
+        let s = merge(file, Overrides::default(), Some(Path::new("/etc/rapira"))).unwrap();
+        assert_eq!(
+            s.supervisor.pidfile,
+            Some(std::path::absolute("/etc/rapira/rapira.pid").unwrap())
+        );
+    }
+
+    /// The root resolves relative to the configuration file. The default `forbid` value prevents access to PHP source files.
+    #[test]
+    fn http_static_resolves_with_defaults() {
+        let file = load_str(
+            "[pool]\nentrypoint = \"a.php\"\n[http]\nmiddleware = [\"static\"]\n[http.static]\nroot = \"public\"\n",
+        )
+        .unwrap();
+        let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
+        let MiddlewareSettings::Static(st) = &s.http.middleware[0];
+        assert_eq!(st.root, std::path::absolute("/w/public").unwrap());
+        assert_eq!(st.forbid, vec![".php".to_owned()]);
+
+        let file = load_str("[pool]\nentrypoint = \"a.php\"\n").unwrap();
+        let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
+        assert!(s.http.middleware.is_empty());
+
+        let file = load_str(
+            "[pool]\nentrypoint = \"a.php\"\n[http]\nmiddleware = [\"static\"]\n[http.static]\nroot = \"/srv/pub\"\n",
+        )
+        .unwrap();
+        let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
+        let MiddlewareSettings::Static(st) = &s.http.middleware[0];
+        assert_eq!(st.root, std::path::absolute("/srv/pub").unwrap());
+    }
+
+    /// The list activates middleware. Each configured section must be listed. Each listed name must be known, configured, and unique.
+    #[test]
+    fn http_middleware_list_validates() {
+        for (toml, needle) in [
+            (
+                "[http]\nmiddleware = [\"staticc\"]\n",
+                "\"staticc\" is unknown",
+            ),
+            (
+                "[http]\nmiddleware = [\"static\"]\n",
+                "[http.static] is missing",
+            ),
+            (
+                "[http]\nmiddleware = [\"static\", \"static\"]\n[http.static]\nroot = \"p\"\n",
+                "twice",
+            ),
+            ("[http.static]\nroot = \"p\"\n", "does not list \"static\""),
+        ] {
+            let file = load_str(&format!("[pool]\nentrypoint = \"a.php\"\n{toml}")).unwrap();
+            let err = merge(file, Overrides::default(), Some(Path::new("/w")))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(needle), "{toml}: {err}");
+        }
+    }
+
+    #[test]
+    fn http_static_requires_root() {
+        for toml in [
+            "[pool]\nentrypoint = \"a.php\"\n[http.static]\n",
+            "[pool]\nentrypoint = \"a.php\"\n[http.static]\nroot = \"\"\n",
+        ] {
+            let err = merge(
+                load_str(toml).unwrap(),
+                Overrides::default(),
+                Some(Path::new("/w")),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("http.static.root"), "{err}");
+        }
+    }
+
+    /// The resolver validates only the format. The middleware constructor converts the value to lowercase.
+    #[test]
+    fn http_static_forbid_validates() {
+        let file = load_str(
+            "[pool]\nentrypoint = \"a.php\"\n[http]\nmiddleware = [\"static\"]\n[http.static]\nroot = \"p\"\nforbid = [\".PHP\", \".Phtml\"]\n",
+        )
+        .unwrap();
+        let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
+        let MiddlewareSettings::Static(st) = &s.http.middleware[0];
+        assert_eq!(st.forbid, vec![".PHP".to_owned(), ".Phtml".to_owned()]);
+
+        let file = load_str(
+            "[pool]\nentrypoint = \"a.php\"\n[http]\nmiddleware = [\"static\"]\n[http.static]\nroot = \"p\"\nforbid = []\n",
+        )
+        .unwrap();
+        let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
+        let MiddlewareSettings::Static(st) = &s.http.middleware[0];
+        assert!(st.forbid.is_empty());
+
+        for entry in ["php", "", ".", ".php ", "./php"] {
+            let file = load_str(&format!(
+                "[pool]\nentrypoint = \"a.php\"\n[http.static]\nroot = \"p\"\nforbid = [\"{entry}\"]\n"
+            ))
+            .unwrap();
+            let err = merge(file, Overrides::default(), Some(Path::new("/w")))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("http.static.forbid"), "{entry}: {err}");
+        }
+    }
+
+    /// The filter string is assembled from these keys, so a key carrying filter syntax would inject directives (`"php=trace,tokio" = "debug"` reads as two).
+    #[test]
+    fn log_target_names_that_would_corrupt_the_filter_are_rejected() {
+        for entry in [
+            "\"\" = \"info\"",
+            "\"php=trace,tokio\" = \"info\"",
+            "\"a b\" = \"info\"",
+            "\"a/b\" = \"info\"",
+            "\"a\\u001Bb\" = \"info\"",
+            "\"http[request]\" = \"info\"",
+            "\".php\" = \"info\"",
+        ] {
+            let file = load_str(&format!(
+                "[pool]\nentrypoint = \"a.php\"\n[log.targets]\n{entry}\n"
+            ))
+            .unwrap();
+            assert!(
+                merge(file, Overrides::default(), Some(Path::new("/w"))).is_err(),
+                "{entry}"
+            );
+        }
     }
 }

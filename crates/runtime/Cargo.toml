@@ -1,0 +1,24 @@
+[package]
+name = "rapira_runtime"
+version = "0.8.0"
+edition.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+tracing = { workspace = true }
+php_sys = { workspace = true }
+extension_api = { workspace = true }
+# One multithread runtime runs all extension tasks.
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time", "sync", "macros"] }
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading"] }
+# Parse multipart data from the buffered body and spool file parts.
+memchr = "2"
+httparse = "1"
+tempfile = "3"
+
+[dev-dependencies]
+bytes = { workspace = true }

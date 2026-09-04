@@ -1,0 +1,48 @@
+# This file is an example rapira.toml configuration. Command-line options override file values. All keys except pool.entrypoint are optional. Commented keys show default values.
+
+[http]
+listen = "127.0.0.1:8000"     # Use an IP address and port, or use ":port" for all interfaces.
+# server_name = "localhost"
+# server_port = 8000           # PHP receives this value as SERVER_PORT. The default is the listen port.
+# max_body_size_mb = 8         # Return status 413 for a larger request body.
+# write_timeout_secs = 30      # Close the connection when a response write exceeds this duration.
+# keepalive_timeout_secs = 60  # Close an idle keep-alive connection after this duration. This value also limits one header or body frame read.
+# unsafe_field_names = "drop" # Use "reject" to return status 400 for names that match a CGI variable.
+# middleware = ["static"]     # Apply middleware in list order. List each configured middleware here.
+
+# Host multipart limits apply only in dispatcher mode. Classic and worker modes use php.ini.
+# The server fails to start if another mode has an [http.uploads] table.
+# [http.uploads]
+# dir = "C:\\Temp\\rapira-uploads" # The default is the Windows temporary directory.
+# max_file_size_mb = 2
+# max_field_size_kb = 256
+# max_files = 20
+# max_parts = 1024
+# max_part_headers = 32
+
+# [http.sendfile]
+# root = "public"             # Restrict sendFile() paths to this directory. The default is the entrypoint directory.
+
+# Serve files before PHP. Pass missing files and all dotfiles to PHP.
+# This table requires "static" in http.middleware.
+# One process cache holds up to 16 MiB. It stores files that are not larger than 256 KiB.
+# A cache entry remains valid for one second before metadata validation.
+# [http.static]
+# root = "public"             # Required. Relative paths start from the directory of this file.
+# forbid = [".php"]           # Match file name suffixes without case sensitivity. An explicit list replaces the default list.
+
+[pool]
+entrypoint = "dispatcher-sync.php" # Relative paths start from the directory of this file.
+mode = "dispatcher"                 # Use "classic", "worker", or "dispatcher". The default is "dispatcher".
+processes = 8                       # Set the number of PHP interpreter threads in the server process. The default is the CPU count.
+# max_requests = 0                  # Recycle an interpreter after approximately N requests. A value of 0 disables this limit.
+
+# [supervisor]
+# pidfile = "rapira.pid"            # Relative paths start from the directory of this file.
+# process_control_timeout_secs = 30 # Allow this duration for threads to stop before a forced process exit.
+
+[log]
+level = "trace"                    # Use error, warn, info, debug, or trace. The default is error.
+# format = "plain"                 # Use "plain" or "json".
+# [log.targets]                     # Set a level for each target. RUST_LOG replaces the complete filter.
+# php = "warn"

@@ -1,0 +1,20 @@
+name: Chore
+description: Propose maintenance or cleanup work
+title: "[Chore]: "
+labels: ["C-enhancement"]
+body:
+  - type: checkboxes
+    id: search-done
+    attributes:
+      label: Existing reports
+      options:
+        - label: I searched the issue tracker for this work.
+          required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed work
+      description: Describe the current problem and the required result.
+    validations:
+      required: true

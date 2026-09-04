@@ -1,0 +1,170 @@
+use tests::{app_record, app_records};
+use tracing::Level;
+
+/// Each LogLevel case maps to the corresponding tracing level. An omitted argument maps to Info.
+#[test]
+fn log_levels_map_onto_tracing_levels() {
+    let records = app_records("app_logger/app-logger-levels.php");
+
+    let got: Vec<(Level, &str)> = records
+        .iter()
+        .map(|(lvl, msg, _)| (*lvl, msg.as_str()))
+        .collect();
+
+    assert_eq!(
+        got,
+        vec![
+            (Level::ERROR, "lvl-error"),
+            (Level::WARN, "lvl-warning"),
+            (Level::INFO, "lvl-info"),
+            (Level::DEBUG, "lvl-debug"),
+            (Level::TRACE, "lvl-trace"),
+            (Level::INFO, "lvl-omitted"),
+        ],
+        "each case must map to its own level, in order"
+    );
+}
+
+/// Absent and empty contexts do not add a field.
+#[test]
+fn log_context_is_json_encoded() {
+    let records = app_records("app_logger/app-logger-context.php");
+    let find = |needle: &str| {
+        records
+            .iter()
+            .find(|(_, msg, _)| msg == needle)
+            .unwrap_or_else(|| panic!("no {needle:?} record in {records:?}"))
+    };
+
+    assert_eq!(find("ctx-absent").2, "", "an omitted context adds no field");
+    assert_eq!(find("ctx-empty").2, "", "an empty array adds no field");
+
+    let ctx = &find("ctx-full").2;
+    for fragment in [
+        r#""route":"\/orders""#,
+        r#""tries":3"#,
+        r#""ok":false"#,
+        r#""nested":{"id":42}"#,
+    ] {
+        assert!(ctx.contains(fragment), "missing {fragment} in {ctx:?}");
+    }
+}
+
+/// PSR-3 `['exception' => $e]` retains diagnostic data because Throwable state is in private properties.
+#[test]
+fn log_context_carries_a_throwable() {
+    let (level, _, ctx) = app_record("app_logger/app-logger-exception.php");
+    assert_eq!(level, Level::ERROR);
+
+    for fragment in [
+        "LogicException",
+        "outer failure",
+        "42",
+        "app-logger-exception.php",
+    ] {
+        assert!(
+            ctx.contains(fragment),
+            "a logged exception must be diagnosable: no {fragment:?} in {ctx:?}"
+        );
+    }
+    assert!(
+        ctx.contains("inner cause"),
+        "the previous exception must survive: {ctx:?}"
+    );
+    assert!(
+        ctx.contains(r#""order":"A-1""#),
+        "sibling key lost: {ctx:?}"
+    );
+}
+
+/// A context value that json_encode cannot represent must not throw, remove the record, or remove adjacent values.
+#[test]
+fn log_context_tolerates_unencodable_values() {
+    let (level, msg, ctx) = app_record("app_logger/app-logger-unencodable.php");
+
+    assert_eq!(level, Level::ERROR);
+    assert_eq!(msg, "hostile");
+    assert!(
+        ctx.contains(r#""keep":"visible""#),
+        "encodable neighbours must be intact: {ctx:?}"
+    );
+    for key in ["closure", "resource", "nan", "inf", "bytes", "pure_enum"] {
+        assert!(
+            ctx.contains(&format!("\"{key}\"")),
+            "{key} must still appear rather than being dropped: {ctx:?}"
+        );
+    }
+}
+
+/// Common context values use the expected encoding. The output does not include nonpublic properties.
+#[test]
+fn log_context_encodes_common_php_values() {
+    let (_, _, ctx) = app_record("app_logger/app-logger-values.php");
+
+    for fragment in [
+        r#""obj":{"id":"acc_1","note":null}"#,
+        r#""money":{"cents":1250}"#,
+        r#""suit":"H""#,
+        r#""nothing":null"#,
+        r#""list":[1,2,3]"#,
+        r#""deep":{"a":{"b":{"c":"bottom"}}}"#,
+        r#""zero":0"#,
+    ] {
+        assert!(ctx.contains(fragment), "missing {fragment} in {ctx:?}");
+    }
+    assert!(
+        !ctx.contains("private") && !ctx.contains("protected"),
+        "non-public properties must not leak: {ctx:?}"
+    );
+}
+
+/// DateInterval values from createFromDateString() use `from_string` and `date_string` fields.
+#[test]
+fn app_logger_dateinterval_easy() {
+    let (level, msg, ctx) = app_record("app_logger/app-logger-dateinterval.php");
+
+    assert_eq!(level, Level::ERROR);
+    assert_eq!(msg, "date-interval");
+    assert_eq!(
+        ctx.as_str(),
+        concat!(
+            r#"{"fromSpec":{"y":0,"m":1,"d":2,"h":0,"i":0,"s":0,"f":0,"#,
+            r#""invert":0,"days":false,"from_string":false},"#,
+            r#""fromDateString":{"from_string":true,"date_string":"1 month 2 days"}}"#,
+        )
+    );
+}
+
+/// An exception from jsonSerialize() must not exit log(). The host must still receive the record.
+#[test]
+fn log_survives_a_throwing_json_serializer() {
+    let (level, msg, ctx) = app_record("app_logger/app-logger-throwing-serializer.php");
+    assert_eq!(level, Level::ERROR);
+    assert_eq!(msg, "bombed");
+    assert!(ctx.contains(r#""keep":"visible""#), "got: {ctx:?}");
+    assert!(ctx.contains(r#""bomb":null"#), "got: {ctx:?}");
+}
+
+/// exit() in a serializer ends execution through an unwind. log() must preserve this exit.
+#[test]
+fn log_preserves_exit_from_a_serializer() {
+    use php_sys::{Mode, Rapira};
+    use tests::{drain, php_lock, req};
+
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Classic).expect("classic boot");
+    let h = r.handle();
+    let (status, body) = drain(
+        h.handle_blocking(req("/", "app_logger/app-logger-exit-in-serializer.php"))
+            .expect("dispatch"),
+    );
+    drop(h);
+    r.shutdown();
+
+    assert_eq!(status, 200);
+    assert!(body.contains("quitting"), "got: {body:?}");
+    assert!(
+        !body.contains("after-log"),
+        "exit() must terminate the script, not be cleared (got: {body:?})"
+    );
+}

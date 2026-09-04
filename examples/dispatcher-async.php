@@ -1,0 +1,76 @@
+<?php
+// The Fiber dispatcher completes each exchange before it receives the next request.
+
+use Rapira\Exception\ClosedException;
+use Rapira\Exception\RapiraThrowable;
+use Rapira\Http\Exchange;
+use Rapira\Http\Request;
+
+final class PageNotFound extends \RuntimeException {}
+
+function handle(Request $req): Generator|string
+{
+    return match ($req->target) {
+        '/' => "hello from the async dispatcher\n",
+        '/echo' => \is_string($req->body) ? $req->body : '',
+        '/stream' => generateStream(),
+        '/boom' => throw new \RuntimeException('the handler blew up'),
+        default => throw new PageNotFound("no route for {$req->target}"),
+    };
+}
+
+function generateStream(): Generator
+{
+    $j = mt_rand(5, 20);
+    for ($i = 0; $i < $j; $i++) {
+        yield "stream chunk {$i}\n";
+    }
+
+    return "stream done\n";
+}
+
+$serve = static function (Exchange $ex): void {
+    try {
+        $body = handle($ex->getRequest());
+        $ex->writeHead(200, ['content-type' => ['text/plain']]);
+        if ($body instanceof Generator) {
+            foreach ($body as $chunk) {
+                $ex->writeBody($chunk, eos: false);
+                Fiber::suspend();
+            }
+
+            $ex->writeBody($body->getReturn());
+        } else {
+            $ex->writeBody($body);
+        }
+    } catch (RapiraThrowable) {
+        // The host closed the exchange. Do not send a response.
+    } catch (PageNotFound $e) {
+        try {
+            $ex->writeHead(404, ['content-type' => ['text/plain']]);
+            $ex->writeBody("not found: {$e->getMessage()}\n");
+        } catch (\Throwable) {
+        }
+    } catch (\Throwable $e) {
+        try {
+            $ex->writeHead(500, ['content-type' => ['text/plain']]);
+            $ex->writeBody("internal error: {$e->getMessage()}\n");
+        } catch (\Throwable) {
+        }
+    }
+};
+
+$d = \Rapira\get_dispatcher();
+
+try {
+    while (true) {
+        $fiber = new Fiber($serve);
+        $fiber->start($d->receive());
+
+        while (!$fiber->isTerminated()) {
+            $fiber->resume();
+        }
+    }
+} catch (ClosedException) {
+    // The dispatcher is drained. No more work will arrive.
+}

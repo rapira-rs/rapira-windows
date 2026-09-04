@@ -1,0 +1,150 @@
+use std::path::PathBuf;
+use std::sync::Mutex;
+
+use super::respond::{Verb, discard_unit, emit_head, seal, send_frame, throw_verb};
+use super::*;
+
+static SENDFILE_ROOT: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+pub fn set_sendfile_root(root: PathBuf) {
+    let canonical = std::fs::canonicalize(&root).unwrap_or_else(|e| {
+        tracing::warn!(
+            target: "rapira",
+            "sendfile root {} cannot be canonicalized ({e}); sendFile() will reject every path",
+            root.display()
+        );
+        root
+    });
+    *SENDFILE_ROOT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(canonical);
+}
+
+fn sendfile_root() -> Option<PathBuf> {
+    SENDFILE_ROOT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+fn open_send_file(
+    path: &[u8],
+    offset: u64,
+    length: Option<u64>,
+) -> Result<(std::fs::File, u64), &'static CStr> {
+    let path = String::from_utf8(path.to_vec()).map_err(|_| c"the path is not valid UTF-8")?;
+    let canonical = std::fs::canonicalize(path).map_err(|_| c"no readable file at the path")?;
+    let Some(root) = sendfile_root() else {
+        return Err(c"no sendfile root is configured");
+    };
+    if !canonical.starts_with(&root) {
+        return Err(c"the path is outside the configured sendfile root");
+    }
+    let file = std::fs::File::open(&canonical).map_err(|_| c"no readable file at the path")?;
+    let meta = file
+        .metadata()
+        .map_err(|_| c"no readable file at the path")?;
+    if !meta.is_file() {
+        return Err(c"not a regular file");
+    }
+    let size = meta.len();
+    if offset > size {
+        return Err(c"the requested slice runs past the end of the file");
+    }
+    let len = match length {
+        Some(l) => {
+            if offset + l > size {
+                return Err(c"the requested slice runs past the end of the file");
+            }
+            l
+        }
+        None => size - offset,
+    };
+    Ok((file, len))
+}
+
+pub(super) fn send_file_core(
+    st: &mut ExchangeState,
+    path: &[u8],
+    offset: u64,
+    length: Option<u64>,
+    eos: bool,
+) -> Verb {
+    if st.host_closed() {
+        discard_unit(st);
+        return Verb::Discarded;
+    }
+    if st.stage == Stage::Finalized {
+        return Verb::Finalized;
+    }
+    let (file, len) = match open_send_file(path, offset, length) {
+        Ok(opened) => opened,
+        Err(msg) => return Verb::FileNotSendable(msg),
+    };
+    if let Some(cl) = st.declared_cl
+        && st.sent_body + len > cl
+    {
+        let fit = cl - st.sent_body;
+        if emit_head(st, Some(cl)).is_ok() && fit > 0 && !st.bodiless {
+            let _ = send_frame(
+                st,
+                Frame::File {
+                    file,
+                    offset,
+                    len: fit,
+                },
+            );
+        }
+        st.sent_body = cl;
+        seal(st, /*truncated=*/ false, Vec::new());
+        return Verb::ContentLengthExceeded;
+    }
+    let finalizing = (eos && st.sent_body == 0).then_some(len);
+    if emit_head(st, finalizing).is_err() {
+        discard_unit(st);
+        return Verb::Discarded;
+    }
+    st.sent_body += len;
+    if len > 0 && !st.bodiless && send_frame(st, Frame::File { file, offset, len }).is_err() {
+        discard_unit(st);
+        return Verb::Discarded;
+    }
+    if eos {
+        seal(st, /*truncated=*/ false, Vec::new());
+    }
+    Verb::Ok
+}
+
+/// # Safety
+/// `job` must come from receive. `path` must point to `path_len` readable bytes that ZPP owns. The engine must be active on this thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rapira_rs_exchange_send_file(
+    job: *mut c_void,
+    path: *const c_char,
+    path_len: usize,
+    offset: i64,
+    length: i64,
+    length_is_null: bool,
+    eos: bool,
+) -> bool {
+    guard(false, || unsafe {
+        if offset < 0 {
+            crate::zend_argument_value_error(2, c"must be greater than or equal to 0".as_ptr());
+            return false;
+        }
+        if !length_is_null && length < 1 {
+            crate::zend_argument_value_error(3, c"must be greater than or equal to 1".as_ptr());
+            return false;
+        }
+        let st = &mut *job.cast::<ExchangeState>();
+        let path = std::slice::from_raw_parts(path.cast::<u8>(), path_len);
+        let length = (!length_is_null).then_some(length as u64);
+        match send_file_core(st, path, offset as u64, length, eos) {
+            Verb::Ok | Verb::Interim => true,
+            v => {
+                throw_verb(v);
+                false
+            }
+        }
+    })
+}

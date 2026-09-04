@@ -1,0 +1,5 @@
+CompileFlags:
+  CompilationDatabase: target/clangd
+  Compiler: clang-cl
+Diagnostics:
+  UnusedIncludes: None

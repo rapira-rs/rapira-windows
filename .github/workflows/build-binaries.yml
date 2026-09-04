@@ -1,0 +1,385 @@
+name: Build binaries
+# Stable and nightly releases call this workflow. Its jobs use the caller's run and concurrency group. Each build uses matching PHP source on a native runner.
+on:
+    workflow_call:
+        inputs:
+            ref:
+                description: "Tag or commit to build"
+                type: string
+                required: true
+            version:
+                description: "Version stem for asset names, such as 0.1.0 or 0.1.0-nightly.abc1234"
+                type: string
+                required: true
+            upload_to:
+                description: "Release tag that gets the assets. Empty keeps them as run artifacts."
+                type: string
+                default: ""
+            rolling:
+                description: "Move upload_to to ref and remove assets from older rolling builds"
+                type: boolean
+                default: false
+    workflow_dispatch:
+        inputs:
+            ref:
+                description: "Tag or commit to build"
+                type: string
+                default: main
+            version:
+                description: "Version stem for asset names, such as 0.1.0"
+                type: string
+                required: true
+            upload_to:
+                description: "Release tag that gets the assets. Empty keeps them as run artifacts."
+                type: string
+                default: ""
+            rolling:
+                description: "Move upload_to to ref and remove assets from older rolling builds"
+                type: boolean
+                default: false
+
+permissions:
+    contents: read
+
+env:
+    CARGO_TERM_COLOR: always
+
+jobs:
+    # Resolve each PHP branch once. This prevents parallel jobs from selecting different patch versions if releases.json changes during the workflow.
+    prepare:
+        runs-on: windows-2022
+        timeout-minutes: 10
+        outputs:
+            php_84: ${{ steps.php84.outputs.spec }}
+            php_85: ${{ steps.php85.outputs.spec }}
+        steps:
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                  ref: ${{ inputs.ref }}
+                  persist-credentials: false
+            - id: php84
+              name: Resolve PHP 8.4
+              shell: pwsh
+              run: |
+                  $spec = pwsh -NoProfile -File .\ci\resolve-php.ps1 -Branch 8.4
+                  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                  "spec=$spec" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+            - id: php85
+              name: Resolve PHP 8.5
+              shell: pwsh
+              run: |
+                  $spec = pwsh -NoProfile -File .\ci\resolve-php.ps1 -Branch 8.5
+                  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                  "spec=$spec" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+    build:
+        needs: prepare
+        name: Windows ${{ matrix.asset_arch }} PHP ${{ matrix.php_branch }}
+        runs-on: ${{ matrix.runner }}
+        # A reusable workflow job needs its own timeout. This limit prevents a stalled build from holding the release queue.
+        timeout-minutes: 120
+        permissions:
+            contents: read
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - php_branch: "8.4"
+                      spec: ${{ needs.prepare.outputs.php_84 }}
+                      runner: windows-2022
+                      target: x86_64-pc-windows-msvc
+                      asset_arch: x86_64
+                      install_group: php-x86_64
+                      vc_arch: x64
+                    - php_branch: "8.5"
+                      spec: ${{ needs.prepare.outputs.php_85 }}
+                      runner: windows-2022
+                      target: x86_64-pc-windows-msvc
+                      asset_arch: x86_64
+                      install_group: php-x86_64
+                      vc_arch: x64
+                    - php_branch: "8.4"
+                      spec: ${{ needs.prepare.outputs.php_84 }}
+                      runner: windows-11-vs2026-arm
+                      target: aarch64-pc-windows-msvc
+                      asset_arch: arm64
+                      install_group: php-arm64
+                      vc_arch: ARM64
+                    - php_branch: "8.5"
+                      spec: ${{ needs.prepare.outputs.php_85 }}
+                      runner: windows-11-vs2026-arm
+                      target: aarch64-pc-windows-msvc
+                      asset_arch: arm64
+                      install_group: php-arm64
+                      vc_arch: ARM64
+        env:
+            STEM: rapira-v${{ inputs.version }}-php${{ matrix.php_branch }}-windows-${{ matrix.asset_arch }}
+            CARGO_TARGET: ${{ matrix.target }}
+            VC_ARCH: ${{ matrix.vc_arch }}
+        steps:
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                  ref: ${{ inputs.ref }}
+                  persist-credentials: false
+
+            - name: Set PHP install path
+              id: php-path
+              shell: pwsh
+              env:
+                  INSTALL_GROUP: ${{ matrix.install_group }}
+                  PHP_FULL_VERSION: ${{ fromJSON(matrix.spec).php_version }}
+              run: |
+                  $path = Join-Path (Join-Path $env:RUNNER_TEMP $env:INSTALL_GROUP) $env:PHP_FULL_VERSION
+                  "PHP_INSTALL_DIR=$path" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+                  "install_dir=$path" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+            # Separate restore and save steps keep a completed PHP build after a later step fails.
+            - name: Restore native PHP
+              id: sourcephpcache
+              uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+              with:
+                  path: ${{ steps.php-path.outputs.install_dir }}
+                  key: ${{ fromJSON(matrix.spec).source_cache_key }}-windows-${{ matrix.asset_arch }}-${{ hashFiles('ci/build-php.ps1', 'ci/php-configure-flags.txt') }}
+
+            - name: Build native PHP
+              shell: pwsh
+              run: |
+                  pwsh -NoProfile -File .\ci\build-php.ps1 `
+                    -PhpVersion '${{ fromJSON(matrix.spec).php_version }}' `
+                    -SourceUrl '${{ fromJSON(matrix.spec).source_url }}' `
+                    -SourceSha256 '${{ fromJSON(matrix.spec).source_sha256 }}' `
+                    -InstallDirectory $env:PHP_INSTALL_DIR
+                  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+            - name: Save native PHP
+              if: steps.sourcephpcache.outputs.cache-hit != 'true'
+              uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+              with:
+                  path: ${{ steps.php-path.outputs.install_dir }}
+                  key: ${{ steps.sourcephpcache.outputs.cache-primary-key }}
+
+            - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+              with:
+                  targets: ${{ matrix.target }}
+            - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+              with:
+                  cache-on-failure: true
+                  key: ${{ matrix.asset_arch }}-php-${{ fromJSON(matrix.spec).php_version }}
+
+            - name: Build rapira
+              run: cargo build --release --locked --bin rapira --target $env:CARGO_TARGET
+
+            - name: Assemble bundle
+              shell: pwsh
+              run: |
+                  $bundle = Join-Path 'dist' $env:STEM
+                  $bundleExt = Join-Path $bundle 'ext'
+                  New-Item -ItemType Directory -Force $bundleExt | Out-Null
+                  Copy-Item (Join-Path "target\$env:CARGO_TARGET\release" 'rapira.exe') $bundle
+                  Copy-Item 'README.md','LICENSE' $bundle
+                  Copy-Item (Join-Path $env:PHP_INSTALL_DIR 'PHP-LICENSE.txt') $bundle
+                  $env:PHP_FULL | Set-Content (Join-Path $bundle 'PHP_VERSION.txt') -Encoding ascii
+
+                  $runtimeDlls = @(Get-ChildItem -LiteralPath $env:PHP_RUNTIME -Filter '*.dll' -File)
+                  if (-not ($runtimeDlls.Name -contains 'php8ts.dll')) {
+                      throw 'The provisioned PHP runtime has no php8ts.dll.'
+                  }
+                  $runtimeDlls | Copy-Item -Destination $bundle
+
+                  $modules = @(& (Join-Path $env:PHP_RUNTIME 'php.exe') -n -m 2>&1 |
+                    ForEach-Object { $_.ToString().Trim() } |
+                    Where-Object { $_ })
+                  if ($LASTEXITCODE -ne 0) {
+                      throw "Could not inspect the provisioned PHP modules.`n$($modules -join "`n")"
+                  }
+                  $extensions = @(Get-Content 'ci\windows-extensions.txt' |
+                    ForEach-Object { $_.Trim() } |
+                    Where-Object { $_ -and $_ -notmatch '^#' })
+                  $expected = @('fileinfo','mbstring')
+                  if (@(Compare-Object $expected $extensions).Count -ne 0 -or $extensions.Count -ne 2) {
+                      throw 'ci\windows-extensions.txt must contain exactly fileinfo and mbstring.'
+                  }
+                  $extensionDlls = @(Get-ChildItem -LiteralPath (Join-Path $env:PHP_RUNTIME 'ext') -Filter 'php_*.dll' -File)
+                  $extensionDlls | Copy-Item -Destination $bundleExt
+
+                  foreach ($extension in $extensions) {
+                      $source = Join-Path $env:PHP_RUNTIME "ext\php_$extension.dll"
+                      if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+                          throw "Missing required PHP extension: '$source'."
+                      }
+                  }
+
+                  $ini = @('extension_dir=ext')
+                  $opcache = Join-Path $env:PHP_RUNTIME 'ext\php_opcache.dll'
+                  if (Test-Path -LiteralPath $opcache -PathType Leaf) {
+                      $ini += 'zend_extension=php_opcache.dll'
+                  } else {
+                      if (-not ($modules -contains 'Zend OPcache')) {
+                          throw 'OPcache is neither built into PHP nor available as php_opcache.dll.'
+                      }
+                  }
+                  $ini += @($extensions | ForEach-Object { "extension=php_$_.dll" })
+                  $ini | Set-Content (Join-Path $bundle 'php.ini') -Encoding ascii
+                  Add-Content (Join-Path $bundle 'README.md') `
+                    "`nRuntime requirement: Microsoft Visual C++ Redistributable for Visual Studio 2015-2022 $env:VC_ARCH." `
+                    -Encoding utf8
+
+            # The server PATH contains only Windows system directories. This step checks php8ts.dll and its bundled dependencies. Windows system DLLs and the required VC++ runtime remain external.
+            - name: PATH-stripped HTTP smoke test
+              shell: pwsh
+              run: |
+                  $bundle = (Resolve-Path (Join-Path 'dist' $env:STEM)).ProviderPath
+                  $smoke = Join-Path $env:RUNNER_TEMP "rapira-smoke-${{ matrix.php_branch }}"
+                  New-Item -ItemType Directory -Path $smoke -Force | Out-Null
+                  @'
+                  <?php
+                  $handler = static function (): void {
+                      header('content-type: text/plain');
+                      echo 'rapira-windows-bundle-ok';
+                  };
+                  while (\Rapira\handle_request($handler)) {
+                  }
+                  '@ | Set-Content (Join-Path $smoke 'smoke-worker.php') -Encoding ascii
+
+                  $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+                  $listener.Start()
+                  $port = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+                  $listener.Stop()
+                  @"
+                  [http]
+                  listen = "127.0.0.1:$port"
+                  [pool]
+                  processes = 1
+                  mode = "worker"
+                  entrypoint = "smoke-worker.php"
+                  "@ | Set-Content (Join-Path $smoke 'rapira.toml') -Encoding ascii
+
+                  $env:PHPRC = Join-Path $bundle 'php.ini'
+                  $env:PHP_INI_SCAN_DIR = ''
+                  $env:PATH = "$env:SystemRoot;$env:SystemRoot\System32"
+                  $stdout = Join-Path $smoke 'stdout.log'
+                  $stderr = Join-Path $smoke 'stderr.log'
+                  $process = Start-Process -FilePath (Join-Path $bundle 'rapira.exe') `
+                    -ArgumentList @('serve','--config',(Join-Path $smoke 'rapira.toml')) `
+                    -WorkingDirectory $bundle -RedirectStandardOutput $stdout `
+                    -RedirectStandardError $stderr -WindowStyle Hidden -PassThru
+                  try {
+                      $deadline = [DateTime]::UtcNow.AddSeconds(30)
+                      $response = $null
+                      while ([DateTime]::UtcNow -lt $deadline) {
+                          if ($process.HasExited) { break }
+                          try {
+                              $response = Invoke-WebRequest "http://127.0.0.1:$port/" -TimeoutSec 2
+                              break
+                          } catch {
+                              Start-Sleep -Milliseconds 100
+                          }
+                      }
+                      if ($process.HasExited) {
+                          throw "rapira exited before the smoke request: $($process.ExitCode)`n$(Get-Content $stderr -Raw -ErrorAction SilentlyContinue)"
+                      }
+                      if ($null -eq $response -or $response.StatusCode -ne 200 -or
+                          $response.Content.Trim() -ne 'rapira-windows-bundle-ok') {
+                          throw "The bundled server did not return the expected smoke response.`n$(Get-Content $stderr -Raw -ErrorAction SilentlyContinue)"
+                      }
+                  } finally {
+                      if (-not $process.HasExited) {
+                          Stop-Process -Id $process.Id -Force
+                          $process.WaitForExit()
+                      }
+                  }
+
+            - name: Archive
+              shell: pwsh
+              run: |
+                  $bundle = Join-Path 'dist' $env:STEM
+                  Compress-Archive -LiteralPath $bundle -DestinationPath "dist\$env:STEM.zip"
+
+            - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+              with:
+                  name: art-windows-${{ matrix.asset_arch }}-php${{ matrix.php_branch }}
+                  path: dist/*.zip
+                  if-no-files-found: error
+                  retention-days: 7
+
+    collect:
+        needs: build
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        permissions:
+            contents: write
+        env:
+            VERSION: ${{ inputs.version }}
+            TAG: ${{ inputs.upload_to }}
+            GH_TOKEN: ${{ github.token }}
+            GH_REPO: ${{ github.repository }}
+        steps:
+            # A called workflow shares the caller's artifact namespace. This pattern selects the binary build artifacts.
+            - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+              with:
+                  path: incoming
+                  pattern: "art-*"
+                  merge-multiple: true
+
+            - name: Checksums
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  shopt -s nullglob
+                  mkdir -p dist
+                  cp incoming/*.zip dist/
+                  for arch in x86_64 arm64; do
+                      files=(dist/rapira-v"${VERSION}"-php*-windows-"${arch}".zip)
+                      if [ "${#files[@]}" -ne 2 ]; then
+                          echo "::error::expected two Windows ${arch} archives, found ${#files[@]}"
+                          exit 1
+                      fi
+                      ( cd dist && sha256sum rapira-v"${VERSION}"-php*-windows-"${arch}".zip > "rapira-v${VERSION}-windows-${arch}-SHA256SUMS.txt" )
+                  done
+
+            - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+              if: inputs.upload_to == ''
+              with:
+                  name: dist
+                  path: dist/*
+                  if-no-files-found: error
+                  retention-days: 7
+
+            - name: Prepare the rolling release
+              if: inputs.rolling
+              shell: bash
+              env:
+                  SHA: ${{ inputs.ref }}
+              run: |
+                  set -euo pipefail
+                  gh release view "$TAG" >/dev/null \
+                    || gh release create "$TAG" --prerelease --target "$SHA" --title "$TAG" --notes "Rolling Windows build."
+
+            - name: Upload assets
+              if: inputs.upload_to != ''
+              shell: bash
+              run: gh release upload "$TAG" dist/* --clobber
+
+            # Move the tag after asset upload so an existing tag does not point to incomplete assets.
+            - name: Move the rolling tag and remove old assets
+              if: inputs.rolling
+              shell: bash
+              env:
+                  SHA: ${{ inputs.ref }}
+              run: |
+                  set -euo pipefail
+                  # gh release edit --target does not move an existing tag. Update the Git reference directly.
+                  # https://docs.github.com/en/rest/git/refs#update-a-reference
+                  if ! gh api -X PATCH "repos/$GH_REPO/git/refs/tags/$TAG" -f sha="$SHA" -F force=true >/dev/null; then
+                      gh api -X POST "repos/$GH_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$SHA" >/dev/null
+                  fi
+                  gh release edit "$TAG" --prerelease --notes "Rolling Windows build. Version $VERSION. Commit $SHA."
+                  KEEP=$(tr -cd '[:alnum:]' <<< "$VERSION")
+                  ASSETS=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+                  # Confirm that the filter keeps the assets from this run before it removes older assets.
+                  tr -cd '[:alnum:]\n' <<< "$ASSETS" | grep -qF "$KEEP" \
+                    || { echo "::error::no asset matches $KEEP"; exit 1; }
+                  while read -r name; do
+                      case "$(tr -cd '[:alnum:]' <<< "$name")" in *"$KEEP"*) continue ;; esac
+                      gh release delete-asset "$TAG" "$name" --yes
+                  done <<< "$ASSETS"

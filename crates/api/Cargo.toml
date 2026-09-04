@@ -1,0 +1,22 @@
+[package]
+name = "extension_api"
+version = "0.8.0"
+edition.workspace = true
+publish = false
+license = "MIT"
+description = "Native rapira extension contract - the API every extension implements to drive PHP"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+bytes = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+# Bind listeners synchronously before PHP starts.
+socket2 = "0.6"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["rt", "macros"] }

@@ -1,0 +1,22 @@
+# Put one Windows configure option on each line. ci/build-php.ps1 replaces {PHP_BUILD} with an empty native dependency directory.
+--disable-all
+--enable-zts
+--enable-cli
+--disable-cgi
+--disable-phpdbg
+--without-iconv
+--without-libxml
+--enable-session
+--enable-filter
+--enable-ctype
+--enable-tokenizer
+--enable-fileinfo=shared
+--enable-mbstring=shared
+--disable-mbregex
+--enable-sockets
+--enable-calendar
+--enable-exif
+--enable-ftp
+--enable-opcache
+--disable-opcache-jit
+--with-php-build={PHP_BUILD}

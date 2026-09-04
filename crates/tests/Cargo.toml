@@ -1,0 +1,35 @@
+[package]
+name = "tests"
+version = "0.8.0"
+edition = "2024"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = "1"
+php_sys = { path = "../php_sys" }
+tokio = { version = "1", features = ["sync", "time"] }
+tracing = "0.1"
+# The capture layer uses init_log_capture. tracing-log normalizes bridged records.
+tracing-subscriber = "0.3"
+tracing-log = "0.2"
+
+[dev-dependencies]
+extension_api = { workspace = true }
+rapira_runtime = { path = "../runtime" }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+# The end-to-end test harness controls the Rapira process.
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading"] }
+# The end-to-end tests check the log format with serde_json.
+serde_json = "1"
+
+# The end-to-end suite starts the Rapira binary and sends concurrent requests. The e2e feature excludes this suite from `cargo test --workspace`. Build Rapira first, then run `cargo test -p tests --test e2e --features e2e`.
+[features]
+e2e = []
+
+[[test]]
+name = "e2e"
+path = "tests/e2e/main.rs"
+required-features = ["e2e"]

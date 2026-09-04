@@ -2,48 +2,253 @@ name: CI
 on:
   push: { branches: [main] }
   pull_request:
+
 permissions:
   contents: read
 
+env:
+  RUST_BACKTRACE: "1"
+
 jobs:
+  prepare:
+    runs-on: windows-2022
+    outputs:
+      php84_version: ${{ steps.php84.outputs.php_version }}
+      php84_devel_url: ${{ steps.php84.outputs.devel_url }}
+      php84_devel_sha256: ${{ steps.php84.outputs.devel_sha256 }}
+      php84_runtime_url: ${{ steps.php84.outputs.runtime_url }}
+      php84_runtime_sha256: ${{ steps.php84.outputs.runtime_sha256 }}
+      php84_cache_key: ${{ steps.php84.outputs.cache_key }}
+      php84_source_url: ${{ steps.php84.outputs.source_url }}
+      php84_source_sha256: ${{ steps.php84.outputs.source_sha256 }}
+      php84_source_cache_key: ${{ steps.php84.outputs.source_cache_key }}
+      php85_version: ${{ steps.php85.outputs.php_version }}
+      php85_devel_url: ${{ steps.php85.outputs.devel_url }}
+      php85_devel_sha256: ${{ steps.php85.outputs.devel_sha256 }}
+      php85_runtime_url: ${{ steps.php85.outputs.runtime_url }}
+      php85_runtime_sha256: ${{ steps.php85.outputs.runtime_sha256 }}
+      php85_cache_key: ${{ steps.php85.outputs.cache_key }}
+      php85_source_url: ${{ steps.php85.outputs.source_url }}
+      php85_source_sha256: ${{ steps.php85.outputs.source_sha256 }}
+      php85_source_cache_key: ${{ steps.php85.outputs.source_cache_key }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - name: Resolve PHP 8.4
+        id: php84
+        shell: pwsh
+        run: ./ci/resolve-php.ps1 -Branch 8.4
+      - name: Resolve PHP 8.5
+        id: php85
+        shell: pwsh
+        run: ./ci/resolve-php.ps1 -Branch 8.5
+
   test:
-    runs-on: windows-latest
+    needs: prepare
+    runs-on: windows-2022
+    env:
+      CARGO_TARGET: x86_64-pc-windows-msvc
     strategy:
       fail-fast: false
       matrix:
-        php: ["8.4", "8.5"]
+        include:
+          - branch: "8.4"
+            version: ${{ needs.prepare.outputs.php84_version }}
+            devel_url: ${{ needs.prepare.outputs.php84_devel_url }}
+            devel_sha256: ${{ needs.prepare.outputs.php84_devel_sha256 }}
+            runtime_url: ${{ needs.prepare.outputs.php84_runtime_url }}
+            runtime_sha256: ${{ needs.prepare.outputs.php84_runtime_sha256 }}
+            cache_key: ${{ needs.prepare.outputs.php84_cache_key }}
+          - branch: "8.5"
+            version: ${{ needs.prepare.outputs.php85_version }}
+            devel_url: ${{ needs.prepare.outputs.php85_devel_url }}
+            devel_sha256: ${{ needs.prepare.outputs.php85_devel_sha256 }}
+            runtime_url: ${{ needs.prepare.outputs.php85_runtime_url }}
+            runtime_sha256: ${{ needs.prepare.outputs.php85_runtime_sha256 }}
+            cache_key: ${{ needs.prepare.outputs.php85_cache_key }}
+    name: x64 PHP ${{ matrix.branch }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
 
-      # Official ZTS devel pack (headers + php8ts.lib) + matching binary zip
-      # (php8ts.dll + dependency DLLs). Pick the ts-*-x64 variant of the branch.
-      - name: Provision PHP (ZTS devel pack + runtime)
+      - name: Restore PHP archives
+        id: php-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/php-archives/${{ matrix.version }}
+          key: ${{ matrix.cache_key }}
+
+      - name: Provision PHP
         shell: pwsh
         run: |
-          $releases = Invoke-RestMethod -Uri 'https://downloads.php.net/~windows/releases/releases.json'
-          $branch   = $releases.'${{ matrix.php }}'
-          $variant  = $branch.PSObject.Properties.Name | Where-Object { $_ -like 'ts-*-x64' } | Select-Object -First 1
-          if (-not $variant) { throw "no ts x64 build for PHP ${{ matrix.php }}" }
-          Invoke-WebRequest "https://downloads.php.net/~windows/releases/$($branch.$variant.devel_pack.path)" -OutFile "$env:RUNNER_TEMP\devel.zip"
-          Invoke-WebRequest "https://downloads.php.net/~windows/releases/$($branch.$variant.zip.path)"        -OutFile "$env:RUNNER_TEMP\bin.zip"
-          Expand-Archive "$env:RUNNER_TEMP\devel.zip" -DestinationPath "$env:RUNNER_TEMP\devel"
-          Expand-Archive "$env:RUNNER_TEMP\bin.zip"   -DestinationPath "$env:RUNNER_TEMP\phpbin"
-          $devel = (Get-ChildItem "$env:RUNNER_TEMP\devel" -Directory | Select-Object -First 1).FullName
-          "PHP_DEVEL_DIR=$devel"                    | Out-File $env:GITHUB_ENV  -Append -Encoding utf8
-          "RUSTFLAGS=-L native=$devel\lib"          | Out-File $env:GITHUB_ENV  -Append -Encoding utf8
-          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File $env:GITHUB_ENV  -Append -Encoding utf8
-          # php8ts.dll + its dependency DLLs must resolve when the smoke test spawns rapira.exe.
-          "$env:RUNNER_TEMP\phpbin" | Out-File $env:GITHUB_PATH -Append -Encoding utf8
+          ./ci/provision-php.ps1 `
+            -PhpVersion '${{ matrix.version }}' `
+            -DevelUrl '${{ matrix.devel_url }}' `
+            -DevelSha256 '${{ matrix.devel_sha256 }}' `
+            -RuntimeUrl '${{ matrix.runtime_url }}' `
+            -RuntimeSha256 '${{ matrix.runtime_sha256 }}'
+
+      - name: Save PHP archives
+        if: steps.php-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/php-archives/${{ matrix.version }}
+          key: ${{ matrix.cache_key }}
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: clippy, rustfmt
+          targets: x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-on-failure: true
+          key: php-${{ matrix.version }}
 
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo build --workspace
-      - run: cargo test --workspace
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy workspace
+        run: cargo clippy --locked --workspace --all-targets --target $env:CARGO_TARGET -- -D warnings
+      - name: Clippy e2e
+        run: cargo clippy --locked -p tests --features e2e --tests --target $env:CARGO_TARGET -- -D warnings
+      - name: Build workspace
+        run: cargo build --locked --workspace --target $env:CARGO_TARGET
+      - name: Test workspace
+        run: cargo test --locked --workspace --target $env:CARGO_TARGET
+      - name: Build server for e2e
+        run: cargo build --locked --bin rapira --target $env:CARGO_TARGET
+      - name: Test e2e
+        run: cargo test --locked -p tests --test e2e --features e2e --target $env:CARGO_TARGET -- --test-threads=1
+
+  test-arm64:
+    needs: prepare
+    runs-on: windows-11-vs2026-arm
+    timeout-minutes: 120
+    env:
+      CARGO_TARGET: aarch64-pc-windows-msvc
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - branch: "8.4"
+            version: ${{ needs.prepare.outputs.php84_version }}
+            source_url: ${{ needs.prepare.outputs.php84_source_url }}
+            source_sha256: ${{ needs.prepare.outputs.php84_source_sha256 }}
+            source_cache_key: ${{ needs.prepare.outputs.php84_source_cache_key }}
+          - branch: "8.5"
+            version: ${{ needs.prepare.outputs.php85_version }}
+            source_url: ${{ needs.prepare.outputs.php85_source_url }}
+            source_sha256: ${{ needs.prepare.outputs.php85_source_sha256 }}
+            source_cache_key: ${{ needs.prepare.outputs.php85_source_cache_key }}
+    name: ARM64 PHP ${{ matrix.branch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+
+      - name: Set PHP install path
+        id: php-path
+        shell: pwsh
+        env:
+          PHP_FULL_VERSION: ${{ matrix.version }}
+        run: |
+          $path = Join-Path (Join-Path $env:RUNNER_TEMP 'php-arm64') $env:PHP_FULL_VERSION
+          "PHP_INSTALL_DIR=$path" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "install_dir=$path" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Restore native PHP
+        id: php-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.php-path.outputs.install_dir }}
+          key: ${{ matrix.source_cache_key }}-windows-arm64-${{ hashFiles('ci/build-php.ps1', 'ci/php-configure-flags.txt') }}
+
+      - name: Build native PHP
+        shell: pwsh
+        run: |
+          ./ci/build-php.ps1 `
+            -PhpVersion '${{ matrix.version }}' `
+            -SourceUrl '${{ matrix.source_url }}' `
+            -SourceSha256 '${{ matrix.source_sha256 }}' `
+            -InstallDirectory $env:PHP_INSTALL_DIR
+
+      - name: Save native PHP
+        if: steps.php-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.php-path.outputs.install_dir }}
+          key: ${{ steps.php-cache.outputs.cache-primary-key }}
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: clippy, rustfmt
+          targets: aarch64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-on-failure: true
+          key: arm64-php-${{ matrix.version }}
+
+      - name: Clippy workspace
+        run: cargo clippy --locked --workspace --all-targets --target $env:CARGO_TARGET -- -D warnings
+      - name: Clippy e2e
+        run: cargo clippy --locked -p tests --features e2e --tests --target $env:CARGO_TARGET -- -D warnings
+      - name: Build workspace
+        run: cargo build --locked --workspace --target $env:CARGO_TARGET
+      - name: Test workspace
+        run: cargo test --locked --workspace --target $env:CARGO_TARGET
+      - name: Build server for e2e
+        run: cargo build --locked --bin rapira --target $env:CARGO_TARGET
+      - name: Test e2e
+        run: cargo test --locked -p tests --test e2e --features e2e --target $env:CARGO_TARGET -- --test-threads=1
+
+  coverage:
+    needs: prepare
+    runs-on: windows-2022
+    env:
+      CARGO_TARGET: x86_64-pc-windows-msvc
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+
+      - name: Restore PHP archives
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/php-archives/${{ needs.prepare.outputs.php85_version }}
+          key: ${{ needs.prepare.outputs.php85_cache_key }}
+
+      - name: Provision PHP 8.5
+        shell: pwsh
+        run: |
+          ./ci/provision-php.ps1 `
+            -PhpVersion '${{ needs.prepare.outputs.php85_version }}' `
+            -DevelUrl '${{ needs.prepare.outputs.php85_devel_url }}' `
+            -DevelSha256 '${{ needs.prepare.outputs.php85_devel_sha256 }}' `
+            -RuntimeUrl '${{ needs.prepare.outputs.php85_runtime_url }}' `
+            -RuntimeSha256 '${{ needs.prepare.outputs.php85_runtime_sha256 }}'
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: llvm-tools-preview
+          targets: x86_64-pc-windows-msvc
+      - uses: taiki-e/install-action@b1d53d4d726d74b5a950a5b3798a3c6ede4e0f64 # cargo-llvm-cov
+        with:
+          tool: cargo-llvm-cov
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-on-failure: true
+          key: coverage-php-${{ needs.prepare.outputs.php85_version }}
+
+      - name: Generate coverage
+        shell: pwsh
+        run: >-
+          cargo llvm-cov --locked --workspace --target $env:CARGO_TARGET
+          --lcov --output-path lcov.info
+          --ignore-filename-regex '(crates[\\/]tests[\\/]|bindings\.rs$|[\\/]src[\\/]main\.rs$)'
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7
+        with:
+          files: lcov.info
+          use_oidc: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          fail_ci_if_error: true
