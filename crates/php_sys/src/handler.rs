@@ -1,4 +1,8 @@
-use anyhow::anyhow;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
+
+use crossbeam_channel::{Sender, TrySendError};
 use tokio::sync::mpsc;
 
 use crate::{
@@ -6,57 +10,126 @@ use crate::{
     types::{Context, Frame, Job, Request},
 };
 
-// `Context::finish` seals the response into exactly one frame, so the channel
-// never holds more than one message.
-const FRAME_CAP: usize = 1;
+// A capacity of four accepts a buffered Head, Chunk, and End group plus one interim head without blocking the PHP thread.
+const FRAME_CAP: usize = 4;
 
-/// A cheaply-cloneable handle for submitting jobs to a running [`Rapira`] pool.
-///
-/// # Shutdown contract
-/// Every clone holds a copy of the intake `Sender`. Dropping `Rapira` joins all
-/// worker threads after dropping its own `Sender`; the job channel only closes
-/// once every `RapiraHandle` clone has also been dropped. A clone kept alive past
-/// its `Rapira` leaves workers parked on the open channel — `Drop for Rapira` then
-/// gives up after a bounded grace and skips the PHP teardown. Drop all handles
-/// first for a clean shutdown.
+const INTAKE_WAIT: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandleError {
+    Saturated,
+    Stopped,
+}
+
+impl std::fmt::Display for HandleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Saturated => write!(f, "worker pool saturated for {INTAKE_WAIT:?}"),
+            Self::Stopped => write!(f, "worker pool stopped"),
+        }
+    }
+}
+
+impl std::error::Error for HandleError {}
+
 #[derive(Clone)]
 pub struct RapiraHandle {
-    intake: mpsc::Sender<Job>,
+    intake: Sender<Job>,
+    pending: Arc<AtomicUsize>,
+    superglobals: bool,
+    dispatcher: bool,
 }
 
 impl Rapira {
-    pub fn handle(&self) -> anyhow::Result<RapiraHandle> {
-        let intake: &mpsc::Sender<Job> = self
-            .intake
-            .as_ref()
-            .ok_or_else(|| anyhow!("Rapira intake is None"))?;
-        Ok(RapiraHandle {
-            intake: intake.clone(),
-        })
+    pub fn handle(&self) -> RapiraHandle {
+        let intake = self.intake.as_ref().expect("intake lives until Drop");
+        RapiraHandle {
+            intake: intake.tx.clone(),
+            pending: intake.pending.clone(),
+            superglobals: self.superglobals,
+            dispatcher: self.dispatcher,
+        }
+    }
+}
+
+fn now_unix_f64() -> f64 {
+    std::time::UNIX_EPOCH
+        .elapsed()
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+struct PendingGuard(Option<Arc<AtomicUsize>>);
+
+impl PendingGuard {
+    fn arm(pending: &Arc<AtomicUsize>) -> Self {
+        pending.fetch_add(1, Ordering::Relaxed);
+        Self(Some(pending.clone()))
+    }
+    fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        if let Some(pending) = self.0.take() {
+            pending.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 }
 
 impl RapiraHandle {
-    /// Submit `req`; the sealed response arrives as a single [`Frame`] (a
-    /// channel that closes without one means the worker died).
-    pub async fn handle(&self, req: Request) -> anyhow::Result<mpsc::Receiver<Frame>> {
-        let (tx, rx) = mpsc::channel::<Frame>(FRAME_CAP);
-        self.intake
-            .send(Job {
-                ctx: Context::new(req, tx),
-            })
-            .await
-            .map_err(|_| anyhow!("worker pool stopped"))?;
-        Ok(rx)
+    pub fn dispatcher(&self) -> bool {
+        self.dispatcher
     }
 
-    pub fn handle_blocking(&self, req: Request) -> anyhow::Result<mpsc::Receiver<Frame>> {
+    // Increment pending before the send. The consumer decrements it as soon as the consumer resumes, so the opposite order could wrap the counter below zero.
+    pub async fn handle(&self, mut req: Request) -> Result<mpsc::Receiver<Frame>, HandleError> {
+        req.received_at.get_or_insert_with(now_unix_f64);
         let (tx, rx) = mpsc::channel::<Frame>(FRAME_CAP);
-        self.intake
-            .blocking_send(Job {
-                ctx: Context::new(req, tx),
+        let mut job = Job {
+            ctx: Context::new(req, tx, self.superglobals),
+        };
+        let pending = PendingGuard::arm(&self.pending);
+        let deadline = Instant::now() + INTAKE_WAIT;
+        loop {
+            match self.intake.try_send(job) {
+                Ok(()) => {
+                    pending.disarm();
+                    return Ok(rx);
+                }
+                Err(TrySendError::Full(j)) => {
+                    if Instant::now() > deadline {
+                        tracing::warn!(
+                            target: "rapira",
+                            "intake full for {INTAKE_WAIT:?} ({} pending); shedding the request",
+                            self.pending.load(Ordering::Relaxed)
+                        );
+                        return Err(HandleError::Saturated);
+                    }
+                    job = j;
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                Err(TrySendError::Disconnected(_)) => return Err(HandleError::Stopped),
+            }
+        }
+    }
+
+    pub fn handle_blocking(&self, mut req: Request) -> Result<mpsc::Receiver<Frame>, HandleError> {
+        req.received_at.get_or_insert_with(now_unix_f64);
+        let (tx, rx) = mpsc::channel::<Frame>(FRAME_CAP);
+        let pending = PendingGuard::arm(&self.pending);
+        if self
+            .intake
+            .send(Job {
+                ctx: Context::new(req, tx, self.superglobals),
             })
-            .map_err(|_| anyhow!("worker pool stopped"))?;
+            .is_err()
+        {
+            return Err(HandleError::Stopped);
+        }
+        pending.disarm();
         Ok(rx)
     }
 }

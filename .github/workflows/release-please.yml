@@ -1,0 +1,74 @@
+name: Release
+on:
+    push:
+        branches: [main]
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+# Run one release workflow at a time. GitHub keeps only the newest pending run. Release Please scans all commits on the next run.
+# https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency
+concurrency:
+    group: release-please
+    cancel-in-progress: false
+
+jobs:
+    release-please:
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        permissions:
+            contents: write
+            pull-requests: write
+            # Release Please uses the issues permission for autorelease labels.
+            # https://github.com/googleapis/release-please-action#workflow-permissions
+            issues: write
+        outputs:
+            release_created: ${{ steps.rp.outputs.release_created }}
+            tag_name: ${{ steps.rp.outputs.tag_name }}
+            version: ${{ steps.rp.outputs.version }}
+        steps:
+            # Release Please reads the config file when the action has no release-type input.
+            # https://github.com/googleapis/release-please-action/blob/v5.0.0/src/index.ts
+            - id: rp
+              uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+              with:
+                  config-file: release-please-config.json
+                  manifest-file: .release-please-manifest.json
+
+    # Tags that GITHUB_TOKEN creates do not start another workflow. This job calls the binary workflow directly.
+    # https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow#triggering-a-workflow-from-a-workflow
+    # If Release Please creates the tag and then fails, dispatch build-binaries for that tag. Publish the draft after all assets upload.
+    binaries:
+        needs: release-please
+        if: needs.release-please.outputs.release_created == 'true'
+        permissions:
+            contents: write
+        uses: ./.github/workflows/build-binaries.yml
+        with:
+            ref: ${{ needs.release-please.outputs.tag_name }}
+            version: ${{ needs.release-please.outputs.version }}
+            upload_to: ${{ needs.release-please.outputs.tag_name }}
+
+    # Keep the release as a draft until all architecture and PHP bundle variants are available.
+    publish:
+        needs: [release-please, binaries]
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        permissions:
+            contents: write
+        env:
+            GH_TOKEN: ${{ github.token }}
+            GH_REPO: ${{ github.repository }}
+            TAG: ${{ needs.release-please.outputs.tag_name }}
+            V: ${{ needs.release-please.outputs.version }}
+        steps:
+            # Mark a prerelease version as a prerelease. Do not make it the latest release.
+            - name: Publish the release
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  case "$V" in
+                    *-*) gh release edit "$TAG" --draft=false --prerelease ;;
+                    *) gh release edit "$TAG" --draft=false --latest ;;
+                  esac

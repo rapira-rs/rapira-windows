@@ -1,0 +1,59 @@
+name: Nightly
+on:
+    workflow_run:
+        workflows: [CI]
+        types: [completed]
+        branches: [main]
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+# GitHub evaluates concurrency before job conditions. Give an ineligible run a unique group so it cannot cancel an active publisher.
+# https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency
+concurrency:
+    group: nightly-${{ ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')) && 'publish' || github.run_id }}
+    cancel-in-progress: true
+
+jobs:
+    guard:
+        # A fork pull request can have a branch named main. Require the completed CI run to come from a push.
+        if: (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        outputs:
+            version: ${{ steps.v.outputs.version }}
+            sha: ${{ steps.v.outputs.sha }}
+            release_commit: ${{ steps.v.outputs.release_commit }}
+        steps:
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                  ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+                  persist-credentials: false
+            - id: v
+              shell: bash
+              env:
+                  SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                  set -euo pipefail
+                  BASE=$(jq -er '.["."]' .release-please-manifest.json)
+                  echo "version=${BASE}-nightly.${SHA:0:7}" >> "$GITHUB_OUTPUT"
+                  echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+                  TAGGED=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${BASE}" --jq '.object.sha' 2>/dev/null || true)
+                  if [ "$TAGGED" = "$SHA" ]; then
+                      echo "release_commit=true" >> "$GITHUB_OUTPUT"
+                  fi
+
+    # Release Please builds a commit that already has its release tag. Skip the duplicate nightly binary build.
+    binaries:
+        needs: guard
+        if: needs.guard.outputs.release_commit != 'true'
+        permissions:
+            contents: write
+        uses: ./.github/workflows/build-binaries.yml
+        with:
+            ref: ${{ needs.guard.outputs.sha }}
+            version: ${{ needs.guard.outputs.version }}
+            upload_to: nightly
+            rolling: true

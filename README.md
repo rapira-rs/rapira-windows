@@ -1,109 +1,130 @@
-# rapira-windows
+# Rapira for Windows
 
-A deliberately minimal, single-process PHP application server for Windows. It embeds
-PHP (ZTS) via the embed SAPI and runs one pipeline:
+[![CI](https://github.com/rapira-rs/rapira-windows/actions/workflows/ci.yml/badge.svg)](https://github.com/rapira-rs/rapira-windows/actions/workflows/ci.yml) [![codecov](https://codecov.io/gh/rapira-rs/rapira-windows/graph/badge.svg)](https://app.codecov.io/gh/rapira-rs/rapira-windows) [![Release](https://img.shields.io/github/v/release/rapira-rs/rapira-windows)](https://github.com/rapira-rs/rapira-windows/releases) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-```
-pingora (HTTP/TCP) -> tokio mpsc channel -> PHP worker threads (ZTS) -> response
-```
+Rapira is a PHP application server written in Rust. It embeds ZTS PHP through the embed SAPI and serves HTTP through its bundled Hyper front. There is no FastCGI connection between the server and PHP.
 
-Worker mode only. One process, a pool of resident PHP worker threads, no master/fork,
-no auto-scaling. The produced binary is `rapira.exe`.
+Rapira for Windows runs one server process with a static pool of PHP interpreter threads. It supports classic, worker, and dispatcher modes. The produced binary is `rapira.exe`.
 
 ## Requirements
 
-- Windows 10/11 x64 (`x86_64-pc-windows-msvc`).
-- **Visual Studio 2022 Build Tools** — the MSVC toolchain + Windows SDK (the linker,
-  and the C compiler that builds `wrapper.c`/`module.c` against the PHP headers).
-- **LLVM** for `libclang` (bindgen). Install to `C:\Program Files\LLVM`.
-- **Rust** stable.
-- A **ZTS (thread-safe) PHP 8.4 or 8.5 build** — both the *devel pack* (headers +
-  `php8ts.lib`) and the matching *binary zip* (`php8ts.dll`). Get them from
-  <https://windows.php.net/download/> (pick the **Thread Safe** x64 build).
+- Windows 10, Windows 11, or Windows Server on x64 (`x86_64-pc-windows-msvc`), or Windows 11 on ARM64 (`aarch64-pc-windows-msvc`)
+- The [latest supported Microsoft Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist) for the target architecture
 
-## PHP setup
+Release assets use the name `rapira-v<VERSION>-php<8.4|8.5>-windows-<x86_64|arm64>.zip`. Each architecture also has a `rapira-v<VERSION>-windows-<x86_64|arm64>-SHA256SUMS.txt` file. Each archive contains `rapira.exe`, a matching project-built ZTS PHP runtime, its extension DLLs, `php.ini`, `PHP_VERSION.txt`, the README, `LICENSE`, and `PHP-LICENSE.txt`. Download the archive for your PHP minor and architecture from [GitHub Releases](https://github.com/rapira-rs/rapira-windows/releases), extract it, and run `rapira.exe` from that directory.
 
-Extract the devel pack and the binary zip, then point the build at them (PowerShell):
+The bundled PHP profile provides fileinfo and mbstring as extension DLLs and includes OPcache with JIT disabled. It omits OpenSSL, cURL, SQLite and PDO SQLite, XML and libxml, and iconv. FTP has no TLS support, and mbregex is disabled. Applications can add extension DLLs built for the exact bundled PHP version, architecture, and toolchain.
 
-```powershell
-$env:PHP_DEVEL_DIR = "C:\php\php-8.4-devel-vs17-x64"   # devel pack root (has \lib\php8ts.lib)
-$env:RUSTFLAGS     = "-L native=$env:PHP_DEVEL_DIR\lib" # linker finds php8ts.lib
-$env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"        # bindgen finds libclang
-$env:PATH          = "C:\php\php-8.4-ts-x64;$env:PATH"  # runtime finds php8ts.dll
-```
+Source builds require native MSVC tools with a Windows SDK, native LLVM with `libclang.dll`, and Rust. Release jobs build PHP 8.4 and 8.5 ZTS from official source with `ci/build-php.ps1` on native x64 and ARM64 runners. Test CI uses verified official PHP packages on x64 and builds PHP from source on ARM64.
 
-## Build
+Local builds must use tools and PHP files for the host architecture. Generate clangd commands with `.\dev.ps1 -Devel <native-devel-directory> -Task clangd`; `.clangd` reads them from the ignored `target/clangd` directory. See [CONTRIBUTING.md](CONTRIBUTING.md) for commands.
 
-```powershell
-cargo build --release --bin rapira
-# -> target\release\rapira.exe
-```
-
-## Run
-
-`rapira` runs a resident worker script. Each request runs your handler with the
-superglobals populated; state created outside the handler (autoloader, container,
-connections) survives across requests.
+## A taste
 
 ```php
 <?php
-// app\worker.php
+// worker.php is booted once in each interpreter thread.
 require __DIR__ . '/vendor/autoload.php';
 
-$app = new App(); // booted once, reused for every request
+$app = new App();
 
-$handler = static function (): void {
-    header('Content-Type: text/plain');
-    http_response_code(200);
+$handler = static function () use ($app): void {
     echo $app->handle($_SERVER['REQUEST_URI']);
 };
 
-while (rapira_handle_request($handler)) {
-    gc_collect_cycles();
+while (\Rapira\handle_request($handler)) {
 }
 ```
 
 ```powershell
-.\target\release\rapira.exe serve app\worker.php --threads 8
-curl http://127.0.0.1:8000/
+.\rapira.exe serve --mode worker --processes 8 worker.php
+curl.exe http://127.0.0.1:8000/
 ```
 
-`rapira_finish_request(): bool` flushes the response early; the handler can keep working
-after it. Bare `rapira` prints help. `Ctrl+C`/`Ctrl+Break` drains in-flight requests and
-exits; a second one forces exit.
+Front controller applications use classic mode:
 
-### Options
+```powershell
+.\rapira.exe serve --mode classic public\index.php
+```
+
+Dispatcher mode is the default. It gives a resident script direct access to request and response objects. See [examples](examples/README.md) for all three modes.
+
+## Command line
+
+```text
+rapira serve [OPTIONS] [SCRIPT]
+```
 
 | Option | Default | Description |
-|---|---|---|
+| --- | --- | --- |
 | `--config <PATH>` | none | Load settings from a `rapira.toml`. |
-| `--listen <ADDR>` | `127.0.0.1:8000` | `host:port` or `:port` (all interfaces). A bare port is rejected. |
-| `--threads <N>` | CPU count | PHP worker threads (ZTS). |
-| `SCRIPT` | required¹ | PHP entry script. Overrides `pool.entrypoint`. |
+| `--listen <ADDR>` | `127.0.0.1:8000` | Listen on `host:port` or `:port`. |
+| `--processes <N>` | CPU count | Set the number of PHP interpreter threads in the process. |
+| `--mode <MODE>` | `dispatcher` | Use `classic`, `worker`, or `dispatcher`. |
+| `SCRIPT` | `pool.entrypoint` | Set the PHP entry script. |
 
-¹ Required unless the config file sets `pool.entrypoint`. Precedence: **CLI > config > defaults**.
+CLI values override configuration file values. Unknown configuration keys are rejected.
 
-### Configuration file
+## Configuration
 
 ```toml
 [http]
 listen = "127.0.0.1:8000"
-server_name = "localhost"    # optional; SERVER_NAME reported to PHP
-server_port = 8000           # optional; defaults to the listen TCP port
-max_body_size_mb = 8         # optional; larger bodies get a 413
+server_name = "localhost"
+server_port = 8000
+max_body_size_mb = 8
+middleware = ["static"]
+
+[http.static]
+root = "public"
+forbid = [".php"]
 
 [pool]
-threads = 4
-entrypoint = "app\\worker.php"  # relative -> resolved against this file's directory
+entrypoint = "app\\dispatcher.php"
+mode = "dispatcher"
+processes = 8
+max_requests = 0
+
+[supervisor]
+pidfile = "rapira.pid"
+process_control_timeout_secs = 30
+
+[log]
+level = "info"
+format = "plain"
 ```
 
-Unknown keys are rejected.
+Relative paths resolve from the directory that contains the configuration file. See [examples/rapira.toml](examples/rapira.toml) for every setting.
+
+The static middleware serves a file before PHP and lets a miss fall through to PHP. The `forbid` list is a case-insensitive file name suffix filter. It is not an access control boundary for alternate file names on volumes with 8.3 names enabled. Disable 8.3 name creation for a document root volume with `fsutil 8dot3name set <volume> 1`, or keep sensitive files outside the document root.
 
 ## Logging
 
-`env_logger`-based, via `RUST_LOG` (targets: `rapira`, `ext`, `php`). `.\dev.ps1` sets the
-PHP/LLVM env and forwards to cargo:
+The default log level is `error`. Set `[log]` values in `rapira.toml`, or set `RUST_LOG` to replace the complete target filter for one run:
 
 ```powershell
-.\dev.ps1 -Devel C:\php\php-8.4-devel-vs17-x64 -Runtime C:\php\php-8.4-ts-x64 test --workspace
+$env:RUST_LOG = 'rapira=info,php=warn'
+.\rapira.exe serve --config .\rapira.toml
 ```
+
+## Windows process behavior
+
+- One process owns all PHP interpreter threads. `getmypid()` returns the same value in every interpreter.
+- A crash in one thread ends the server process.
+- `pool.processes` sets the fixed interpreter thread count. Rapira does not reload or change the pool size while it runs.
+- `max_execution_time` is checked at a PHP VM opcode boundary. It does not interrupt a blocked C call.
+- `Dispatcher::receive()` outside a fiber blocks one interpreter thread until work arrives or the receive ends.
+- The first Ctrl+C or Ctrl+Break drains active work. A second event forces exit code 130.
+- Closing the console window does not start a drain.
+- A forced exit can leave the pidfile behind. Remove a stale pidfile before the next start.
+- The default Windows socket rules let another process running as the same user bind a specific address under a wildcard listener, or a wildcard address under a specific listener, on the same port. Bind a specific production address.
+
+Rapira runs in the foreground. Use a service wrapper such as [NSSM](https://nssm.cc/) or [WinSW](https://github.com/winsw/winsw) when Windows Service Control Manager integration is required.
+
+## Contributing
+
+Build, test, and pull request instructions are in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+[MIT](LICENSE)

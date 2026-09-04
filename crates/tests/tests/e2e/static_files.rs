@@ -1,0 +1,261 @@
+use crate::harness::{
+    Conn, diagnostics, http_get, http_get_raw, http_post, http_raw_bytes, scratch_dir,
+    spawn_boot_failure, spawn_with_http_extra,
+};
+use std::time::Duration;
+
+const T: Duration = Duration::from_secs(10);
+
+fn static_root(files: &[(&str, &str)]) -> std::path::PathBuf {
+    let dir = scratch_dir();
+    for (name, contents) in files {
+        std::fs::write(dir.join(name), contents).expect("write static file");
+    }
+    dir
+}
+
+/// Reads one field from the response head. Field names are case-insensitive under RFC 9110 section 5.1: https://www.rfc-editor.org/rfc/rfc9110#section-5.1. An absent field returns an empty string, so a caller that compares two fields must first check that the field is present.
+fn head_field(raw: &[u8], name: &str) -> String {
+    let text = String::from_utf8_lossy(raw);
+    let head = text.split("\r\n\r\n").next().unwrap_or_default();
+    head.lines()
+        .find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.trim()
+                .eq_ignore_ascii_case(name)
+                .then(|| value.trim().to_owned())
+        })
+        .unwrap_or_default()
+}
+
+/// One server start checks a static file response with its headers, fallback to PHP, the source and dotfile restrictions, and a range response.
+#[test]
+fn static_files_serve_over_the_wire() {
+    let root = static_root(&[
+        ("app.css", "body{color:red}"),
+        ("big.bin", "0123456789"),
+        ("index.php", "<?php leak();"),
+        (".env", "SECRET=1"),
+    ]);
+    let srv = spawn_with_http_extra(
+        "shared/echo-worker.php",
+        1,
+        &format!(
+            "middleware = [\"static\"]\n[http.static]\nroot = {}\n",
+            serde_json::to_string(&root.to_string_lossy()).expect("static root TOML string")
+        ),
+    );
+
+    let raw = http_get_raw(srv.addr, "/app.css", &[], T).expect("GET /app.css");
+    let text = String::from_utf8_lossy(&raw);
+    assert!(
+        text.starts_with("HTTP/1.1 200"),
+        "{text}\n{}",
+        diagnostics(&srv)
+    );
+    let head = text.split("\r\n\r\n").next().expect("head").to_lowercase();
+    assert!(head.contains("\r\ncontent-type: text/css\r\n"), "{head}");
+    assert!(head.contains("\r\ncontent-length: 15\r\n"), "{head}");
+    assert!(text.ends_with("body{color:red}"), "{text}");
+
+    let (code, body) = http_get(srv.addr, "/nope", T).expect("GET /nope");
+    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
+    assert!(body.starts_with(b"ok:"), "a miss must reach php");
+
+    let (code, body) =
+        http_post(srv.addr, "/nope", b"text/plain", b"payload", T).expect("POST /nope");
+    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
+    assert!(body.starts_with(b"ok:"), "a post must reach php");
+
+    for path in ["/index.php", "/.env"] {
+        let (_, body) = http_get(srv.addr, path, T).expect(path);
+        assert!(
+            body.starts_with(b"ok:"),
+            "{path} must reach php, got {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+
+    let raw = http_get_raw(srv.addr, "/big.bin", &[("Range", "bytes=0-3")], T).expect("range GET");
+    let text = String::from_utf8_lossy(&raw);
+    assert!(text.starts_with("HTTP/1.1 206"), "{text}");
+    assert!(
+        text.to_lowercase().contains("content-range: bytes 0-3/10"),
+        "{text}"
+    );
+    assert!(text.ends_with("0123"), "{text}");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The response does not identify the cache. A second request returns the same validators. A conditional request returns 304 from the entry. The client receives the new file version after the freshness period ends.
+#[test]
+fn cached_static_files_revalidate_over_the_wire() {
+    let root = static_root(&[("app.css", "body{color:red}")]);
+    let srv = spawn_with_http_extra(
+        "shared/echo-worker.php",
+        1,
+        &format!(
+            "middleware = [\"static\"]\n[http.static]\nroot = {}\n",
+            serde_json::to_string(&root.to_string_lossy()).expect("static root TOML string")
+        ),
+    );
+
+    let first = http_get_raw(srv.addr, "/app.css", &[], T).expect("GET /app.css");
+    let etag = head_field(&first, "etag");
+    let modified = head_field(&first, "last-modified");
+    assert!(!etag.is_empty(), "no etag\n{}", diagnostics(&srv));
+    assert!(
+        !modified.is_empty(),
+        "no last-modified\n{}",
+        diagnostics(&srv)
+    );
+
+    let second = http_get_raw(srv.addr, "/app.css", &[], T).expect("second GET");
+    assert_eq!(head_field(&second, "etag"), etag);
+    assert_eq!(head_field(&second, "last-modified"), modified);
+    assert_eq!(head_field(&second, "content-type"), "text/css");
+    assert_eq!(head_field(&second, "content-length"), "15");
+    let text = String::from_utf8_lossy(&second);
+    assert!(text.ends_with("body{color:red}"), "{text}");
+
+    for (name, value) in [
+        ("If-None-Match", etag.as_str()),
+        ("If-Modified-Since", modified.as_str()),
+    ] {
+        let raw = http_get_raw(srv.addr, "/app.css", &[(name, value)], T).expect("conditional GET");
+        let text = String::from_utf8_lossy(&raw);
+        assert!(text.starts_with("HTTP/1.1 304"), "{name}: {text}");
+        assert!(
+            text.ends_with("\r\n\r\n"),
+            "a 304 has no body: {name}: {text}"
+        );
+    }
+
+    let head = http_raw_bytes(
+        srv.addr,
+        b"HEAD /app.css HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        T,
+    )
+    .expect("HEAD /app.css");
+    let text = String::from_utf8_lossy(&head);
+    assert!(text.starts_with("HTTP/1.1 200"), "{text}");
+    assert_eq!(head_field(&head, "content-length"), "15");
+    assert!(
+        text.ends_with("\r\n\r\n"),
+        "a HEAD response has no body: {text}"
+    );
+
+    // The new file has a different length and modification time. Either difference causes a reload.
+    let path = root.join("app.css");
+    std::fs::write(&path, "body{color:lime}").expect("rewrite");
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .expect("open for mtime")
+        .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_600_000_000))
+        .expect("set mtime");
+    std::thread::sleep(Duration::from_millis(1100));
+
+    let raw = http_get_raw(srv.addr, "/app.css", &[], T).expect("GET after the rewrite");
+    let text = String::from_utf8_lossy(&raw);
+    assert!(text.starts_with("HTTP/1.1 200"), "{text}");
+    assert_eq!(head_field(&raw, "content-length"), "16");
+    let reloaded = head_field(&raw, "etag");
+    assert!(!reloaded.is_empty(), "no etag after the reload: {text}");
+    assert_ne!(reloaded, etag);
+    assert!(text.ends_with("body{color:lime}"), "{text}");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// One connection processes sequential requests through the middleware chain: fallback to PHP, a static file, the same file from the cache, and fallback to PHP again.
+#[test]
+fn the_chain_serves_sequential_requests_on_one_connection() {
+    let root = static_root(&[("app.css", "body{}")]);
+    let srv = spawn_with_http_extra(
+        "shared/echo-worker.php",
+        1,
+        &format!(
+            "middleware = [\"static\"]\n[http.static]\nroot = {}\n",
+            serde_json::to_string(&root.to_string_lossy()).expect("static root TOML string")
+        ),
+    );
+    let mut c = Conn::open(srv.addr, T).expect("connect");
+
+    fn content_length(fields: &[(String, String)]) -> usize {
+        fields
+            .iter()
+            .find(|(k, _)| k == "content-length")
+            .and_then(|(_, v)| v.parse().ok())
+            .expect("content-length header")
+    }
+
+    c.send(b"GET /nope HTTP/1.1\r\nHost: e2e\r\n\r\n")
+        .expect("first request");
+    let (status, fields) = c.read_head(T).expect("first head");
+    assert_eq!(status, 200, "\n{}", diagnostics(&srv));
+    let body = c.read_n(content_length(&fields), T).expect("first body");
+    assert!(body.starts_with(b"ok:"), "first body must come from php");
+
+    c.send(b"GET /app.css HTTP/1.1\r\nHost: e2e\r\n\r\n")
+        .expect("second request");
+    let (status, fields) = c.read_head(T).expect("second head");
+    assert_eq!(status, 200, "\n{}", diagnostics(&srv));
+    let body = c.read_n(content_length(&fields), T).expect("second body");
+    assert_eq!(body.as_slice(), b"body{}", "the hit must serve the file");
+
+    // Only the cache can answer this request. An incorrect Content-Length causes the connection to fail here.
+    std::fs::remove_file(root.join("app.css")).expect("remove the served file");
+    c.send(b"GET /app.css HTTP/1.1\r\nHost: e2e\r\n\r\n")
+        .expect("cached request");
+    let (status, fields) = c.read_head(T).expect("cached head");
+    assert_eq!(status, 200, "\n{}", diagnostics(&srv));
+    let body = c.read_n(content_length(&fields), T).expect("cached body");
+    assert_eq!(body.as_slice(), b"body{}", "the cache must serve the file");
+
+    c.send(b"GET /nope HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n")
+        .expect("third request on the same connection");
+    let (status, fields) = c.read_head(T).expect("reused connection must serve");
+    assert_eq!(status, 200, "\n{}", diagnostics(&srv));
+    let body = c.read_n(content_length(&fields), T).expect("third body");
+    assert!(body.starts_with(b"ok:"), "third body must come from php");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_missing_static_root_refuses_to_boot() {
+    let dir = scratch_dir();
+    let root = dir.join("missing");
+    let (status, log) = spawn_boot_failure(
+        "shared/echo-worker.php",
+        &format!(
+            "middleware = [\"static\"]\n[http.static]\nroot = {}\n",
+            serde_json::to_string(&root.to_string_lossy()).expect("static root TOML string")
+        ),
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(status.code(), Some(1), "{log}");
+    assert!(
+        log.contains("http.static.root") && log.contains("is not accessible"),
+        "{log}"
+    );
+}
+
+#[test]
+fn a_static_root_that_is_not_a_directory_refuses_to_boot() {
+    let dir = scratch_dir();
+    let file = dir.join("root");
+    std::fs::write(&file, "x").expect("write file root");
+    let (status, log) = spawn_boot_failure(
+        "shared/echo-worker.php",
+        &format!(
+            "middleware = [\"static\"]\n[http.static]\nroot = {}\n",
+            serde_json::to_string(&file.to_string_lossy()).expect("static root TOML string")
+        ),
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(status.code(), Some(1), "{log}");
+    assert!(log.contains("is not a directory"), "{log}");
+}

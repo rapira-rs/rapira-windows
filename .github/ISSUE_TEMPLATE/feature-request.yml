@@ -1,0 +1,28 @@
+name: Feature request
+description: Propose a new capability
+title: "[Feature]: "
+labels: ["C-feature-request"]
+body:
+  - type: checkboxes
+    id: search-done
+    attributes:
+      label: Existing requests
+      options:
+        - label: I searched the issue tracker for this request.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the use case and the current limitation.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the result and include a concrete example.
+    validations:
+      required: true

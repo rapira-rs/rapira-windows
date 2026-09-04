@@ -8,12 +8,34 @@ use anyhow::Context;
 
 const ALLOWED_BINDINGS: &[&str] = include!("allowed_bindings.rs");
 
+#[derive(Debug)]
+struct WindowsLinks;
+
+impl bindgen::callbacks::ParseCallbacks for WindowsLinks {
+    fn generated_link_name_override(
+        &self,
+        item: bindgen::callbacks::ItemInfo<'_>,
+    ) -> Option<String> {
+        match item.name {
+            "sapi_startup"
+            | "zend_hash_internal_pointer_reset_ex"
+            | "zend_hash_get_current_data_ex"
+            | "zend_hash_get_current_key_ex"
+            | "zend_hash_move_forward_ex"
+            | "zend_hash_index_update"
+            | "zend_hash_str_update"
+            | "instanceof_function_slow" => Some(format!("rapira_{}", item.name)),
+            _ => None,
+        }
+    }
+}
+
 struct PhpBuild {
-    /// include directories (no `-I` prefix; may contain spaces on Windows).
+    /// Include directories without the `-I` prefix. Paths can contain spaces on Windows.
     includes: Vec<String>,
-    /// directory to search for the PHP import library.
+    /// Directory that contains the PHP import library.
     lib_dir: String,
-    /// the PHP import library name, e.g. `php8ts` / `php8ts_debug`.
+    /// PHP import library name, such as `php8ts` or `php8ts_debug`.
     lib_name: String,
     abi: PhpAbi,
 }
@@ -24,61 +46,67 @@ struct PhpAbi {
 }
 
 fn main() -> anyhow::Result<()> {
-    // php_zts is always set (this build is ZTS-only); php85 is version-gated.
-    println!("cargo:rustc-check-cfg=cfg(php85, php_zts)");
+    // php_zts is always set. The PHP minor version selects php84 or php85.
+    println!("cargo:rustc-check-cfg=cfg(php84, php85, php_zts)");
     println!("cargo:rerun-if-env-changed=PHP_DEVEL_DIR");
     println!("cargo:rerun-if-env-changed=PHP_SDK_PATH");
-    println!("cargo:rerun-if-env-changed=LIBCLANG_PATH"); // bindgen/libclang discovery
+    println!("cargo:rerun-if-env-changed=LIBCLANG_PATH"); // Locates bindgen and libclang.
 
     let php = discover_php()?;
 
     println!("cargo:rustc-link-search=native={}", php.lib_dir);
     println!("cargo:rustc-link-lib=dylib={}", php.lib_name);
 
-    // ZTS is mandatory here; emit the cfg unconditionally so any residual #[cfg(php_zts)]
-    // stays live, and gate php85 on the devel pack's version.
+    // ZTS is mandatory. Define the configuration unconditionally so all #[cfg(php_zts)] code remains enabled. Enable php85 according to the development package version.
     println!("cargo:rustc-cfg=php_zts");
     if php.abi.version >= (8, 5) {
         println!("cargo:rustc-cfg=php85");
+    } else {
+        println!("cargo:rustc-cfg=php84");
     }
 
     let win_defs: Vec<(&str, &str)> = windows_defines(&php.abi);
 
-    // --- C shim: wrapper.c + module.c ---
+    let version = env::var("CARGO_PKG_VERSION").expect("cargo sets CARGO_PKG_VERSION");
     let mut c = cc::Build::new();
-    c.file("wrapper.c").file("module.c");
-    c.define("ZTS", None); // ZTS-only build
+    c.define("RAPIRA_VERSION", format!("\"{version}\"").as_str());
+    c.file("wrapper.c")
+        .file("module.c")
+        .file("rapira_classes.c")
+        .file("rapira_http.c")
+        .file("rapira_dispatcher.c")
+        .file("rapira_exchange.c");
+    c.define("ZTS", None); // Builds only for ZTS.
     for &(k, v) in &win_defs {
         c.define(k, Some(v));
     }
     for d in &php.includes {
         c.include(d);
     }
-    // Always /MD (static_crt(false)): rustc links only the release CRT on *-msvc, and /MDd
-    // would define _DEBUG, turning zend_config.w32.h's _CRTDBG_MAP_ALLOC into free -> _free_dbg
-    // references that can't resolve against msvcrt. Layout parity with a --enable-debug DLL
-    // comes from the ZEND_DEBUG define, not the CRT; the DLL keeps its own debug CRT, which is
-    // fine as long as CRT allocations don't cross the DLL boundary (ZMM calls run inside it).
+    // Always use /MD through static_crt(false). rustc links only the release CRT on *-msvc. /MDd defines _DEBUG, which changes free references to _free_dbg through _CRTDBG_MAP_ALLOC in zend_config.w32.h. msvcrt cannot resolve these references. ZEND_DEBUG gives the required layout for a --enable-debug DLL. CRT allocations do not cross the DLL boundary because ZMM calls run inside the DLL.
     // https://doc.rust-lang.org/reference/linkage.html#static-and-dynamic-c-runtimes
     // https://learn.microsoft.com/en-us/cpp/build/reference/md-mt-ld-use-run-time-library
     c.static_crt(false);
-    c.debug(php.abi.debug); // debug info only; does not select /MDd
+    c.debug(php.abi.debug); // Adds debug information but does not select /MDd.
     c.compile("rapira_shim");
 
-    // --- bindgen ---
     let mut bindings = bindgen::Builder::default()
         .header("wrapper.h")
+        .parse_callbacks(Box::new(WindowsLinks))
+        // Bindgen does not emit link-name overrides for extern variables.
+        .blocklist_var("zend_string_init_interned")
+        .raw_line("pub use self::rapira_zend_string_init_interned as zend_string_init_interned;")
+        .blocklist_var("zend_ce_throwable")
+        .raw_line(format!(
+            "#[link(name = {:?}, kind = \"dylib\")] unsafe extern \"C\" {{ pub static mut zend_ce_throwable: *mut zend_class_entry; }}",
+            php.lib_name
+        ))
         .clang_args(php.includes.iter().map(|d| format!("-I{d}")))
         .clang_args(win_defs.iter().map(|(k, v)| format!("-D{k}={v}")))
         .clang_arg("-DZTS")
-        // Parse-only marker for wrapper.h's Windows rewrites (overflow builtins + blanking
-        // ZEND_FASTCALL so the __vectorcall handler field renders as a plain 8-byte pointer,
-        // keeping layout_tests exact). The real cl.exe never sees it.
+        // This parse-only marker enables the Windows substitutions in wrapper.h. The substitutions provide overflow builtins and remove ZEND_FASTCALL so bindgen represents the __vectorcall handler field as an 8-byte pointer. This preserves the layout tests. cl.exe does not receive this marker.
         .clang_arg("-DRAPIRA_BINDGEN=1")
-        // php-src master on clang >=19 makes zend_op.handler a `preserve_none` pointer, which
-        // bindgen 0.72.1 can't emit and panics on. opaque_type renders _zend_op as a byte array
-        // of clang's reported size/align, skipping the handler field; rapira reads no _zend_op
-        // field, so nothing is lost (no-op on 8.4/8.5).
+        // On php-src master with clang 19 or later, zend_op.handler is a `preserve_none` pointer. bindgen 0.72.1 cannot generate this pointer and panics. opaque_type represents _zend_op as a byte array with the size and alignment that clang reports. Rapira does not read _zend_op fields. This setting has no effect on PHP 8.4 or 8.5.
         // https://clang.llvm.org/docs/AttributeReference.html#preserve-none
         .opaque_type("_zend_op")
         .layout_tests(true);
@@ -94,15 +122,30 @@ fn main() -> anyhow::Result<()> {
         .generate()?
         .write_to_file(PathBuf::from(env::var("OUT_DIR")?).join("bindings.rs"))?;
 
-    for f in ["wrapper.h", "module.c", "wrapper.c", "allowed_bindings.rs"] {
+    for f in [
+        "wrapper.h",
+        "module.c",
+        "wrapper.c",
+        "allowed_bindings.rs",
+        "rapira_classes.c",
+        "rapira_classes.h",
+        "rapira_http.c",
+        "rapira_dispatcher.c",
+        "rapira_exchange.c",
+        "rapira.stub.php",
+        "rapira_arginfo.h",
+        "rapira_http.stub.php",
+        "rapira_http_arginfo.h",
+        "rapira_exception.stub.php",
+        "rapira_exception_arginfo.h",
+    ] {
         println!("cargo:rerun-if-changed={f}");
     }
 
     Ok(())
 }
 
-// PHP passes these on the compiler command line, never in a header; without ZEND_WIN32 the
-// headers #include the Unix-only <zend_config.h> and the build dies.
+// PHP defines these values only on the compiler command line. Without ZEND_WIN32, the headers include the Unix-only zend_config.h file and compilation fails.
 fn windows_defines(abi: &PhpAbi) -> Vec<(&'static str, &'static str)> {
     vec![
         ("ZEND_WIN32", "1"),
@@ -112,9 +155,7 @@ fn windows_defines(abi: &PhpAbi) -> Vec<(&'static str, &'static str)> {
         ("_WINDOWS", "1"),
         ("_MBCS", "1"),
         ("_USE_MATH_DEFINES", "1"),
-        // ZEND_DEBUG is referenced unconditionally (STANDARD_MODULE_HEADER builds the module
-        // struct from it) and on Windows is only ever a command-line define: 1 to match a
-        // --enable-debug DLL's struct layout, else 0.
+        // STANDARD_MODULE_HEADER always uses ZEND_DEBUG to build the module structure. On Windows, the compiler command defines it as 1 for the structure layout of a --enable-debug DLL and 0 otherwise.
         ("ZEND_DEBUG", if abi.debug { "1" } else { "0" }),
     ]
 }
@@ -126,7 +167,7 @@ fn parse_version(v: &str) -> anyhow::Result<(u32, u32)> {
     Ok((major, minor))
 }
 
-// PHP_DEVEL_DIR (fallback PHP_SDK_PATH) points at the extracted devel pack root:
+// PHP_DEVEL_DIR, or PHP_SDK_PATH as a fallback, identifies the extracted development package root:
 //   {root}\include\{,main,Zend,TSRM,ext,win32}, {root}\lib\php{major}ts[_debug].lib
 fn discover_php() -> anyhow::Result<PhpBuild> {
     let root = env::var("PHP_DEVEL_DIR")
@@ -143,8 +184,7 @@ fn discover_php() -> anyhow::Result<PhpBuild> {
     let version = parse_version(&read_php_version(&inc)?)?;
     let major = version.0;
 
-    // The devel pack's import libs are the ground truth for the ABI being linked. This build is
-    // ZTS-only: require php{major}ts.lib (or its _debug variant) and hard-error otherwise.
+    // The import libraries in the development package define the linked ABI. This build requires php{major}ts.lib or its _debug variant because it supports only ZTS.
     let has_lib = |suffix: &str| lib_dir.join(format!("php{major}{suffix}.lib")).exists();
     let debug = has_lib("ts_debug");
     anyhow::ensure!(
@@ -162,7 +202,7 @@ fn discover_php() -> anyhow::Result<PhpBuild> {
     })
 }
 
-// Prefer the `_debug` import lib when the devel pack shipped one, else the release ts lib.
+// Use the `_debug` import library when the development package contains it. Otherwise, use the release TS library.
 fn windows_lib_name(lib_dir: &Path, major: u32) -> anyhow::Result<String> {
     for stem in [format!("php{major}ts_debug"), format!("php{major}ts")] {
         if lib_dir.join(format!("{stem}.lib")).exists() {

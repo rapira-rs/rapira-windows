@@ -1,0 +1,9 @@
+blank_issues_enabled: false
+
+contact_links:
+  - name: Documentation
+    url: https://github.com/rapira-rs/rapira-windows#readme
+    about: Read the Windows requirements, configuration, and process behavior.
+  - name: Ask a question
+    url: https://github.com/rapira-rs/rapira-windows/discussions
+    about: Use discussions for support and design questions.

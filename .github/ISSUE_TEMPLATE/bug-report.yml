@@ -1,0 +1,60 @@
+name: Bug report
+description: Report a reproducible defect
+title: "[Bug]: "
+labels: ["B-bug", "F-need-verification"]
+body:
+  - type: checkboxes
+    id: search-done
+    attributes:
+      label: Existing reports
+      options:
+        - label: I searched the issue tracker for this problem.
+          required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: Actual and expected behavior
+      description: State what happened and what you expected.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Rapira version
+      description: Paste the output from rapira --version.
+      placeholder: rapira 0.1.0
+    validations:
+      required: true
+
+  - type: input
+    id: php-version
+    attributes:
+      label: PHP version
+      description: Paste the output from php.exe -v and identify the ZTS build.
+    validations:
+      required: true
+
+  - type: input
+    id: windows-version
+    attributes:
+      label: Windows version
+      description: Include the edition, version, and OS build.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: Give the smallest configuration, PHP script, and command that reproduce the issue.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log output
+      description: Remove secrets and paste the relevant output.
+      render: shell

@@ -1,0 +1,3 @@
+# gen_stub.php generates these files through dev.ps1 -Task stubs.
+# Do not format generated headers because the generator will replace the changes.
+crates/php_sys/*_arginfo.h
