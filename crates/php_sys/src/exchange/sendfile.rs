@@ -63,9 +63,7 @@ fn open_send_file(
     Ok((file, len))
 }
 
-/// # Safety
-/// Has the safety requirements of `send_frame`.
-pub(super) unsafe fn send_file_core(
+pub(super) fn send_file_core(
     st: &mut ExchangeState,
     path: &[u8],
     offset: u64,
@@ -87,41 +85,32 @@ pub(super) unsafe fn send_file_core(
         && st.sent_body + len > cl
     {
         let fit = cl - st.sent_body;
-        if unsafe { emit_head(st, Some(cl)) }.is_ok() && fit > 0 && !st.bodiless {
-            let _ = unsafe {
-                send_frame(
-                    st,
-                    Frame::File {
-                        file,
-                        offset,
-                        len: fit,
-                    },
-                )
-            };
+        if emit_head(st, Some(cl)).is_ok() && fit > 0 && !st.bodiless {
+            let _ = send_frame(
+                st,
+                Frame::File {
+                    file,
+                    offset,
+                    len: fit,
+                },
+            );
         }
         st.sent_body = cl;
-        unsafe {
-            seal(st, /*truncated=*/ false, Vec::new())
-        };
+        seal(st, /*truncated=*/ false, Vec::new());
         return Verb::ContentLengthExceeded;
     }
     let finalizing = (eos && st.sent_body == 0).then_some(len);
-    if unsafe { emit_head(st, finalizing) }.is_err() {
+    if emit_head(st, finalizing).is_err() {
         discard_unit(st);
         return Verb::Discarded;
     }
     st.sent_body += len;
-    if len > 0
-        && !st.bodiless
-        && unsafe { send_frame(st, Frame::File { file, offset, len }) }.is_err()
-    {
+    if len > 0 && !st.bodiless && send_frame(st, Frame::File { file, offset, len }).is_err() {
         discard_unit(st);
         return Verb::Discarded;
     }
     if eos {
-        unsafe {
-            seal(st, /*truncated=*/ false, Vec::new())
-        };
+        seal(st, /*truncated=*/ false, Vec::new());
     }
     Verb::Ok
 }

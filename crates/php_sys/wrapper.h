@@ -53,7 +53,6 @@ void rapira_sapi_startup(sapi_module_struct *sf);
 void rapira_tsrmls_cache_update(void);
 void rapira_thread_init(void);
 void rapira_thread_disarm(void);
-void rapira_timer_disarm(void);
 void rapira_timer_rearm(zend_long timeout);
 void rapira_dispatcher_thread_init(void);
 void rapira_process_init(void);

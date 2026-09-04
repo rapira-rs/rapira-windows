@@ -145,11 +145,6 @@ void rapira_thread_disarm(void) {
     zend_end_try();
 }
 
-void rapira_timer_disarm(void) {
-    zend_try { zend_unset_timeout(); }
-    zend_end_try();
-}
-
 void rapira_timer_rearm(zend_long timeout) {
     zend_try {
         zend_unset_timeout();

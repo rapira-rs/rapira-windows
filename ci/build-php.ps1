@@ -1,3 +1,5 @@
+#Requires -Version 7.0
+
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)] [string] $PhpVersion,
@@ -325,9 +327,15 @@ function Assert-PhpInstall {
         throw "PHP install marker '$markerPath' is missing."
     }
     $marker = Get-Content -LiteralPath $markerPath -Raw | ConvertFrom-Json
+    $buildScriptHashProperty = $marker.PSObject.Properties['build_script_sha256']
+    $configureFlagsHashProperty = $marker.PSObject.Properties['configure_flags_sha256']
     if ([string] $marker.php_version -cne $PhpVersion -or
         [string] $marker.source_sha256 -cne $SourceSha256 -or
-        [string] $marker.architecture -cne $Architecture.Name) {
+        [string] $marker.architecture -cne $Architecture.Name -or
+        $null -eq $buildScriptHashProperty -or
+        [string] $buildScriptHashProperty.Value -cne $buildScriptSha256 -or
+        $null -eq $configureFlagsHashProperty -or
+        [string] $configureFlagsHashProperty.Value -cne $configureFlagsSha256) {
         throw "PHP install marker '$markerPath' does not match this build."
     }
 
@@ -464,11 +472,9 @@ function Publish-PhpEnvironment {
     )
 
     $llvm = Find-NativeLlvm -Architecture $Architecture
-    $rustFlags = "-L native=$($Install.Devel)\lib"
     $env:PHP_FULL = $PhpVersion
     $env:PHP_DEVEL_DIR = $Install.Devel
     $env:PHP_RUNTIME = $Install.Runtime
-    $env:RUSTFLAGS = $rustFlags
     $env:LIBCLANG_PATH = $llvm.Directory
     $env:CLANG_PATH = $llvm.Clang
     $env:RAPIRA_REQUIRE_EXTS = $requiredExtensions
@@ -477,7 +483,6 @@ function Publish-PhpEnvironment {
     Write-GitHubEnvironment -Name 'PHP_FULL' -Value $PhpVersion
     Write-GitHubEnvironment -Name 'PHP_DEVEL_DIR' -Value $Install.Devel
     Write-GitHubEnvironment -Name 'PHP_RUNTIME' -Value $Install.Runtime
-    Write-GitHubEnvironment -Name 'RUSTFLAGS' -Value $rustFlags
     Write-GitHubEnvironment -Name 'LIBCLANG_PATH' -Value $llvm.Directory
     Write-GitHubEnvironment -Name 'CLANG_PATH' -Value $llvm.Clang
     Write-GitHubEnvironment -Name 'RAPIRA_REQUIRE_EXTS' -Value $requiredExtensions
@@ -499,6 +504,9 @@ else {
 }
 $tempRoot = [IO.Path]::GetFullPath($tempRoot).TrimEnd('\', '/')
 $InstallDirectory = Assert-ManagedPath -Path $InstallDirectory -Root $tempRoot -Name 'InstallDirectory'
+$flagFile = Join-Path $PSScriptRoot 'php-configure-flags.txt'
+$buildScriptSha256 = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$configureFlagsSha256 = (Get-FileHash -LiteralPath $flagFile -Algorithm SHA256).Hash.ToLowerInvariant()
 
 if (Test-Path -LiteralPath $InstallDirectory) {
     try {
@@ -552,7 +560,6 @@ try {
     Replace-RequiredText -Path $confUtils -Before $checkFunction -After $checkFunctionWithBypass -Description 'binary tools SDK bypass'
 
     if ($PhpVersion.StartsWith('8.4.', [StringComparison]::Ordinal)) {
-        $exifPatch = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'php-src-8.4-exif.patch') -Raw
         $exifBefore = @(
             "if(PHP_EXIF != 'no')",
             '{',
@@ -571,10 +578,6 @@ try {
             ($tab + "ADD_EXTENSION_DEP('exif', 'mbstring', true);"),
             '}'
         ) -join $newline
-        if (-not $exifPatch.Contains("-if(PHP_EXIF != 'no')") -or
-            -not $exifPatch.Contains('+' + $tab + "ADD_EXTENSION_DEP('exif', 'mbstring', true);")) {
-            throw 'ci/php-src-8.4-exif.patch does not contain the expected dependency change.'
-        }
         Replace-RequiredText -Path (Join-Path $sourceRoot 'ext\exif\config.w32') -Before $exifBefore -After $exifAfter -Description 'PHP 8.4 optional mbstring dependency'
     }
 
@@ -599,12 +602,8 @@ try {
     Replace-RequiredText -Path $configureJs -Before ($tab + $tab + "ERROR('re2c is required')") -After ($tab + $tab + "DEFINE('RE2C', '')") -Description 'missing re2c fallback'
 
     if ($PhpVersion.StartsWith('8.5.', [StringComparison]::Ordinal) -and $architecture.Name -eq 'arm64') {
-        $simdPatch = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'php-src-8.5-arm64.patch') -Raw
         $before = '#elif defined(__aarch64__) || defined(_M_ARM64)'
         $after = '#elif (defined(__aarch64__) || defined(_M_ARM64)) && !defined(_MSC_VER)'
-        if (-not $simdPatch.Contains("-$before") -or -not $simdPatch.Contains("+$after")) {
-            throw 'ci/php-src-8.5-arm64.patch does not contain the expected SIMD change.'
-        }
         Replace-RequiredText -Path (Join-Path $sourceRoot 'Zend\zend_simd.h') -Before $before -After $after -Description 'PHP 8.5 MSVC ARM64 SIMD fallback'
     }
 
@@ -632,7 +631,6 @@ try {
         Assert-PeMachine -Path $toolPath.Trim() -Expected $architecture.PeMachine
     }
 
-    $flagFile = Join-Path $PSScriptRoot 'php-configure-flags.txt'
     $configureFlags = @(Get-Content -LiteralPath $flagFile |
         ForEach-Object { $_.Trim() } |
         Where-Object { $_ -and $_ -notmatch '^#' })
@@ -713,6 +711,8 @@ try {
         php_version = $PhpVersion
         source_sha256 = $SourceSha256
         architecture = $architecture.Name
+        build_script_sha256 = $buildScriptSha256
+        configure_flags_sha256 = $configureFlagsSha256
     } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $stageRoot '.rapira-php.json') -Encoding utf8NoBOM
 
     $null = Assert-PhpInstall -Root $stageRoot -Architecture $architecture

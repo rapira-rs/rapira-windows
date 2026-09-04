@@ -1,3 +1,5 @@
+#Requires -Version 7.0
+
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)] [string] $PhpVersion,
@@ -302,10 +304,8 @@ foreach ($llvmFile in @($libclang, $clang)) {
     }
 }
 
-$rustFlags = "-L native=$develRoot\lib"
 $env:PHP_FULL = $PhpVersion
 $env:PHP_DEVEL_DIR = $develRoot
-$env:RUSTFLAGS = $rustFlags
 $env:LIBCLANG_PATH = $libclangDirectory
 $env:CLANG_PATH = $clang
 $env:PHP_RUNTIME = $runtimeRoot
@@ -314,7 +314,6 @@ $env:PATH = "$runtimeRoot;$env:PATH"
 
 Write-GitHubEnvironment -Name 'PHP_FULL' -Value $PhpVersion
 Write-GitHubEnvironment -Name 'PHP_DEVEL_DIR' -Value $develRoot
-Write-GitHubEnvironment -Name 'RUSTFLAGS' -Value $rustFlags
 Write-GitHubEnvironment -Name 'LIBCLANG_PATH' -Value $libclangDirectory
 Write-GitHubEnvironment -Name 'CLANG_PATH' -Value $clang
 Write-GitHubEnvironment -Name 'PHP_RUNTIME' -Value $runtimeRoot

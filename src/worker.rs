@@ -6,12 +6,12 @@ use std::time::Duration;
 
 use anyhow::Context;
 use php_sys::{Mode, PoolHooks, Rapira};
-use rapira_runtime::{ExtensionRuntime, Served, Stopper};
+use rapira_runtime::{ExtensionRuntime, ShutdownWatcher, Stopper};
 
 pub struct WorkerOutcome {
     pub code: u8,
     pub joined: bool,
-    _served: Option<Served>,
+    _shutdown: ShutdownWatcher,
 }
 
 // The registration path rechecks the flag if PHP fails before the stopper exists.
@@ -56,6 +56,7 @@ pub fn worker_body(
     mut uploads: rapira_runtime::multipart::Limits,
     grace: Duration,
 ) -> anyhow::Result<WorkerOutcome> {
+    let shutdown = ShutdownWatcher::install().context("installing console control handler")?;
     let spool_dir = if matches!(mode, Mode::Dispatcher(_)) {
         uploads.dir = uploads
             .dir
@@ -86,7 +87,7 @@ pub fn worker_body(
             return Ok(WorkerOutcome {
                 code: 70,
                 joined: true,
-                _served: None,
+                _shutdown: shutdown,
             });
         }
     };
@@ -103,31 +104,20 @@ pub fn worker_body(
         );
         let _ = stopper.set(running.stopper());
         stop_if_boot_failed(&boot_failed, || stopper.get().expect("just set").stop());
-        running.serve()
+        running.serve(&shutdown)
     }));
 
     match &outcomes {
-        Ok(Ok(served)) => {
-            for error in served
-                .outcomes
-                .iter()
-                .filter_map(|outcome| outcome.as_ref().err())
-            {
+        Ok(outcomes) => {
+            for error in outcomes.iter().filter_map(|outcome| outcome.as_ref().err()) {
                 tracing::error!(target: "rapira", "extension failed: {error}");
             }
-        }
-        Ok(Err(error)) => {
-            tracing::error!(target: "rapira", "installing console control handler: {error}");
         }
         Err(_) => tracing::error!(target: "rapira", "extension runtime panicked"),
     }
     let code = exit_code(
         boot_failed.load(SeqCst),
-        outcomes
-            .as_ref()
-            .ok()
-            .and_then(|served| served.as_ref().ok())
-            .map(|served| served.outcomes.as_slice()),
+        outcomes.as_ref().ok().map(Vec::as_slice),
     );
     let joined = rapira.shutdown();
     if joined {
@@ -136,7 +126,7 @@ pub fn worker_body(
     Ok(WorkerOutcome {
         code,
         joined,
-        _served: outcomes.ok().and_then(Result::ok),
+        _shutdown: shutdown,
     })
 }
 

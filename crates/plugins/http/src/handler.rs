@@ -341,7 +341,7 @@ where
 
     let declared_cl = content_length.filter(|_| !bodiless);
 
-    let body: RespBody = if bodiless {
+    let body: RespBody = if bodiless || declared_cl == Some(0) {
         bridge::spawn_drain(reply, closed.clone(), guard.clone());
         RespBody::Empty { _guard: guard }
     } else {
@@ -353,7 +353,13 @@ where
         } else {
             None
         };
-        RespBody::Reply(bridge::ReplyBody::new(reply, declared_cl, guard, staged))
+        RespBody::Reply(bridge::ReplyBody::new(
+            reply,
+            declared_cl,
+            guard,
+            staged,
+            closed.clone(),
+        ))
     };
 
     let mut res = http::Response::new(body);
@@ -438,10 +444,14 @@ mod tests {
     }
 
     fn head(bodiless: bool) -> ReplyEvent {
+        head_with_length(bodiless, None)
+    }
+
+    fn head_with_length(bodiless: bool, content_length: Option<u64>) -> ReplyEvent {
         ReplyEvent::Head {
             status: 200,
             headers: Vec::new(),
-            content_length: None,
+            content_length,
             bodiless,
             body_coded: false,
         }
@@ -485,6 +495,7 @@ mod tests {
     struct ParkedSource {
         events: Vec<ReplyEvent>,
         released: Arc<AtomicBool>,
+        end_sent: bool,
     }
 
     impl ReplySource for ParkedSource {
@@ -493,7 +504,11 @@ mod tests {
                 return Poll::Ready(Some(self.events.remove(0)));
             }
             if self.released.load(Ordering::Acquire) {
-                return Poll::Ready(None);
+                if self.end_sent {
+                    return Poll::Ready(None);
+                }
+                self.end_sent = true;
+                return Poll::Ready(Some(end()));
             }
             cx.waker().wake_by_ref();
             Poll::Pending
@@ -502,6 +517,9 @@ mod tests {
 
     struct Parked {
         released: Arc<AtomicBool>,
+        bodiless: bool,
+        content_length: Option<u64>,
+        body: Option<&'static [u8]>,
     }
 
     impl Backend for Parked {
@@ -509,9 +527,14 @@ mod tests {
             &self,
             _req: Request,
         ) -> Pin<Box<dyn Future<Output = extension_api::Result<Reply>> + Send + '_>> {
+            let mut events = vec![head_with_length(self.bodiless, self.content_length)];
+            if let Some(body) = self.body {
+                events.push(ReplyEvent::Chunk(bytes::Bytes::from_static(body)));
+            }
             let source = ParkedSource {
-                events: vec![head(true)],
+                events,
                 released: Arc::clone(&self.released),
+                end_sent: false,
             };
             Box::pin(async move { Ok(Reply::new(Box::new(source))) })
         }
@@ -548,6 +571,16 @@ mod tests {
             .header("host", "e2e")
             .body(http_body_util::Empty::<bytes::Bytes>::new())
             .unwrap()
+    }
+
+    async fn wait_for_no_inflight(inflight: &AtomicUsize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while inflight.load(Ordering::Acquire) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("drain must release the count at the reply end");
     }
 
     /// A middleware response must retain the in-flight guard until hyper drops the body.
@@ -662,6 +695,9 @@ mod tests {
         let released = Arc::new(AtomicBool::new(false));
         let backend = Arc::new(Parked {
             released: Arc::clone(&released),
+            bodiless: true,
+            content_length: None,
+            body: None,
         });
         let (handler, inflight, _closed_tx) =
             setup(backend, vec![Arc::new(Pass) as Arc<dyn Middleware>]);
@@ -674,12 +710,56 @@ mod tests {
             "the drain task must keep the request counted"
         );
         released.store(true, Ordering::Release);
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while inflight.load(Ordering::Acquire) != 0 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("drain must release the count at the stream end");
+        wait_for_no_inflight(&inflight).await;
+    }
+
+    #[tokio::test]
+    async fn zero_length_response_drains_until_the_reply_ends() {
+        let released = Arc::new(AtomicBool::new(false));
+        let backend = Arc::new(Parked {
+            released: Arc::clone(&released),
+            bodiless: false,
+            content_length: Some(0),
+            body: None,
+        });
+        let (handler, inflight, _closed_tx) = setup(backend, Vec::new());
+        let response = handle(handler, get_request()).await;
+        assert_eq!(response.status(), http::StatusCode::OK);
+        drop(response);
+        assert_eq!(
+            inflight.load(Ordering::Acquire),
+            1,
+            "the drain task must keep the request counted"
+        );
+
+        released.store(true, Ordering::Release);
+        wait_for_no_inflight(&inflight).await;
+    }
+
+    #[tokio::test]
+    async fn exact_declared_length_drains_until_the_reply_ends() {
+        let released = Arc::new(AtomicBool::new(false));
+        let backend = Arc::new(Parked {
+            released: Arc::clone(&released),
+            bodiless: false,
+            content_length: Some(5),
+            body: Some(b"hello"),
+        });
+        let (handler, inflight, _closed_tx) = setup(backend, Vec::new());
+        let response = handle(handler, get_request()).await;
+        assert_eq!(response.status(), http::StatusCode::OK);
+
+        let mut body = response.into_body();
+        let frame = body.frame().await.unwrap().unwrap();
+        assert_eq!(frame.into_data().unwrap(), b"hello"[..]);
+        drop(body);
+        assert_eq!(
+            inflight.load(Ordering::Acquire),
+            1,
+            "the drain task must keep the request counted"
+        );
+
+        released.store(true, Ordering::Release);
+        wait_for_no_inflight(&inflight).await;
     }
 }

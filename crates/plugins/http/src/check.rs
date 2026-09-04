@@ -19,7 +19,73 @@ impl Rejection {
 }
 
 pub(crate) fn is_safe_field_name(name: &str) -> bool {
-    name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    !name.bytes().any(|b| matches!(b, b'_' | b'.'))
+}
+
+// RFC 3986 defines IPvFuture syntax.
+// https://www.rfc-editor.org/rfc/rfc3986#section-3.2.2
+fn is_valid_ipv_future(value: &str) -> bool {
+    let Some(value) = value.strip_prefix('v').or_else(|| value.strip_prefix('V')) else {
+        return false;
+    };
+    let Some((version, address)) = value.split_once('.') else {
+        return false;
+    };
+    !version.is_empty()
+        && version.bytes().all(|b| b.is_ascii_hexdigit())
+        && !address.is_empty()
+        && address.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'-' | b'.'
+                        | b'_'
+                        | b'~'
+                        | b'!'
+                        | b'$'
+                        | b'&'
+                        | b'\''
+                        | b'('
+                        | b')'
+                        | b'*'
+                        | b'+'
+                        | b','
+                        | b';'
+                        | b'='
+                        | b':'
+                )
+        })
+}
+
+fn is_valid_authority_host(host: &str) -> bool {
+    if let Some(literal) = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+    {
+        return literal.parse::<std::net::Ipv6Addr>().is_ok() || is_valid_ipv_future(literal);
+    }
+    !host.bytes().any(|b| matches!(b, b'[' | b']'))
+}
+
+fn is_valid_host(value: &[u8]) -> bool {
+    let Ok(value) = std::str::from_utf8(value) else {
+        return false;
+    };
+    let Ok(authority) = value.parse::<http::uri::Authority>() else {
+        return false;
+    };
+    if value.contains('@')
+        || authority.host().is_empty()
+        || !is_valid_authority_host(authority.host())
+    {
+        return false;
+    }
+
+    let port = &value[authority.host().len()..];
+    port.is_empty()
+        || port
+            .strip_prefix(':')
+            .is_some_and(|port| port.bytes().all(|b| b.is_ascii_digit()))
 }
 
 pub(crate) fn authority(
@@ -32,7 +98,10 @@ pub(crate) fn authority(
         return Err("request carries more than one Host field line");
     }
     match first {
-        Some(v) if !v.as_bytes().is_empty() => Ok(Some(v.as_bytes().to_vec())),
+        Some(v) if !v.as_bytes().is_empty() && is_valid_host(v.as_bytes()) => {
+            Ok(Some(v.as_bytes().to_vec()))
+        }
+        Some(v) if !v.as_bytes().is_empty() => Err("request with an invalid Host field value"),
         Some(_) if http11 => Err("HTTP/1.1 request with an empty Host field value"),
         None if http11 => Err("HTTP/1.1 request without a Host field"),
         _ => Ok(None),
@@ -105,6 +174,12 @@ pub(crate) fn check_request(
         Some(a) => {
             let a = a.as_str();
             let host_port = a.rsplit_once('@').map_or(a, |(_, hp)| hp);
+            if !is_valid_host(host_port.as_bytes()) {
+                return Err(Rejection::new(
+                    http::StatusCode::BAD_REQUEST,
+                    "absolute-form target with an invalid authority",
+                ));
+            }
             // Set Host to the effective authority so HTTP_HOST has the same value.
             // https://www.rfc-editor.org/rfc/rfc9112#section-3.2.2
             let v = http::HeaderValue::from_str(host_port)
@@ -161,6 +236,36 @@ mod tests {
         assert!(authority(&map(&[("host", "a"), ("host", "b")]), false).is_err());
         assert_eq!(authority(&map(&[]), false).unwrap(), None);
         assert_eq!(authority(&map(&[("host", "")]), false).unwrap(), None);
+
+        for host in [
+            "a.example/path",
+            "user@a.example",
+            "a b",
+            "[::1",
+            "a:port",
+            "[server]",
+            "[]",
+            "a[b]:80",
+        ] {
+            assert!(
+                authority(&map(&[("host", host)]), true).is_err(),
+                "Host must reject {host:?}"
+            );
+        }
+        for host in [
+            "a.example:8080",
+            "[::1]",
+            "[2001:db8::1]:8080",
+            "[v1.server]",
+            "[Vf.name:part]",
+            "x~y.example",
+        ] {
+            assert_eq!(
+                authority(&map(&[("host", host)]), true).unwrap().as_deref(),
+                Some(host.as_bytes()),
+                "Host must accept {host:?}"
+            );
+        }
     }
 
     /// Field names that `policy` permits, in map order.
@@ -182,13 +287,17 @@ mod tests {
     }
 
     #[test]
-    fn only_alphanumerics_and_dash_are_safe_field_names() {
+    fn only_dot_and_underscore_are_unsafe_field_name_characters() {
         assert!(is_safe_field_name("x-forwarded-for"));
         assert!(is_safe_field_name("Sec-Ch-Ua-Mobile"));
         assert!(!is_safe_field_name("x_forwarded_for"));
         assert!(!is_safe_field_name("x.forwarded.for"));
-        assert!(!is_safe_field_name("x~foo"));
-        assert!(!is_safe_field_name("x$foo"));
+        for name in [
+            "x!foo", "x#foo", "x$foo", "x%foo", "x&foo", "x'foo", "x*foo", "x+foo", "x^foo",
+            "x`foo", "x|foo", "x~foo",
+        ] {
+            assert!(is_safe_field_name(name), "field name must accept {name:?}");
+        }
     }
 
     #[test]
@@ -199,10 +308,11 @@ mod tests {
                 ("x-forwarded-for", "203.0.113.7"),
                 ("x_forwarded_for", "1.2.3.4"),
                 ("x.forwarded.for", "5.6.7.8"),
+                ("x~trace", "safe"),
             ],
         )
         .unwrap();
-        assert_eq!(names, ["x-forwarded-for"]);
+        assert_eq!(names, ["x-forwarded-for", "x~trace"]);
     }
 
     #[test]
@@ -262,6 +372,16 @@ mod tests {
     fn absolute_form_keeps_the_host_rules() {
         let mut p = parts(Method::GET, Version::HTTP_11, &[]);
         p.uri = "http://target.example/".parse().unwrap();
+        let err = check_request(&mut p, UnsafeFieldNames::Drop, true, 1024)
+            .err()
+            .unwrap();
+        assert_eq!(err.status, http::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn absolute_form_rejects_an_invalid_authority() {
+        let mut p = parts(Method::GET, Version::HTTP_11, &[("host", "e2e")]);
+        p.uri = "http://[server]/".parse().unwrap();
         let err = check_request(&mut p, UnsafeFieldNames::Drop, true, 1024)
             .err()
             .unwrap();

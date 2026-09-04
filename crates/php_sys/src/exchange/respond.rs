@@ -53,36 +53,16 @@ pub(super) unsafe fn throw_verb(v: Verb) {
 
 pub(super) struct Closed;
 
-/// Waits with the wall timer disabled when the channel is full. A waiting thread cannot reach an opcode boundary.
-/// # Safety
-/// The engine must be active on this thread.
-pub(super) unsafe fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<(), Closed> {
-    let consumed = st.armed_at.elapsed();
-    let (result, parked) = {
-        let Some(tx) = st.job.ctx.sender.as_ref() else {
-            return Err(Closed);
-        };
-        match tx.try_send(frame) {
-            Ok(()) => (Ok(()), false),
-            Err(TrySendError::Closed(_)) => (Err(Closed), false),
-            Err(TrySendError::Full(frame)) => unsafe {
-                let saved = (*rapira_eg()).timeout_seconds;
-                if saved > 0 {
-                    rapira_timer_disarm();
-                }
-                let r = park_send(tx, frame);
-                if saved > 0 {
-                    let remaining = (saved as u64).saturating_sub(consumed.as_secs()).max(1);
-                    rapira_timer_rearm(remaining as crate::zend_long);
-                }
-                (r, saved > 0)
-            },
-        }
+/// Keeps the wall timer active while it waits for response channel capacity.
+pub(super) fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<(), Closed> {
+    let Some(tx) = st.job.ctx.sender.as_ref() else {
+        return Err(Closed);
     };
-    if parked {
-        st.armed_at = Instant::now();
+    match tx.try_send(frame) {
+        Ok(()) => Ok(()),
+        Err(TrySendError::Closed(_)) => Err(Closed),
+        Err(TrySendError::Full(frame)) => park_send(tx, frame),
     }
-    result
 }
 
 /// Only `Closed` ends the wait. A slow consumer does not cancel the operation.
@@ -106,12 +86,7 @@ pub(super) fn park_send(tx: &Sender<Frame>, mut frame: Frame) -> Result<(), Clos
 }
 
 /// `finalizing_len` is the one-shot body length when no data was streamed. A declared content length has precedence. A response without a body has no length.
-/// # Safety
-/// Has the safety requirements of `send_frame`.
-pub(super) unsafe fn emit_head(
-    st: &mut ExchangeState,
-    finalizing_len: Option<u64>,
-) -> Result<(), Closed> {
+pub(super) fn emit_head(st: &mut ExchangeState, finalizing_len: Option<u64>) -> Result<(), Closed> {
     if st.head_sent {
         return Ok(());
     }
@@ -128,17 +103,15 @@ pub(super) unsafe fn emit_head(
         st.declared_cl.or(finalizing_len)
     };
     st.head_sent = true;
-    unsafe {
-        send_frame(
-            st,
-            Frame::Head {
-                head: ResponseHead { status, headers },
-                content_length,
-                bodiless: st.bodiless,
-                body_coded,
-            },
-        )
-    }
+    send_frame(
+        st,
+        Frame::Head {
+            head: ResponseHead { status, headers },
+            content_length,
+            bodiless: st.bodiless,
+            body_coded,
+        },
+    )
 }
 
 /// Setting `Stage::Finalized` here prevents `exchange_drop` and `reclaim_current` from counting the unit twice.
@@ -167,9 +140,7 @@ pub(super) fn discard_unit(st: &mut ExchangeState) {
     }
 }
 
-/// # Safety
-/// Has the safety requirements of `send_frame`.
-pub(super) unsafe fn write_trailers_core(st: &mut ExchangeState, trailers: FieldLines) -> Verb {
+pub(super) fn write_trailers_core(st: &mut ExchangeState, trailers: FieldLines) -> Verb {
     if st.host_closed() {
         discard_unit(st);
         return Verb::Discarded;
@@ -180,14 +151,12 @@ pub(super) unsafe fn write_trailers_core(st: &mut ExchangeState, trailers: Field
     if st.stage == Stage::Open {
         return Verb::HeadNotWritten;
     }
-    if unsafe { emit_head(st, Some(st.sent_body)) }.is_err() {
+    if emit_head(st, Some(st.sent_body)).is_err() {
         discard_unit(st);
         return Verb::Discarded;
     }
     let trailers = if st.bodiless { Vec::new() } else { trailers };
-    unsafe {
-        seal(st, /*truncated=*/ false, trailers)
-    };
+    seal(st, /*truncated=*/ false, trailers);
     Verb::Ok
 }
 
@@ -226,13 +195,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_trailers(
     })
 }
 
-/// # Safety
-/// Has the safety requirements of `send_frame`.
-pub(super) unsafe fn write_head_core(
-    st: &mut ExchangeState,
-    status: u16,
-    headers: FieldLines,
-) -> Verb {
+pub(super) fn write_head_core(st: &mut ExchangeState, status: u16, headers: FieldLines) -> Verb {
     if st.host_closed() {
         discard_unit(st);
         return Verb::Discarded;
@@ -245,7 +208,7 @@ pub(super) unsafe fn write_head_core(
             status,
             headers: strip_framing(headers),
         };
-        return match unsafe { send_frame(st, Frame::Interim(head)) } {
+        return match send_frame(st, Frame::Interim(head)) {
             Ok(()) => Verb::Interim,
             Err(Closed) => {
                 discard_unit(st);
@@ -328,10 +291,8 @@ pub(super) unsafe fn write_body_core(
             target: "rapira",
             "response chunk exceeds the host buffer cap ({len} > {MAX_BUFFERED_BODY} bytes); sealing truncated"
         );
-        let _ = unsafe { emit_head(st, None) };
-        unsafe {
-            seal(st, /*truncated=*/ true, Vec::new())
-        };
+        let _ = emit_head(st, None);
+        seal(st, /*truncated=*/ true, Vec::new());
         return Verb::Overflow;
     }
     let len64 = len as u64;
@@ -339,19 +300,17 @@ pub(super) unsafe fn write_body_core(
         && st.sent_body + len64 > cl
     {
         let fit = usize::try_from(cl - st.sent_body).unwrap_or(usize::MAX);
-        if unsafe { emit_head(st, Some(cl)) }.is_ok() && fit > 0 && !st.bodiless {
+        if emit_head(st, Some(cl)).is_ok() && fit > 0 && !st.bodiless {
             let bytes =
                 Bytes::copy_from_slice(unsafe { std::slice::from_raw_parts(p.cast::<u8>(), fit) });
-            let _ = unsafe { send_frame(st, Frame::Chunk(bytes)) };
+            let _ = send_frame(st, Frame::Chunk(bytes));
         }
         st.sent_body = cl;
-        unsafe {
-            seal(st, /*truncated=*/ false, Vec::new())
-        };
+        seal(st, /*truncated=*/ false, Vec::new());
         return Verb::ContentLengthExceeded;
     }
     let finalizing = (eos && st.sent_body == 0).then_some(len64);
-    if unsafe { emit_head(st, finalizing) }.is_err() {
+    if emit_head(st, finalizing).is_err() {
         discard_unit(st);
         return Verb::Discarded;
     }
@@ -359,15 +318,13 @@ pub(super) unsafe fn write_body_core(
     if len > 0 && !st.bodiless {
         let bytes =
             Bytes::copy_from_slice(unsafe { std::slice::from_raw_parts(p.cast::<u8>(), len) });
-        if unsafe { send_frame(st, Frame::Chunk(bytes)) }.is_err() {
+        if send_frame(st, Frame::Chunk(bytes)).is_err() {
             discard_unit(st);
             return Verb::Discarded;
         }
     }
     if eos {
-        unsafe {
-            seal(st, /*truncated=*/ false, Vec::new())
-        };
+        seal(st, /*truncated=*/ false, Vec::new());
     }
     Verb::Ok
 }
@@ -393,9 +350,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_body(
     })
 }
 
-/// # Safety
-/// Has the safety requirements of `send_frame`.
-pub(super) unsafe fn seal(st: &mut ExchangeState, truncated: bool, trailers: FieldLines) {
+pub(super) fn seal(st: &mut ExchangeState, truncated: bool, trailers: FieldLines) {
     if let BodyState::Multipart { files, .. } = &mut st.body {
         for p in files {
             p.upload.file.unlink();
@@ -409,15 +364,13 @@ pub(super) unsafe fn seal(st: &mut ExchangeState, truncated: bool, trailers: Fie
         c.served = true;
     });
     sb_update(Event::Handled(truncated));
-    let _ = unsafe {
-        send_frame(
-            st,
-            Frame::End {
-                trailers,
-                truncated,
-            },
-        )
-    };
+    let _ = send_frame(
+        st,
+        Frame::End {
+            trailers,
+            truncated,
+        },
+    );
     st.job.ctx.sender = None;
 }
 

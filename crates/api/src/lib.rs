@@ -135,11 +135,13 @@ fn read_slice(file: &std::fs::File, offset: u64, len: u64) -> std::io::Result<Ve
     while done < out.len() {
         let n = file.seek_read(&mut out[done..], offset + done as u64)?;
         if n == 0 {
-            break;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "file ended before the reply slice was complete",
+            ));
         }
         done += n;
     }
-    out.truncate(done);
     Ok(out)
 }
 
@@ -228,7 +230,17 @@ pub struct Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
     use std::io::Write;
+    use std::task::{Context, Poll};
+
+    struct Events(VecDeque<ReplyEvent>);
+
+    impl ReplySource for Events {
+        fn poll_next(&mut self, _cx: &mut Context<'_>) -> Poll<Option<ReplyEvent>> {
+            Poll::Ready(self.0.pop_front())
+        }
+    }
 
     #[test]
     fn read_slice_uses_each_requested_offset() {
@@ -241,12 +253,49 @@ mod tests {
     }
 
     #[test]
-    fn read_slice_returns_available_bytes_at_eof() {
+    fn read_slice_rejects_early_eof() {
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(b"0123456789").unwrap();
 
-        assert_eq!(read_slice(&file, 8, 5).unwrap(), b"89");
-        assert!(read_slice(&file, 10, 1).unwrap().is_empty());
-        assert!(read_slice(&file, 12, 1).unwrap().is_empty());
+        for (offset, len) in [(8, 5), (10, 1), (12, 1)] {
+            assert_eq!(
+                read_slice(&file, offset, len).unwrap_err().kind(),
+                std::io::ErrorKind::UnexpectedEof
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn collect_rejects_a_file_slice_that_ends_early() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(b"ab").unwrap();
+        let events = VecDeque::from([
+            ReplyEvent::Head {
+                status: 200,
+                headers: Vec::new(),
+                content_length: Some(5),
+                bodiless: false,
+                body_coded: false,
+            },
+            ReplyEvent::File {
+                file,
+                offset: 0,
+                len: 5,
+            },
+            ReplyEvent::End {
+                trailers: Vec::new(),
+                truncated: false,
+            },
+        ]);
+
+        let error = Reply::new(Box::new(Events(events)))
+            .collect()
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::UnexpectedEof
+        );
     }
 }

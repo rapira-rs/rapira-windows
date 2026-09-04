@@ -16,7 +16,8 @@ pub(crate) struct ReplyBody {
     staged: Option<ReplyEvent>,
     file: Option<FilePump>,
     err_armed: bool,
-    _guard: Arc<InflightReqCount>,
+    guard: Arc<InflightReqCount>,
+    closed: tokio::sync::watch::Receiver<bool>,
 }
 
 type FileRead = tokio::task::JoinHandle<(std::fs::File, std::io::Result<Vec<u8>>)>;
@@ -46,6 +47,7 @@ impl ReplyBody {
         declared_cl: Option<u64>,
         guard: Arc<InflightReqCount>,
         staged: Option<ReplyEvent>,
+        closed: tokio::sync::watch::Receiver<bool>,
     ) -> Self {
         Self {
             reply: Some(reply),
@@ -54,8 +56,26 @@ impl ReplyBody {
             staged,
             file: None,
             err_armed: false,
-            _guard: guard,
+            guard,
+            closed,
         }
+    }
+
+    fn drain_after_declared_length(&mut self) {
+        if self.declared_cl.is_some_and(|length| self.sent >= length)
+            && let Some(reply) = self.reply.take()
+        {
+            spawn_drain(reply, self.closed.clone(), Arc::clone(&self.guard));
+        }
+    }
+
+    fn data_frame(
+        &mut self,
+        bytes: Bytes,
+    ) -> Poll<Option<Result<http_body::Frame<Bytes>, BoxError>>> {
+        self.sent += bytes.len() as u64;
+        self.drain_after_declared_length();
+        Poll::Ready(Some(Ok(http_body::Frame::data(bytes))))
     }
 
     fn terminal_error(
@@ -115,14 +135,13 @@ impl http_body::Body for ReplyBody {
                     return this.terminal_error(cx);
                 }
                 fp.done += buf.len() as u64;
-                this.sent += buf.len() as u64;
                 if fp.done < fp.len {
                     let want = std::cmp::min(64 * 1024, fp.len - fp.done) as usize;
                     fp.join = read_slice(file, fp.offset + fp.done, want);
                 } else {
                     this.file = None;
                 }
-                return Poll::Ready(Some(Ok(http_body::Frame::data(buf.into()))));
+                return this.data_frame(buf.into());
             }
             let ev: Option<ReplyEvent> = if let Some(ev) = this.staged.take() {
                 Some(ev)
@@ -142,8 +161,7 @@ impl http_body::Body for ReplyBody {
                     return this.terminal_error(cx);
                 }
                 Some(ReplyEvent::Chunk(b)) => {
-                    this.sent += b.len() as u64;
-                    return Poll::Ready(Some(Ok(http_body::Frame::data(b))));
+                    return this.data_frame(b);
                 }
                 Some(ReplyEvent::File { file, offset, len }) => {
                     let want = std::cmp::min(64 * 1024, len) as usize;
@@ -355,8 +373,12 @@ mod tests {
         Arc::new(InflightReqCount::init(&Arc::new(AtomicUsize::new(0))))
     }
 
+    fn closed_receiver() -> tokio::sync::watch::Receiver<bool> {
+        tokio::sync::watch::channel(false).1
+    }
+
     fn body(events: Vec<ReplyEvent>, declared_cl: Option<u64>) -> ReplyBody {
-        ReplyBody::new(reply(events), declared_cl, guard(), None)
+        ReplyBody::new(reply(events), declared_cl, guard(), None, closed_receiver())
     }
 
     /// The prefetched first event is sent before the remaining source events.
@@ -367,6 +389,7 @@ mod tests {
             None,
             guard(),
             Some(chunk("first")),
+            closed_receiver(),
         );
         assert_eq!(data(&mut b).await.unwrap().unwrap(), "first");
         assert_eq!(data(&mut b).await.unwrap().unwrap(), "second");
@@ -445,9 +468,47 @@ mod tests {
             dropped: Some(Arc::clone(&dropped)),
             hang: true,
         };
-        let b = ReplyBody::new(Reply::new(Box::new(source)), None, guard(), None);
+        let b = ReplyBody::new(
+            Reply::new(Box::new(source)),
+            None,
+            guard(),
+            None,
+            closed_receiver(),
+        );
         drop(b);
         assert!(dropped.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn exact_declared_length_keeps_the_reply_until_the_connection_closes() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let source = Script {
+            events: vec![chunk("hello")].into(),
+            dropped: Some(Arc::clone(&dropped)),
+            hang: true,
+        };
+        let (closed_tx, closed_rx) = tokio::sync::watch::channel(false);
+        let mut body = ReplyBody::new(
+            Reply::new(Box::new(source)),
+            Some(5),
+            guard(),
+            None,
+            closed_rx,
+        );
+
+        assert_eq!(data(&mut body).await.unwrap().unwrap(), "hello");
+        drop(body);
+        tokio::task::yield_now().await;
+        assert!(!dropped.load(Ordering::Acquire));
+
+        closed_tx.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !dropped.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test(start_paused = true)]

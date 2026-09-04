@@ -48,7 +48,6 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
                     (*exchange_from(obj.value.obj)).job = ptr.cast();
                     // SAFETY: the C zend_try contains any timer bailout.
                     rapira_receive_timed();
-                    (*ptr).armed_at = Instant::now();
                     *return_value = obj;
                     return true;
                 }

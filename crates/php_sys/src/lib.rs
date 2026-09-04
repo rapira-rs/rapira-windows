@@ -48,7 +48,6 @@ unsafe extern "C" {
     pub fn rapira_tsrmls_cache_update();
     pub fn rapira_thread_init();
     pub fn rapira_thread_disarm();
-    pub fn rapira_timer_disarm();
     pub fn rapira_timer_rearm(timeout: zend_long);
     pub fn rapira_release_temporary_streams();
     // Stores shutdown functions that were registered during startup until the cycle ends (module.c).

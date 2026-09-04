@@ -461,6 +461,39 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::mpsc;
 
+    fn delegate_to_child(test: &str, child_env: &str) -> bool {
+        if std::env::var_os(child_env).is_some() {
+            return false;
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--nocapture"])
+            .env(child_env, "1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while child.try_wait().unwrap().is_none() {
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                let output = child.wait_with_output().unwrap();
+                panic!(
+                    "PHP child timed out: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "PHP child failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        true
+    }
+
     static TIMER_PROBE: AtomicUsize = AtomicUsize::new(0);
     const TIMER_REQUESTED: usize = 1;
     const TIMER_RUNNING: usize = 2;
@@ -499,7 +532,7 @@ mod tests {
         }
         unsafe { rapira_timer_rearm(1) };
         let control_fired = wait_for_timer();
-        unsafe { rapira_timer_disarm() };
+        unsafe { rapira_thread_disarm() };
         if !control_fired {
             TIMER_PROBE.store(TIMER_CONTROL_FAILED, Ordering::Release);
             return false;
@@ -513,7 +546,7 @@ mod tests {
             return;
         }
         let fired = wait_for_timer();
-        unsafe { rapira_timer_disarm() };
+        unsafe { rapira_thread_disarm() };
         TIMER_PROBE.store(
             if fired { TIMER_FIRED } else { TIMER_CANCELLED },
             Ordering::Release,
@@ -549,37 +582,10 @@ mod tests {
     #[test]
     fn interpreter_teardown_disarms_an_armed_timer() {
         const CHILD: &str = "RAPIRA_TEST_TEARDOWN_TIMER_CHILD";
-        if std::env::var_os(CHILD).is_none() {
-            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "start::tests::interpreter_teardown_disarms_an_armed_timer",
-                    "--nocapture",
-                ])
-                .env(CHILD, "1")
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .unwrap();
-            let deadline = std::time::Instant::now() + Duration::from_secs(20);
-            while child.try_wait().unwrap().is_none() {
-                if std::time::Instant::now() >= deadline {
-                    child.kill().unwrap();
-                    let output = child.wait_with_output().unwrap();
-                    panic!(
-                        "timer child timed out: {}",
-                        String::from_utf8_lossy(&output.stderr)
-                    );
-                }
-                thread::sleep(Duration::from_millis(20));
-            }
-            let output = child.wait_with_output().unwrap();
-            assert!(
-                output.status.success(),
-                "timer child failed:\n{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
+        if delegate_to_child(
+            "start::tests::interpreter_teardown_disarms_an_armed_timer",
+            CHILD,
+        ) {
             return;
         }
 
@@ -639,6 +645,102 @@ mod tests {
         let booted = script.with_extension("php.booted");
         assert_eq!(std::fs::read_to_string(&booted).unwrap(), "ready");
         std::fs::remove_file(booted).unwrap();
+        std::fs::remove_file(script).unwrap();
+    }
+
+    #[test]
+    fn response_channel_wait_keeps_the_wall_timer_armed() {
+        const CHILD: &str = "RAPIRA_TEST_RESPONSE_TIMER_CHILD";
+        const RESPONSE_FRAME_CAP: usize = 4;
+        if delegate_to_child(
+            "start::tests::response_channel_wait_keeps_the_wall_timer_armed",
+            CHILD,
+        ) {
+            return;
+        }
+
+        let script =
+            std::env::temp_dir().join(format!("rapira-response-timer-{}.php", std::process::id()));
+        std::fs::write(
+            &script,
+            r"<?php
+$dispatcher = \Rapira\get_dispatcher();
+try {
+    while (true) {
+        $exchange = $dispatcher->receive();
+        $exchange->writeHead(200);
+        $exchange->writeBody('one', eos: false);
+        $exchange->writeBody('two', eos: false);
+        $exchange->writeBody('three', eos: false);
+        set_time_limit(1);
+        file_put_contents(__FILE__ . '.blocking', 'ready');
+        $exchange->writeBody('four', eos: false);
+        file_put_contents(__FILE__ . '.survived', 'bad');
+        $exchange->writeBody('', eos: true);
+    }
+} catch (\Rapira\Exception\ClosedException) {
+}",
+        )
+        .unwrap();
+        let blocking = script.with_extension("php.blocking");
+        let survived = script.with_extension("php.survived");
+        let rapira = Rapira::start(Mode::Dispatcher(script.clone())).unwrap();
+        let handle = rapira.handle();
+        let mut frames = handle
+            .handle_blocking(timer_probe_request(&script))
+            .unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while (!blocking.exists() || frames.len() < RESPONSE_FRAME_CAP)
+            && std::time::Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            blocking.exists(),
+            "the dispatcher must arm the timer before the blocked write"
+        );
+        assert_eq!(
+            frames.len(),
+            RESPONSE_FRAME_CAP,
+            "the response channel must become full"
+        );
+        thread::sleep(Duration::from_secs(2));
+        assert!(
+            !survived.exists(),
+            "the dispatcher must remain blocked before capacity is released"
+        );
+
+        assert!(matches!(frames.try_recv(), Ok(types::Frame::Head { .. })));
+        let mut sent_blocked_chunk = false;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match frames.try_recv() {
+                Ok(types::Frame::Chunk(chunk)) if chunk == b"four"[..] => {
+                    sent_blocked_chunk = true;
+                }
+                Ok(_) => {}
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the timed unit must close its response channel"
+                    );
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+            }
+        }
+        assert!(
+            sent_blocked_chunk,
+            "the blocked response write must finish after capacity is released"
+        );
+        assert!(
+            !survived.exists(),
+            "PHP must stop before it executes the next opcode"
+        );
+
+        assert!(rapira.shutdown());
+        std::fs::remove_file(blocking).unwrap();
         std::fs::remove_file(script).unwrap();
     }
 

@@ -70,7 +70,7 @@ The first linked test exposed nine unresolved PHP symbols. Seven functions use W
 
 Core counts shed responses in the handled metric. A separate internal flag records whether PHP handled a request, so shed 503 responses cannot suppress the initial boot-failure hook. The flag survives interpreter generations. Startup tokens prevent partially created pools from entering PHP. Each successful start still runs its first bootstrap when shutdown follows immediately.
 
-Both PHP 8.4 and PHP 8.5 pass the locked php_sys check and all 53 unit tests. The timer regression includes a positive timer-fire control and observes cancellation before thread memory is freed. Removing the one production disarm call makes the test fail with the timer-fired state. Restoring the exact source makes it pass. The test also serves a job after recycle and shuts down with a retained handle. The two symlink checks skip on this VM because Windows reports error 1314.
+Both PHP 8.4 and PHP 8.5 pass the locked php_sys check and all unit tests. The timer regression includes a positive timer-fire control and observes cancellation before thread memory is freed. Removing the one production disarm call makes the test fail with the timer-fired state. Restoring the exact source makes it pass. The test also serves a job after recycle and shuts down with a retained handle. The two symlink checks skip on this VM because Windows reports error 1314.
 
 The full workspace build and tests return 101 in the old API callers scheduled for slices 4 and 5. Formatting and whitespace checks pass. The five static-path proofs for slice 4 are prepared outside the workspace; all five fail against the exact core eligible method.
 
@@ -78,7 +78,7 @@ The installed PHP 8.4.25 and 8.5.10 packs both contain php_zend_test.dll, contra
 
 ## Slice 4 deltas
 
-All runtime, HTTP, and static-file files were copied and compared with the approved core export before edits. The HTTP accept loop, TCP accept arm, connection spawn, and drain logic retain the core code. The current comment-only deltas are listed in the comment audit section.
+All runtime, HTTP, and static-file files were copied and compared with the approved core export before edits. The HTTP accept loop, TCP accept arm, and connection spawn retain the core code. The fixed-length response path keeps the reply drain active until PHP sends `End` or the connection closes. The current comment-only deltas are listed in the comment audit section.
 
 | File | Reason |
 |---|---|
@@ -90,18 +90,18 @@ All runtime, HTTP, and static-file files were copied and compared with the appro
 | `crates/plugins/http/README.md` | Describe the TCP server and the Windows listener behavior. |
 | `crates/plugins/http/src/lib.rs` | Remove Unix listener configuration arms. |
 | `crates/plugins/http/src/serve.rs` | Consume the prepared standard listener and classify fatal Winsock errors; test accept and immediate rebind with a live connection. |
-| `crates/plugins/http/src/bridge.rs` | Read file ranges with seek_read. |
+| `crates/plugins/http/src/bridge.rs` | Read file ranges with `seek_read` and transfer fixed-length replies to the connection-aware drain. |
 | `crates/middleware/static_files/Cargo.toml` | Remove libc and pin tower-http to 0.7.1. |
 | `crates/middleware/static_files/src/lib.rs` | Reject Windows path aliases before name filtering; test five bypasses; gate the symlink-loop proof on privilege error 1314; and advance the test cache clock in TTL proofs. |
 | `crates/middleware/static_files/src/cache.rs` | Describe the 16 MiB process-wide cache shared by interpreter threads and provide a test-only manual clock for deterministic TTL proofs. |
 
-The three crate checks pass. All 94 unit tests pass: 40 HTTP, 16 runtime, and 38 static-file tests. The five path regression tests failed against the copied core method and pass with the Windows filter. The symlink-loop test returns early on this VM because Windows denies symlink creation with error 1314. Formatting and whitespace checks pass. The workspace binary still requires slice 5.
+The three crate checks and all unit tests pass. The five path regression tests failed against the copied core method and pass with the Windows filter. The symlink-loop test returns early on this VM because Windows denies symlink creation with error 1314. Formatting and whitespace checks pass. The workspace binary still requires slice 5.
 
 The old extension_host and plugins/pingora files are removed. Their core replacements use the approved crate paths and names.
 
 ## Slice 5 deltas
 
-The root manifest, main, worker, logging, and pidfile files were copied from the approved export and compared before edits. The pidfile file remains byte-identical to core's master implementation. Logging has a comment-only delta listed in the comment audit section.
+The root manifest, main, worker, logging, and pidfile files were copied from the approved export and compared before edits. The pidfile holds a Windows file handle that blocks replacement and deletion until clean shutdown. Logging has a comment-only delta listed in the comment audit section.
 
 | File | Reason |
 |---|---|
@@ -109,13 +109,13 @@ The root manifest, main, worker, logging, and pidfile files were copied from the
 | `Cargo.lock` | Resolve the final binary dependencies. |
 | `src/main.rs` | Use the core CLI and single-process boot order; validate paths and listeners before PHP starts; probe spool owners through Windows process APIs; guard owned process handles; reclaim the current PID directory after PID reuse; preserve the pidfile until the shutdown verdict. |
 | `src/version_tests.rs` | Verify one product version across the workspace packages, CLI, and PHP API. |
-| `src/worker.rs` | Wire the static PHP pool, upload limits, boot-failure stopper, bounded shutdown, exit codes, and joined-only spool cleanup; log extension failures and retain the console guard. |
-| `src/pidfile.rs` | Place the unchanged master pidfile guard beside the Windows binary. |
-| `crates/runtime/src/lib.rs` | Return a Served holder so console handling stays active through PHP shutdown and the binary's forced-exit decision; report a failed SetConsoleCtrlHandler call. |
+| `src/worker.rs` | Wire the static PHP pool, upload limits, boot-failure stopper, bounded shutdown, exit codes, and joined-only spool cleanup; log extension failures; and retain the shutdown watcher through PHP shutdown. |
+| `src/pidfile.rs` | Create the pidfile exclusively, allow read sharing, and keep its handle until clean shutdown. |
+| `crates/runtime/src/lib.rs` | Install console handling before PHP starts; retain an early first event until the runtime stop sender exists; and report a failed SetConsoleCtrlHandler call. |
 
-The spool probe proof was saved before implementation. It covers invalid names, the current PID, a live process, an exited child, OpenProcess errors, query errors, and STILL_ACTIVE. Four worker proofs cover boot-failure precedence, runtime failures, and the stopper-registration race. PHP 8.4 and PHP 8.5 each pass the full binary build, all 17 binary unit tests, and all 16 runtime unit tests. A PHP 8.5 server with two interpreter threads answered a live request with HTTP 200 and body `ok`. Formatting and whitespace checks pass.
+The spool probe proof was saved before implementation. It covers invalid names, the current PID, a live process, an exited child, OpenProcess errors, query errors, and STILL_ACTIVE. The worker proofs cover boot-failure precedence, runtime failures, and the stopper-registration race. PHP 8.4 and PHP 8.5 each pass the full binary build and all binary and runtime unit tests. A PHP 8.5 server with two interpreter threads answered a live request with HTTP 200 and body `ok`. Formatting and whitespace checks pass.
 
-Review found that the retained Windows watcher originally ended when extension serving returned. The PHP join can still have live threads at that point. A prewritten lifecycle test covers a second control event during that join. The Served holder now keeps the watcher through PHP shutdown while allowing the Tokio runtime to drop first. The main function calls TerminateProcess before either the holder or pidfile can drop when joining fails.
+`ShutdownWatcher` installs before PHP starts. It retains the first control event until the runtime stop sender exists. `WorkerOutcome` keeps the watcher through PHP shutdown and the forced-exit decision. The main function calls `TerminateProcess` before the watcher or pidfile can drop when joining fails.
 
 The workspace test run returns 101 in the old smoke test. That test still passes `--threads` and expects the old PHP API. Slice 6 replaces it. The Windows lifecycle proofs for exits 0, 1, 70, and 130, port conflict, and restart are saved before the harness port.
 
@@ -168,12 +168,12 @@ The formatter and tidy policy were copied from the live core checkout at `f9644c
 | `.clang-format-ignore` | Exclude all three generated arginfo headers from formatter churn. |
 | `.clang-tidy` | Use core's checks with a header filter that accepts both Windows and slash-separated paths. |
 | `.clangd` | Read the ignored database from `target/clangd`, parse with clang-cl, and suppress unreliable unused-include diagnostics from PHP umbrella headers. |
-| `dev.ps1` | Add the clangd task; generate six machine-local commands with the native OS target, PHP headers, LLVM, and MSVC headers; and reject emulated PowerShell or non-native PHP, LLVM, and MSVC inputs. |
+| `dev.ps1` | Add the clangd task; generate six machine-local commands with the native OS target, PHP headers, LLVM, and MSVC headers; require native PowerShell 7; and reject non-native PHP, LLVM, and MSVC inputs. |
 | `rust-toolchain.toml` | Let Rust use the host target for local tasks. |
 
 `dev.ps1 -Devel <native-devel-directory> -Task clangd` writes absolute native PHP, LLVM, and MSVC paths only below ignored `target/clangd`. It does not require a PHP runtime or export the PHP linker environment. `.clangd` selects that database, parses with clang-cl, and suppresses unreliable unused-include diagnostics from PHP umbrella headers. The tidy configuration passes LLVM 22 config validation.
 
-`ci/build-php.ps1` builds a native ZTS runtime and development tree from verified official PHP 8.4 or 8.5 source. It checks native PowerShell and build tools, PE machine values, headers, PHP identity, required modules, and the PHP license before exporting the Rapira build environment. CI builds and tests ARM64 with this helper. Release jobs use it for both x64 and ARM64. Local work uses only tools and PHP files for the host architecture.
+`ci/build-php.ps1` builds a native ZTS runtime and development tree from verified official PHP 8.4 or 8.5 source. It requires native PowerShell 7. It checks build tools, PE machine values, headers, PHP identity, required modules, and the PHP license before it exports the Rapira build environment. CI builds and tests ARM64 with this helper. Release jobs use it for both x64 and ARM64. Local work uses only tools and PHP files for the host architecture.
 
 ## Slice 7 deltas
 
@@ -207,10 +207,8 @@ The formatter and tidy policy were copied from the live core checkout at `f9644c
 | `nfpm.yaml` | Omit Linux package definitions because releases are Windows archives. |
 | `ci/resolve-php.ps1` | Resolve one exact PHP patch release with verified Windows package and official source metadata. |
 | `ci/provision-php.ps1` | Provision and validate the official x64 ZTS runtime and development package for x64 CI. |
-| `ci/build-php.ps1` | Build, validate, reuse, and export a native ZTS PHP runtime and development tree from verified source. |
+| `ci/build-php.ps1` | Build, adjust, validate, reuse, and export a native ZTS PHP runtime and development tree from verified source. |
 | `ci/php-configure-flags.txt` | Define the dependency-free Windows ZTS PHP profile shared by x64 and ARM64 source builds. |
-| `ci/php-src-8.4-exif.patch` | Make PHP 8.4's EXIF dependency on mbstring optional so static EXIF can build with shared mbstring. |
-| `ci/php-src-8.5-arm64.patch` | Select PHP's scalar fallback for the unsupported MSVC ARM64 SIMD compatibility path in PHP 8.5. |
 | `ci/windows-extensions.txt` | Require the fileinfo and mbstring DLLs produced by both native source builds. |
 | `examples/rapira.toml` | Use Windows paths and the fixed interpreter thread pool configuration. |
 | `examples/README.md` | Use PowerShell commands and explain Windows interpreter threads and the one-active-exchange rule. |
@@ -376,6 +374,6 @@ The source comparison records each functional, comment-only, and generated stub-
 
 Static validation covers PowerShell parsing, workflow structure, immutable action references, repository whitespace, the instruction file, and the release matrix. The CI workflow runs PHP 8.4 and 8.5 builds and tests on native x64 and ARM64 runners. The release workflow builds PHP and Rapira on the same native architectures and runs a PATH-stripped HTTP smoke test for every archive.
 
-On native ARM64, PHP 8.4.25 and PHP 8.5.10 each passed `cargo test --locked --workspace --target aarch64-pc-windows-msvc` with 416 passed, 0 failed, and 8 ignored. The workspace and e2e Clippy gates pass with warnings denied. The static-file suite also passed all 38 tests in normal parallel mode after its TTL proofs moved to the test-only manual clock. Both PHP release bundles passed the PATH-stripped HTTP smoke test, including the PHP 8.4 shared OPcache path and the PHP 8.5 built-in OPcache path. No x64 binary was built or run on the ARM64 host; x64 executable validation runs on native x64 CI.
+On native ARM64, PHP 8.4.25 and PHP 8.5.10 each passed `cargo test --locked --workspace --target aarch64-pc-windows-msvc` with no failures. The workspace and e2e Clippy gates pass with warnings denied. The static-file suite also passed in normal parallel mode after its TTL proofs moved to the test-only manual clock. Both PHP release bundles passed the PATH-stripped HTTP smoke test, including the PHP 8.4 shared OPcache path and the PHP 8.5 built-in OPcache path. No x64 binary was built or run on the ARM64 host; x64 executable validation runs on native x64 CI.
 
 The plan describes two fcntl tests, but core has two fcntl assertions in one test. The port retains the bind and accept test. The Release/Acquire comment named in slice 1 is in `crates/php_sys/src/scoreboard.rs`; its Windows wording belongs to slice 3. The Unix-derived port-80 fallback is in config `lib.rs`, and its planned removal is complete. Core `module.c` has no timer platform guard, so the Windows per-job guard remains in the copied request initialization with the plan's widened condition.

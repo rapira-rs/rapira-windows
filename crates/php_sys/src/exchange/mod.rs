@@ -3,7 +3,7 @@ pub(crate) use std::{
     ffi::{CStr, CString, c_char, c_int, c_void},
     io::Read,
     path::Path,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 pub(crate) use bytes::Bytes;
@@ -21,8 +21,8 @@ pub(crate) use crate::{
     rapira_ce_http_uploaded_file, rapira_ce_inet_address, rapira_ce_internal_http_dispatcher,
     rapira_ce_internal_http_dispatcher_info, rapira_ce_internal_http_exchange,
     rapira_ce_no_dispatcher_error, rapira_ce_timeout_exception, rapira_ce_unix_address,
-    rapira_ce_work_discarded_exception, rapira_dispatcher_info_obj, rapira_eg, rapira_exchange_obj,
-    rapira_receive_timed, rapira_receive_untimed, rapira_timer_disarm, rapira_timer_rearm,
+    rapira_ce_work_discarded_exception, rapira_dispatcher_info_obj, rapira_exchange_obj,
+    rapira_receive_timed, rapira_receive_untimed,
     scoreboard::{Event, sb_update},
     start::{Pulled, pending_depth, pull_job_try, pull_job_wait},
     types::{Addr, Body, FieldLines, FormField, Frame, Job, ResponseHead, TlsView, UploadedFile},
@@ -223,8 +223,6 @@ pub struct ExchangeState {
     discarded: bool,
     /// For 204, 304, 101, or a `HEAD` request, the function accepts and discards chunks.
     bodiless: bool,
-    /// Remaining wall timer duration. The wait guard restores this timer.
-    armed_at: Instant,
 }
 
 impl ExchangeState {
@@ -315,7 +313,6 @@ impl ExchangeState {
             sent_body: 0,
             discarded: false,
             bodiless,
-            armed_at: Instant::now(),
         })
     }
 

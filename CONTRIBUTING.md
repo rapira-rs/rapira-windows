@@ -5,6 +5,7 @@ This repository contains the Windows server: the PHP SAPI in `crates/php_sys`, t
 ## Prerequisites
 
 - Windows 10, Windows 11, or Windows Server on x64, or Windows 11 on ARM64
+- Native PowerShell 7
 - Visual Studio C++ Build Tools with the native x64 or ARM64 MSVC toolset and a Windows SDK
 - Native LLVM with `clang.exe` and `libclang.dll`
 - Rust stable; `rust-toolchain.toml` selects the stable channel
@@ -15,7 +16,7 @@ Use only tools and PHP files that match the host architecture. CI builds x64 on 
 
 ## Build
 
-Resolve an exact PHP release and build its native ZTS runtime and development tree from verified source. `ci/build-php.ps1` accepts only an install directory below the runner or process temporary directory and exports the paths required by Rapira.
+Run all commands in this section in the same native PowerShell 7 session. Resolve an exact PHP release and build its native ZTS runtime and development tree from verified source. `ci/build-php.ps1` accepts only an install directory below the runner or process temporary directory and exports the paths required by Rapira.
 
 ```powershell
 $php = .\ci\resolve-php.ps1 -Branch 8.5 | ConvertFrom-Json

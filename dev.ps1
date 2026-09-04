@@ -1,4 +1,4 @@
-#requires -Version 5
+#Requires -Version 7.0
 # Configure the native Windows tools and run a development task.
 # .\dev.ps1 -Devel C:\php\php-devel -Runtime C:\php\php-runtime -Task build
 # .\dev.ps1 -Runtime C:\php\php-runtime -Task stubs -PhpSrc C:\src\php-src
@@ -185,7 +185,6 @@ if ($Task -eq 'stubs') {
     }
     if ($Task -ne 'clangd') {
         $env:PHP_DEVEL_DIR = $Devel
-        $env:RUSTFLAGS = "-L native=$Devel\lib"
         $env:LIBCLANG_PATH = $llvmDirectory
         $env:CLANG_PATH = $clangPath
     }

@@ -39,6 +39,6 @@ Download the archive for your PHP minor and architecture from [GitHub Releases](
 
 ## Source builds
 
-Source builds require native MSVC tools with a Windows SDK, native LLVM with `libclang.dll`, and Rust. Use tools and PHP files for the host architecture. Release jobs build PHP 8.4 and 8.5 ZTS from verified official source on native x64 and ARM64 runners.
+Source builds require native PowerShell 7, native MSVC tools with a Windows SDK, native LLVM with `libclang.dll`, and Rust. Use tools and PHP files for the host architecture. Release jobs build PHP 8.4 and 8.5 ZTS from verified official source on native x64 and ARM64 runners.
 
 Generate clangd commands with `.\dev.ps1 -Devel <native-devel-directory> -Task clangd`. The `.clangd` file reads them from the ignored `target/clangd` directory. See [CONTRIBUTING.md](CONTRIBUTING.md) for all Windows build commands.

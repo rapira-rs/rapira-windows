@@ -352,13 +352,20 @@ async fn drive<E: Extension>(
     }
 }
 
-/// Keeps console control handling installed while the extensions run and drain.
-fn spawn_shutdown_watcher(stop_tx: watch::Sender<bool>) -> std::io::Result<ShutdownWatcher> {
-    win_ctrl::install(stop_tx)?;
-    Ok(ShutdownWatcher)
-}
+/// Keeps console control handling installed while PHP can have live threads.
+pub struct ShutdownWatcher(());
 
-struct ShutdownWatcher;
+impl ShutdownWatcher {
+    /// Installs the console control handler before PHP starts.
+    pub fn install() -> std::io::Result<Self> {
+        win_ctrl::install()?;
+        Ok(Self(()))
+    }
+
+    fn register(&self, stop_tx: watch::Sender<bool>) {
+        win_ctrl::register(stop_tx);
+    }
+}
 
 impl Drop for ShutdownWatcher {
     fn drop(&mut self) {
@@ -381,13 +388,30 @@ mod win_ctrl {
     static STOP_TX: OnceLock<watch::Sender<bool>> = OnceLock::new();
     static ASKED: AtomicBool = AtomicBool::new(false);
 
+    fn record_request(asked: &AtomicBool) -> bool {
+        asked.swap(true, Ordering::SeqCst)
+    }
+
+    fn register_stop(
+        asked: &AtomicBool,
+        slot: &OnceLock<watch::Sender<bool>>,
+        stop_tx: watch::Sender<bool>,
+    ) {
+        let _ = slot.set(stop_tx);
+        if asked.load(Ordering::SeqCst)
+            && let Some(tx) = slot.get()
+        {
+            let _ = tx.send(true);
+        }
+    }
+
     // Windows calls this function on a new thread, so watch and logger locks are valid.
     // CLOSE, LOGOFF and SHUTDOWN retain the default handler.
     // https://learn.microsoft.com/en-us/windows/console/handlerroutine
     unsafe extern "system" fn handler(ctrl_type: u32) -> BOOL {
         match ctrl_type {
             CTRL_C_EVENT | CTRL_BREAK_EVENT => {
-                if ASKED.swap(true, Ordering::SeqCst) {
+                if record_request(&ASKED) {
                     // SAFETY: This terminates the process without DLL detach and does not return.
                     // https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-terminateprocess
                     // https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-exitprocess
@@ -403,8 +427,8 @@ mod win_ctrl {
         }
     }
 
-    pub(super) fn install(stop_tx: watch::Sender<bool>) -> io::Result<()> {
-        let _ = STOP_TX.set(stop_tx);
+    pub(super) fn install() -> io::Result<()> {
+        ASKED.store(false, Ordering::SeqCst);
         // SAFETY: handler has the required ABI and remains valid for the process lifetime.
         // https://learn.microsoft.com/en-us/windows/console/setconsolectrlhandler
         if unsafe { SetConsoleCtrlHandler(Some(handler), 1) } == 0 {
@@ -414,9 +438,31 @@ mod win_ctrl {
         }
     }
 
+    pub(super) fn register(stop_tx: watch::Sender<bool>) {
+        register_stop(&ASKED, &STOP_TX, stop_tx);
+    }
+
     pub(super) fn uninstall() {
         // SAFETY: removes the handler installed above.
         unsafe { SetConsoleCtrlHandler(Some(handler), 0) };
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn registration_replays_an_early_request() {
+            let asked = AtomicBool::new(false);
+            let slot = OnceLock::new();
+            assert!(!record_request(&asked));
+
+            let (stop_tx, stop_rx) = watch::channel(false);
+            register_stop(&asked, &slot, stop_tx);
+
+            assert!(*stop_rx.borrow());
+            assert!(record_request(&asked));
+        }
     }
 }
 
@@ -436,12 +482,6 @@ pub struct Running {
     stop_tx: watch::Sender<bool>,
 }
 
-/// Keeps console control handling installed after the extension runtime has stopped.
-pub struct Served {
-    pub outcomes: Vec<Outcome>,
-    _watcher: ShutdownWatcher,
-}
-
 impl Running {
     pub fn join(mut self) -> Vec<Outcome> {
         self.drain_all()
@@ -456,13 +496,10 @@ impl Running {
         Stopper(self.stop_tx.clone())
     }
 
-    /// The first Ctrl+C or Ctrl+Break event drains extensions. A second event forces exit 130. Keep the returned value until PHP shuts down so console handling remains active.
-    pub fn serve(mut self) -> std::io::Result<Served> {
-        let watcher = spawn_shutdown_watcher(self.stop_tx.clone())?;
-        Ok(Served {
-            outcomes: self.drain_all(),
-            _watcher: watcher,
-        })
+    /// The first Ctrl+C or Ctrl+Break event drains extensions. A second event forces exit 130. Keep `watcher` until PHP shuts down.
+    pub fn serve(mut self, watcher: &ShutdownWatcher) -> Vec<Outcome> {
+        watcher.register(self.stop_tx.clone());
+        self.drain_all()
     }
 
     fn drain_all(&mut self) -> Vec<Outcome> {

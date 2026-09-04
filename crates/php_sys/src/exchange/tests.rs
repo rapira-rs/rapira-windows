@@ -84,6 +84,36 @@ fn state() -> (
     state_of(base_req())
 }
 
+/// A full response channel waits for its consumer. The wait does not require active PHP state.
+#[test]
+fn full_response_channel_waits_for_capacity() {
+    use crate::types::Frame;
+
+    let (mut st, old_rx) = state();
+    drop(old_rx);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    st.job.ctx.sender = Some(tx);
+    assert!(send_frame(&mut st, Frame::Chunk(Bytes::from_static(b"first"))).is_ok());
+
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let sender = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        let sent = send_frame(&mut st, Frame::Chunk(Bytes::from_static(b"second"))).is_ok();
+        done_tx.send(sent).unwrap();
+    });
+
+    started_rx.recv().unwrap();
+    assert!(
+        done_rx.recv_timeout(Duration::from_millis(20)).is_err(),
+        "the full channel must wait"
+    );
+    assert!(matches!(rx.blocking_recv(), Some(Frame::Chunk(bytes)) if bytes == b"first"[..]));
+    assert!(done_rx.recv_timeout(Duration::from_secs(1)).unwrap());
+    assert!(matches!(rx.blocking_recv(), Some(Frame::Chunk(bytes)) if bytes == b"second"[..]));
+    sender.join().unwrap();
+}
+
 /// An overflow without sealing would leave the unit in `Handling`. The single-flight check would then reject all later receive() calls.
 #[test]
 fn overflow_seals_the_unit_truncated() {
@@ -107,10 +137,7 @@ fn overflow_seals_the_unit_truncated() {
 #[test]
 fn seal_drops_the_body_for_304() {
     let (mut st, mut rx) = state();
-    assert_eq!(
-        unsafe { write_head_core(&mut st, 304, Vec::new()) },
-        Verb::Ok
-    );
+    assert_eq!(write_head_core(&mut st, 304, Vec::new()), Verb::Ok);
     let v = unsafe { write_body_core(&mut st, c"gone".as_ptr(), 4, true) };
     assert_eq!(v, Verb::Ok);
     let Sealed::Complete { status, body } = recv_sealed(&mut rx) else {
@@ -127,7 +154,7 @@ fn empty_non_eos_chunk_commits_nothing() {
     let v = unsafe { write_body_core(&mut st, c"".as_ptr(), 0, false) };
     assert_eq!(v, Verb::Ok);
     assert_eq!(
-        unsafe { write_head_core(&mut st, 404, Vec::new()) },
+        write_head_core(&mut st, 404, Vec::new()),
         Verb::Ok,
         "the head slot must still be open"
     );
@@ -190,8 +217,7 @@ fn head_frame_length_follows_the_write_shape() {
 fn content_length_exceeded_sends_the_prefix_and_seals() {
     use crate::types::Frame;
     let (mut st, mut rx) = state();
-    let v =
-        unsafe { write_head_core(&mut st, 200, vec![("content-length".into(), b"5".to_vec())]) };
+    let v = write_head_core(&mut st, 200, vec![("content-length".into(), b"5".to_vec())]);
     assert_eq!(v, Verb::Ok);
     let v = unsafe { write_body_core(&mut st, c"0123456789".as_ptr(), 10, true) };
     assert_eq!(v, Verb::ContentLengthExceeded);
@@ -217,16 +243,14 @@ fn content_length_exceeded_sends_the_prefix_and_seals() {
 #[test]
 fn repeated_content_length_is_a_bad_field() {
     let (mut st, _rx) = state();
-    let v = unsafe {
-        write_head_core(
-            &mut st,
-            200,
-            vec![
-                ("content-length".into(), b"5".to_vec()),
-                ("Content-Length".into(), b"7".to_vec()),
-            ],
-        )
-    };
+    let v = write_head_core(
+        &mut st,
+        200,
+        vec![
+            ("content-length".into(), b"5".to_vec()),
+            ("Content-Length".into(), b"7".to_vec()),
+        ],
+    );
     assert!(matches!(v, Verb::BadField(_)));
     assert_eq!(st.stage, Stage::Open, "a rejected head commits nothing");
 }
@@ -236,17 +260,15 @@ fn repeated_content_length_is_a_bad_field() {
 fn interim_head_emits_without_framing_fields() {
     use crate::types::Frame;
     let (mut st, mut rx) = state();
-    let v = unsafe {
-        write_head_core(
-            &mut st,
-            103,
-            vec![
-                ("link".into(), b"</a.css>; rel=preload".to_vec()),
-                ("content-length".into(), b"5".to_vec()),
-                ("connection".into(), b"close".to_vec()),
-            ],
-        )
-    };
+    let v = write_head_core(
+        &mut st,
+        103,
+        vec![
+            ("link".into(), b"</a.css>; rel=preload".to_vec()),
+            ("content-length".into(), b"5".to_vec()),
+            ("connection".into(), b"close".to_vec()),
+        ],
+    );
     assert_eq!(v, Verb::Interim);
     let Ok(Frame::Interim(head)) = rx.try_recv() else {
         panic!("interim head must be on the stream");
@@ -259,7 +281,7 @@ fn interim_head_emits_without_framing_fields() {
         head.headers
     );
     assert_eq!(head.headers[0].0, "link");
-    let v = unsafe { write_head_core(&mut st, 200, Vec::new()) };
+    let v = write_head_core(&mut st, 200, Vec::new());
     assert_eq!(v, Verb::Ok, "the final-head slot stays open");
 }
 
@@ -305,10 +327,7 @@ fn flush_emits_the_implicit_head_once() {
 fn a_101_head_drops_body_chunks() {
     use crate::types::Frame;
     let (mut st, mut rx) = state();
-    assert_eq!(
-        unsafe { write_head_core(&mut st, 101, Vec::new()) },
-        Verb::Ok
-    );
+    assert_eq!(write_head_core(&mut st, 101, Vec::new()), Verb::Ok);
     let v = unsafe { write_body_core(&mut st, c"upgrade".as_ptr(), 7, true) };
     assert_eq!(v, Verb::Ok);
     let Ok(Frame::Head { bodiless, .. }) = rx.try_recv() else {
@@ -341,7 +360,7 @@ fn send_file_validation_table() {
     invalid_utf8.extend_from_slice(b"\\\xff.txt");
 
     let (mut st, mut rx) = state();
-    let v = unsafe { send_file_core(&mut st, &invalid_utf8, 0, None, true) };
+    let v = send_file_core(&mut st, &invalid_utf8, 0, None, true);
     assert_eq!(v, Verb::FileNotSendable(c"the path is not valid UTF-8"));
     for (name, path, offset, length) in [
         ("missing", path_bytes(&dir.join("missing")), 0, None),
@@ -356,14 +375,14 @@ fn send_file_validation_table() {
             None,
         ),
     ] {
-        let v = unsafe { send_file_core(&mut st, &path, offset, length, true) };
+        let v = send_file_core(&mut st, &path, offset, length, true);
         assert!(matches!(v, Verb::FileNotSendable(_)), "{name}");
     }
     assert_eq!(st.stage, Stage::Open);
     assert!(rx.try_recv().is_err(), "rejected paths send no frames");
 
     let (mut st, mut rx) = state();
-    let v = unsafe { send_file_core(&mut st, &pb, 2, Some(3), true) };
+    let v = send_file_core(&mut st, &pb, 2, Some(3), true);
     assert_eq!(v, Verb::Ok);
     let Ok(Frame::Head { content_length, .. }) = rx.try_recv() else {
         panic!("head first");
@@ -388,7 +407,7 @@ fn send_file_validation_table() {
 
     let verbatim = std::fs::canonicalize(&path).unwrap();
     let (mut st, rx) = state();
-    let v = unsafe { send_file_core(&mut st, &path_bytes(&verbatim), 0, None, true) };
+    let v = send_file_core(&mut st, &path_bytes(&verbatim), 0, None, true);
     assert_eq!(v, Verb::Ok, "verbatim paths use the canonical root");
     drop(rx);
 
@@ -405,11 +424,11 @@ fn send_file_validation_table() {
         }
     }
     let (mut st, _rx) = state();
-    let v = unsafe { send_file_core(&mut st, &path_bytes(&link_out), 0, None, true) };
+    let v = send_file_core(&mut st, &path_bytes(&link_out), 0, None, true);
     assert!(matches!(v, Verb::FileNotSendable(_)), "escaping symlink");
 
     let (mut st, mut rx) = state();
-    let v = unsafe { send_file_core(&mut st, &path_bytes(&link_in), 0, None, true) };
+    let v = send_file_core(&mut st, &path_bytes(&link_in), 0, None, true);
     assert_eq!(v, Verb::Ok, "intra-root symlinks stay sendable");
     assert!(matches!(rx.try_recv(), Ok(Frame::Head { .. })));
     drop(rx);
@@ -422,14 +441,11 @@ fn send_file_validation_table() {
 fn trailers_finalize_with_a_committed_head() {
     use crate::types::Frame;
     let (mut st, mut rx) = state();
-    let v = unsafe { write_trailers_core(&mut st, vec![("x".into(), b"y".to_vec())]) };
+    let v = write_trailers_core(&mut st, vec![("x".into(), b"y".to_vec())]);
     assert_eq!(v, Verb::HeadNotWritten, "nothing here commits a head");
 
-    assert_eq!(
-        unsafe { write_head_core(&mut st, 200, Vec::new()) },
-        Verb::Ok
-    );
-    let v = unsafe { write_trailers_core(&mut st, vec![("x".into(), b"y".to_vec())]) };
+    assert_eq!(write_head_core(&mut st, 200, Vec::new()), Verb::Ok);
+    let v = write_trailers_core(&mut st, vec![("x".into(), b"y".to_vec())]);
     assert_eq!(v, Verb::Ok);
     let Ok(Frame::Head { content_length, .. }) = rx.try_recv() else {
         panic!("head first");
@@ -449,7 +465,7 @@ fn trailers_finalize_with_a_committed_head() {
     assert!(!truncated);
     assert_eq!(trailers, vec![("x".to_string(), b"y".to_vec())]);
 
-    let v = unsafe { write_trailers_core(&mut st, Vec::new()) };
+    let v = write_trailers_core(&mut st, Vec::new());
     assert_eq!(v, Verb::Finalized);
 }
 
@@ -494,6 +510,6 @@ fn seal_unlinks_the_spool_files() {
         }],
     };
     assert!(path.exists());
-    unsafe { seal(&mut st, false, Vec::new()) };
+    seal(&mut st, false, Vec::new());
     assert!(!path.exists(), "seal must unlink the spooled file");
 }

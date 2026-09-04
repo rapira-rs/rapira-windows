@@ -1,6 +1,0 @@
-diff --git a/Zend/zend_simd.h b/Zend/zend_simd.h
---- a/Zend/zend_simd.h
-+++ b/Zend/zend_simd.h
-@@ -45 +45 @@
--#elif defined(__aarch64__) || defined(_M_ARM64)
-+#elif (defined(__aarch64__) || defined(_M_ARM64)) && !defined(_MSC_VER)

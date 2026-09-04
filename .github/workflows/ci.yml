@@ -159,7 +159,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.php-path.outputs.install_dir }}
-          key: ${{ matrix.source_cache_key }}-windows-arm64-${{ hashFiles('ci/build-php.ps1', 'ci/php-configure-flags.txt', 'ci/php-src-8.4-exif.patch', 'ci/php-src-8.5-arm64.patch') }}
+          key: ${{ matrix.source_cache_key }}-windows-arm64-${{ hashFiles('ci/build-php.ps1', 'ci/php-configure-flags.txt') }}
 
       - name: Build native PHP
         shell: pwsh
