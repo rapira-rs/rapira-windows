@@ -105,7 +105,7 @@ The root manifest, main, worker, logging, and pidfile files were copied from the
 
 | File | Reason |
 |---|---|
-| `Cargo.toml` | Use Windows package metadata and version 0.1.0; remove master, libc, log, and env_logger; add the approved Windows process APIs and core tracing dependencies. |
+| `Cargo.toml` | Use Windows package metadata and version 0.8.0; remove master, libc, log, and env_logger; add the approved Windows process APIs and core tracing dependencies. |
 | `Cargo.lock` | Resolve the final binary dependencies. |
 | `src/main.rs` | Use the core CLI and single-process boot order; validate paths and listeners before PHP starts; probe spool owners through Windows process APIs; preserve the pidfile until the shutdown verdict. |
 | `src/worker.rs` | Wire the static PHP pool, upload limits, boot-failure stopper, bounded shutdown, exit codes, and joined-only spool cleanup; log extension failures and retain the console guard. |
