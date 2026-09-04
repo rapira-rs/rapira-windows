@@ -12,7 +12,7 @@ This repository contains the Windows server: the PHP SAPI in `crates/php_sys`, t
 - Network access to the official PHP 8.4 or 8.5 release source
 - The [latest supported Microsoft Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist) for the native architecture
 
-Use only tools and PHP files that match the host architecture. CI builds x64 on `windows-2022` and ARM64 on `windows-11-vs2026-arm`. Do not cross-build or run binaries for the other architecture locally.
+Use only tools and PHP files that match the host architecture. CI builds x64 on `windows-latest` and ARM64 on `windows-11-vs2026-arm`. Do not cross-build or run binaries for the other architecture locally.
 
 ## Build
 

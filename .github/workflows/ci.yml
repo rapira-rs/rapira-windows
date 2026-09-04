@@ -11,7 +11,7 @@ env:
 
 jobs:
   prepare:
-    runs-on: windows-2022
+    runs-on: windows-latest
     outputs:
       php84_version: ${{ steps.php84.outputs.php_version }}
       php84_devel_url: ${{ steps.php84.outputs.devel_url }}
@@ -45,7 +45,7 @@ jobs:
 
   test:
     needs: prepare
-    runs-on: windows-2022
+    runs-on: windows-latest
     env:
       CARGO_TARGET: x86_64-pc-windows-msvc
     strategy:
@@ -201,7 +201,7 @@ jobs:
 
   coverage:
     needs: prepare
-    runs-on: windows-2022
+    runs-on: windows-latest
     env:
       CARGO_TARGET: x86_64-pc-windows-msvc
     permissions:

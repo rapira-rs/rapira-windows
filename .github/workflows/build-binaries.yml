@@ -47,7 +47,7 @@ env:
 jobs:
     # Resolve each PHP branch once. This prevents parallel jobs from selecting different patch versions if releases.json changes during the workflow.
     prepare:
-        runs-on: windows-2022
+        runs-on: windows-latest
         timeout-minutes: 10
         outputs:
             php_84: ${{ steps.php84.outputs.spec }}
@@ -86,14 +86,14 @@ jobs:
                 include:
                     - php_branch: "8.4"
                       spec: ${{ needs.prepare.outputs.php_84 }}
-                      runner: windows-2022
+                      runner: windows-latest
                       target: x86_64-pc-windows-msvc
                       asset_arch: x86_64
                       install_group: php-x86_64
                       vc_arch: x64
                     - php_branch: "8.5"
                       spec: ${{ needs.prepare.outputs.php_85 }}
-                      runner: windows-2022
+                      runner: windows-latest
                       target: x86_64-pc-windows-msvc
                       asset_arch: x86_64
                       install_group: php-x86_64
