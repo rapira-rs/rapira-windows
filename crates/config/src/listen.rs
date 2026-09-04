@@ -34,18 +34,20 @@ impl FromStr for Listen {
         let s = s.trim();
         if !s.contains(':') {
             return Err(ListenParseError(format!(
-                "`{s}` is not a listen address: use host:port or :port"
+                "`{s}` is not a listen address: use an IP address with a port or :port"
             )));
         }
         if let Some(port) = s.strip_prefix(':') {
             let port: u16 = port.parse().map_err(|_| {
-                ListenParseError(format!("`{s}` has an invalid port: use host:port or :port"))
+                ListenParseError(format!(
+                    "`{s}` has an invalid port: use an IP address with a port or :port"
+                ))
             })?;
             return Ok(Listen::Tcp(SocketAddr::from((Ipv4Addr::UNSPECIFIED, port))));
         }
         s.parse::<SocketAddr>().map(Listen::Tcp).map_err(|_| {
             ListenParseError(format!(
-                "`{s}` is not a listen address: use host:port or :port"
+                "`{s}` is not a listen address: use an IP address with a port or :port"
             ))
         })
     }
@@ -82,7 +84,10 @@ mod tests {
             "",
         ] {
             let err = bad.parse::<Listen>().unwrap_err().to_string();
-            assert!(err.contains("use host:port or :port"), "{bad}: {err}");
+            assert!(
+                err.contains("use an IP address with a port or :port"),
+                "{bad}: {err}"
+            );
         }
     }
 

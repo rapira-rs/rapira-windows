@@ -1,7 +1,7 @@
 # This file is an example rapira.toml configuration. Command-line options override file values. All keys except pool.entrypoint are optional. Commented keys show default values.
 
 [http]
-listen = "127.0.0.1:8000"     # Use host:port, or use ":port" for all interfaces.
+listen = "127.0.0.1:8000"     # Use an IP address and port, or use ":port" for all interfaces.
 # server_name = "localhost"
 # server_port = 8000           # PHP receives this value as SERVER_PORT. The default is the listen port.
 # max_body_size_mb = 8         # Return status 413 for a larger request body.

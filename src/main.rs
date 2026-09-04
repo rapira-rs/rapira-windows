@@ -56,7 +56,7 @@ struct ServeArgs {
     #[arg(long, value_name = "MODE")]
     mode: Option<RunMode>,
 
-    /// Listen address: `host:port` or `:port` (all interfaces).
+    /// Listen on an IP address and port. Use `:port` for all interfaces.
     #[arg(long, value_name = "ADDR")]
     listen: Option<Listen>,
 

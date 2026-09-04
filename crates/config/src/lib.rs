@@ -214,7 +214,7 @@ mod tests {
             load_str("[http]\nlisten = \"unix:/run/r.sock\"\n[pool]\nentrypoint = \"a.php\"\n")
                 .unwrap();
         let err = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap_err();
-        assert!(format!("{err:#}").contains("use host:port or :port"));
+        assert!(format!("{err:#}").contains("use an IP address with a port or :port"));
     }
 
     #[test]
