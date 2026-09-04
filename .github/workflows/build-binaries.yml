@@ -117,19 +117,29 @@ jobs:
             STEM: rapira-v${{ inputs.version }}-php${{ matrix.php_branch }}-windows-${{ matrix.asset_arch }}
             CARGO_TARGET: ${{ matrix.target }}
             VC_ARCH: ${{ matrix.vc_arch }}
-            PHP_INSTALL_DIR: ${{ runner.temp }}\${{ matrix.install_group }}\${{ fromJSON(matrix.spec).php_version }}
         steps:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with:
                   ref: ${{ inputs.ref }}
                   persist-credentials: false
 
+            - name: Set PHP install path
+              id: php-path
+              shell: pwsh
+              env:
+                  INSTALL_GROUP: ${{ matrix.install_group }}
+                  PHP_FULL_VERSION: ${{ fromJSON(matrix.spec).php_version }}
+              run: |
+                  $path = Join-Path (Join-Path $env:RUNNER_TEMP $env:INSTALL_GROUP) $env:PHP_FULL_VERSION
+                  "PHP_INSTALL_DIR=$path" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+                  "install_dir=$path" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
             # Separate restore and save steps keep a completed PHP build after a later step fails.
             - name: Restore native PHP
               id: sourcephpcache
               uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
               with:
-                  path: ${{ env.PHP_INSTALL_DIR }}
+                  path: ${{ steps.php-path.outputs.install_dir }}
                   key: ${{ fromJSON(matrix.spec).source_cache_key }}-windows-${{ matrix.asset_arch }}-${{ hashFiles('ci/build-php.ps1', 'ci/php-configure-flags.txt', 'ci/php-src-8.4-exif.patch', 'ci/php-src-8.5-arm64.patch') }}
 
             - name: Build native PHP
@@ -146,7 +156,7 @@ jobs:
               if: steps.sourcephpcache.outputs.cache-hit != 'true'
               uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
               with:
-                  path: ${{ env.PHP_INSTALL_DIR }}
+                  path: ${{ steps.php-path.outputs.install_dir }}
                   key: ${{ steps.sourcephpcache.outputs.cache-primary-key }}
 
             - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable

@@ -125,7 +125,6 @@ jobs:
     timeout-minutes: 120
     env:
       CARGO_TARGET: aarch64-pc-windows-msvc
-      PHP_INSTALL_DIR: ${{ runner.temp }}\php-arm64\${{ matrix.version }}
     strategy:
       fail-fast: false
       matrix:
@@ -145,11 +144,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
 
+      - name: Set PHP install path
+        id: php-path
+        shell: pwsh
+        env:
+          PHP_FULL_VERSION: ${{ matrix.version }}
+        run: |
+          $path = Join-Path (Join-Path $env:RUNNER_TEMP 'php-arm64') $env:PHP_FULL_VERSION
+          "PHP_INSTALL_DIR=$path" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "install_dir=$path" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
       - name: Restore native PHP
         id: php-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ env.PHP_INSTALL_DIR }}
+          path: ${{ steps.php-path.outputs.install_dir }}
           key: ${{ matrix.source_cache_key }}-windows-arm64-${{ hashFiles('ci/build-php.ps1', 'ci/php-configure-flags.txt', 'ci/php-src-8.4-exif.patch', 'ci/php-src-8.5-arm64.patch') }}
 
       - name: Build native PHP
@@ -165,7 +174,7 @@ jobs:
         if: steps.php-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ env.PHP_INSTALL_DIR }}
+          path: ${{ steps.php-path.outputs.install_dir }}
           key: ${{ steps.php-cache.outputs.cache-primary-key }}
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
