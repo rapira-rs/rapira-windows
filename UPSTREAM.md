@@ -195,7 +195,7 @@ The formatter and tidy policy were copied from the live core checkout at `f9644c
 | `.gitignore` | Ignore generated builds, release staging, machine-local Cargo configuration, coverage output, and MSVC debug files. |
 | `.release-please-manifest.json` | Start the Windows package release line at version 0.1.0. |
 | `.zed/debug.json` | Omit the Unix LLDB fork-debug profile and its Unix library paths. |
-| `README.md` | Describe the Windows thread model, native architectures, bundled PHP runtime, configuration, and process behavior. |
+| `README.md` | Link to the shared documentation and describe only Windows platform, package, process, file, socket, and build differences. |
 | `CONTRIBUTING.md` | Document native x64 and ARM64 source builds, tests, clangd, and Windows releases. |
 | `AGENTS.md` | Apply the live core writing, comment, test, dependency, documentation, and review rules while retaining the Windows settled design. |
 | `Dockerfile` | Omit the Unix container payload because releases are native Windows archives. |
