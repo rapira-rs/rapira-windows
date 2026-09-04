@@ -1,5 +1,5 @@
 <?php
-// The asynchronous dispatcher uses one fiber for each request. tryReceive() polls while fibers run. A blocking receive() waits when no fibers remain.
+// The Fiber dispatcher completes each exchange before it receives the next request.
 
 use Rapira\Exception\ClosedException;
 use Rapira\Exception\RapiraThrowable;
@@ -62,37 +62,15 @@ $serve = static function (Exchange $ex): void {
 
 $d = \Rapira\get_dispatcher();
 
-$fibers = [];
-$max = 100;
-
 try {
     while (true) {
-        $ex = match (count($fibers)) {
-            $max => null,
-            0 => $d->receive(),
-            default => $d->tryReceive(),
-        };
+        $fiber = new Fiber($serve);
+        $fiber->start($d->receive());
 
-        if ($ex !== null) {
-            $fiber = new Fiber($serve);
-            $fiber->start($ex);
-            $fiber->isTerminated() or $fibers[] = $fiber;
-        }
-
-        foreach ($fibers as $i => $fiber) {
+        while (!$fiber->isTerminated()) {
             $fiber->resume();
-            if ($fiber->isTerminated()) {
-                unset($fibers[$i]);
-            }
         }
     }
 } catch (ClosedException) {
-    do {
-        foreach ($fibers as $i => $fiber) {
-            $fiber->resume();
-            if ($fiber->isTerminated()) {
-                unset($fibers[$i]);
-            }
-        }
-    } while (count($fibers) > 0);
+    // The dispatcher is drained. No more work will arrive.
 }

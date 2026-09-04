@@ -353,9 +353,9 @@ async fn drive<E: Extension>(
 }
 
 /// Keeps console control handling installed while the extensions run and drain.
-fn spawn_shutdown_watcher(stop_tx: watch::Sender<bool>) -> ShutdownWatcher {
-    win_ctrl::install(stop_tx);
-    ShutdownWatcher
+fn spawn_shutdown_watcher(stop_tx: watch::Sender<bool>) -> std::io::Result<ShutdownWatcher> {
+    win_ctrl::install(stop_tx)?;
+    Ok(ShutdownWatcher)
 }
 
 struct ShutdownWatcher;
@@ -367,6 +367,7 @@ impl Drop for ShutdownWatcher {
 }
 
 mod win_ctrl {
+    use std::io;
     use std::sync::OnceLock;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -402,11 +403,15 @@ mod win_ctrl {
         }
     }
 
-    pub(super) fn install(stop_tx: watch::Sender<bool>) {
+    pub(super) fn install(stop_tx: watch::Sender<bool>) -> io::Result<()> {
         let _ = STOP_TX.set(stop_tx);
         // SAFETY: handler has the required ABI and remains valid for the process lifetime.
         // https://learn.microsoft.com/en-us/windows/console/setconsolectrlhandler
-        unsafe { SetConsoleCtrlHandler(Some(handler), 1) };
+        if unsafe { SetConsoleCtrlHandler(Some(handler), 1) } == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
     }
 
     pub(super) fn uninstall() {
@@ -452,12 +457,12 @@ impl Running {
     }
 
     /// The first Ctrl+C or Ctrl+Break event drains extensions. A second event forces exit 130. Keep the returned value until PHP shuts down so console handling remains active.
-    pub fn serve(mut self) -> Served {
-        let watcher = spawn_shutdown_watcher(self.stop_tx.clone());
-        Served {
+    pub fn serve(mut self) -> std::io::Result<Served> {
+        let watcher = spawn_shutdown_watcher(self.stop_tx.clone())?;
+        Ok(Served {
             outcomes: self.drain_all(),
             _watcher: watcher,
-        }
+        })
     }
 
     fn drain_all(&mut self) -> Vec<Outcome> {

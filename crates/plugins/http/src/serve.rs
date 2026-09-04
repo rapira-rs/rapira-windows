@@ -19,10 +19,9 @@ enum Acceptor {
 }
 
 fn create_acceptor(prepared: PreparedListener) -> Result<Acceptor> {
-    use std::os::windows::io::{FromRawSocket, IntoRawSocket};
-    // SAFETY: into_raw_socket transfers sole ownership of the listening socket. prepare set nonblocking mode, which from_std requires but does not set.
-    let std = unsafe { std::net::TcpListener::from_raw_socket(prepared.into_raw_socket()) };
-    Ok(Acceptor::Tcp(TcpListener::from_std(std)?))
+    Ok(Acceptor::Tcp(TcpListener::from_std(
+        prepared.into_listener(),
+    )?))
 }
 
 pub(crate) async fn serve(

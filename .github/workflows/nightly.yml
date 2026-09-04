@@ -37,7 +37,9 @@ jobs:
                   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
               run: |
                   set -euo pipefail
-                  BASE=$(jq -er '.["."]' .release-please-manifest.json)
+                  # The Release Please manifest records the last released version. Nightly uses the root package version from this commit.
+                  # https://github.com/googleapis/release-please/blob/v17.6.0/docs/manifest-releaser.md#manifest
+                  BASE=$(cargo metadata --locked --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "rapira_windows") | .version')
                   echo "version=${BASE}-nightly.${SHA:0:7}" >> "$GITHUB_OUTPUT"
                   echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
                   TAGGED=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${BASE}" --jq '.object.sha' 2>/dev/null || true)

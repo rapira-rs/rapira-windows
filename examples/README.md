@@ -20,13 +20,15 @@ Dispatcher mode is the default. The synchronous example handles one request at a
 .\rapira.exe serve examples\dispatcher-sync.php
 ```
 
-The asynchronous example uses one fiber for each request. It calls `tryReceive()` while requests are active and calls blocking `receive()` when no fiber is active:
+The Fiber example runs each request in a Fiber. It completes the active exchange before it calls `receive()` for the next request:
 
 ```powershell
 .\rapira.exe serve examples\dispatcher-async.php
 ```
 
 Each interpreter thread boots its own resident script. `pool.processes` or `--processes` sets the number of interpreter threads.
+
+Each interpreter thread handles one active exchange. Use more interpreter threads to handle concurrent requests.
 
 All examples listen on `127.0.0.1:8000` by default. The classic and worker examples answer every path. The dispatcher examples provide these routes:
 

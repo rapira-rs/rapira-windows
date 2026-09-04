@@ -1,5 +1,4 @@
-use std::net::SocketAddr;
-use std::os::windows::io::{AsRawSocket, IntoRawSocket, OwnedSocket, RawSocket};
+use std::net::{SocketAddr, TcpListener};
 
 use anyhow::Context;
 use socket2::{Domain, Protocol, Socket, Type};
@@ -15,7 +14,7 @@ pub enum ListenAddr {
 /// Owns a listener socket until the extension takes ownership.
 #[derive(Debug)]
 pub struct PreparedListener {
-    socket: OwnedSocket,
+    listener: TcpListener,
     addr: ListenAddr,
 }
 
@@ -23,17 +22,9 @@ impl PreparedListener {
     pub fn addr(&self) -> &ListenAddr {
         &self.addr
     }
-}
 
-impl AsRawSocket for PreparedListener {
-    fn as_raw_socket(&self) -> RawSocket {
-        self.socket.as_raw_socket()
-    }
-}
-
-impl IntoRawSocket for PreparedListener {
-    fn into_raw_socket(self) -> RawSocket {
-        self.socket.into_raw_socket()
+    pub fn into_listener(self) -> TcpListener {
+        self.listener
     }
 }
 
@@ -72,7 +63,7 @@ impl PrepareCtx {
             .expect("inet socket has an inet local addr");
         let addr = ListenAddr::Tcp(resolved);
         Ok(PreparedListener {
-            socket: socket.into(),
+            listener: socket.into(),
             addr,
         })
     }
@@ -82,15 +73,9 @@ impl PrepareCtx {
 mod tests {
     use super::*;
     use std::io::{ErrorKind, Read, Write};
-    use std::net::{TcpListener, TcpStream};
-    use std::os::windows::io::FromRawSocket;
+    use std::net::TcpStream;
     use std::sync::mpsc;
     use std::time::Duration;
-
-    fn into_std(listener: PreparedListener) -> TcpListener {
-        // SAFETY: into_raw_socket transfers ownership of the listener socket. https://doc.rust-lang.org/std/os/windows/io/trait.FromRawSocket.html#tymethod.from_raw_socket
-        unsafe { TcpListener::from_raw_socket(listener.into_raw_socket()) }
-    }
 
     #[test]
     fn tcp_bind_resolves_and_accepts() {
@@ -100,7 +85,7 @@ mod tests {
         assert_ne!(resolved.port(), 0);
 
         let mut client = TcpStream::connect(resolved).unwrap();
-        let std_l = into_std(l);
+        let std_l = l.into_listener();
         std_l.set_nonblocking(false).unwrap();
         let (mut srv, _) = std_l.accept().unwrap();
         client.write_all(b"x").unwrap();
@@ -114,7 +99,7 @@ mod tests {
         let mut ctx = PrepareCtx::new();
         let prepared = ctx.bind_tcp("127.0.0.1:0".parse().unwrap()).unwrap();
         let ListenAddr::Tcp(resolved) = *prepared.addr();
-        let listener = into_std(prepared);
+        let listener = prepared.into_listener();
         let (tx, rx) = mpsc::channel();
         let accept = std::thread::spawn(move || {
             let _ = tx.send(listener.accept().map(|_| ()));
@@ -135,7 +120,7 @@ mod tests {
         let mut ctx = PrepareCtx::new();
         let prepared = ctx.bind_tcp("127.0.0.1:0".parse().unwrap()).unwrap();
         let ListenAddr::Tcp(resolved) = *prepared.addr();
-        let listener = into_std(prepared);
+        let listener = prepared.into_listener();
         listener.set_nonblocking(false).unwrap();
         let mut client = TcpStream::connect(resolved).unwrap();
         let (mut server, _) = listener.accept().unwrap();

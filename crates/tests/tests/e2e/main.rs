@@ -1,4 +1,5 @@
 mod concurrency;
+mod examples;
 mod harness;
 mod ini;
 mod lifecycle;

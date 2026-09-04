@@ -8,14 +8,13 @@ use rapira_http::{
 use rapira_runtime::ExtensionRuntime;
 use std::{
     fs::{OpenOptions, read_dir, remove_file},
+    os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
     path::PathBuf,
     process::ExitCode,
     sync::Arc,
 };
 use tracing::info;
-use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_INVALID_PARAMETER, GetLastError, HANDLE, STILL_ACTIVE,
-};
+use windows_sys::Win32::Foundation::{ERROR_INVALID_PARAMETER, GetLastError, STILL_ACTIVE};
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     TerminateProcess,
@@ -23,6 +22,8 @@ use windows_sys::Win32::System::Threading::{
 
 mod logging;
 mod pidfile;
+#[cfg(test)]
+mod version_tests;
 mod worker;
 
 #[global_allocator]
@@ -91,15 +92,6 @@ enum ProcessStatus {
     ExitCode(u32),
 }
 
-struct ProcessHandle(HANDLE);
-
-impl Drop for ProcessHandle {
-    fn drop(&mut self) {
-        // SAFETY: OpenProcess returned this owned handle.
-        unsafe { CloseHandle(self.0) };
-    }
-}
-
 fn process_status(pid: u32) -> ProcessStatus {
     // SAFETY: The process ID is positive. The returned handle stays local and is closed on return.
     // https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocess
@@ -107,11 +99,12 @@ fn process_status(pid: u32) -> ProcessStatus {
     if handle.is_null() {
         return ProcessStatus::OpenError(unsafe { GetLastError() });
     }
-    let handle = ProcessHandle(handle);
+    // SAFETY: OpenProcess returned this owned process handle.
+    let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
     let mut code = 0;
     // SAFETY: The handle has query access and code is writable for the duration of the call.
     // https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getexitcodeprocess
-    if unsafe { GetExitCodeProcess(handle.0, &mut code) } == 0 {
+    if unsafe { GetExitCodeProcess(handle.as_raw_handle(), &mut code) } == 0 {
         ProcessStatus::QueryError(unsafe { GetLastError() })
     } else {
         ProcessStatus::ExitCode(code)
@@ -119,10 +112,14 @@ fn process_status(pid: u32) -> ProcessStatus {
 }
 
 fn spool_dir_reclaimable(name: &str) -> bool {
-    spool_dir_reclaimable_with(name, process_status)
+    spool_dir_reclaimable_with(name, std::process::id(), process_status)
 }
 
-fn spool_dir_reclaimable_with(name: &str, probe: impl FnOnce(u32) -> ProcessStatus) -> bool {
+fn spool_dir_reclaimable_with(
+    name: &str,
+    current_pid: u32,
+    probe: impl FnOnce(u32) -> ProcessStatus,
+) -> bool {
     let Some(pid) = name
         .strip_prefix("rapira-spool-")
         .and_then(|p| p.parse::<u32>().ok())
@@ -130,6 +127,11 @@ fn spool_dir_reclaimable_with(name: &str, probe: impl FnOnce(u32) -> ProcessStat
     else {
         return false;
     };
+    // Windows can reuse a PID after its process exits. This process has not created its spool directory before the sweep.
+    // https://learn.microsoft.com/en-us/dotnet/api/system.diagnostics.process.id#remarks
+    if pid == current_pid {
+        return true;
+    }
     match probe(pid) {
         ProcessStatus::OpenError(ERROR_INVALID_PARAMETER) => true,
         ProcessStatus::ExitCode(code) => code != STILL_ACTIVE as u32,
@@ -311,7 +313,7 @@ mod tests {
     };
 
     #[test]
-    fn spool_sweep_reclaims_only_dead_pid_dirs() {
+    fn spool_sweep_reclaims_current_and_dead_pid_dirs() {
         for name in [
             "other-dir",
             "rapira-spool-",
@@ -319,10 +321,15 @@ mod tests {
             "rapira-spool--5",
             "rapira-spool-0",
         ] {
-            assert!(!spool_dir_reclaimable_with(name, |_| panic!(
+            assert!(!spool_dir_reclaimable_with(name, 999, |_| panic!(
                 "invalid name reached the process probe"
             )));
         }
+        assert!(spool_dir_reclaimable_with(
+            "rapira-spool-123",
+            123,
+            |_| panic!("current PID reached the process probe")
+        ));
         for (status, reclaim) in [
             (ProcessStatus::OpenError(ERROR_INVALID_PARAMETER), true),
             (ProcessStatus::OpenError(ERROR_ACCESS_DENIED), false),
@@ -333,14 +340,14 @@ mod tests {
             (ProcessStatus::QueryError(ERROR_ACCESS_DENIED), false),
         ] {
             assert_eq!(
-                spool_dir_reclaimable_with("rapira-spool-123", |pid| {
+                spool_dir_reclaimable_with("rapira-spool-123", 999, |pid| {
                     assert_eq!(pid, 123);
                     status
                 }),
                 reclaim
             );
         }
-        assert!(!spool_dir_reclaimable(&format!(
+        assert!(spool_dir_reclaimable(&format!(
             "rapira-spool-{}",
             std::process::id()
         )));

@@ -107,7 +107,7 @@ pub fn worker_body(
     }));
 
     match &outcomes {
-        Ok(served) => {
+        Ok(Ok(served)) => {
             for error in served
                 .outcomes
                 .iter()
@@ -116,6 +116,9 @@ pub fn worker_body(
                 tracing::error!(target: "rapira", "extension failed: {error}");
             }
         }
+        Ok(Err(error)) => {
+            tracing::error!(target: "rapira", "installing console control handler: {error}");
+        }
         Err(_) => tracing::error!(target: "rapira", "extension runtime panicked"),
     }
     let code = exit_code(
@@ -123,6 +126,7 @@ pub fn worker_body(
         outcomes
             .as_ref()
             .ok()
+            .and_then(|served| served.as_ref().ok())
             .map(|served| served.outcomes.as_slice()),
     );
     let joined = rapira.shutdown();
@@ -132,7 +136,7 @@ pub fn worker_body(
     Ok(WorkerOutcome {
         code,
         joined,
-        _served: outcomes.ok(),
+        _served: outcomes.ok().and_then(Result::ok),
     })
 }
 

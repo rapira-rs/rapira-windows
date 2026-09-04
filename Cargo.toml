@@ -43,6 +43,7 @@ tokio = { version = "1", features = ["sync"] }
 bytes = "1"
 http = "1"
 http-body-util = "0.1"
+windows-sys = "0.61"
 
 [workspace.lints.clippy]
 all = "warn"
@@ -60,7 +61,7 @@ php_sys = { workspace = true }
 rapira_config = { workspace = true }
 rapira_static_files = { workspace = true }
 rapira_http = { workspace = true }
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Threading"] }
 mimalloc = "0.1"
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter", "chrono", "json"] }

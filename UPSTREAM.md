@@ -13,7 +13,7 @@ The sync follows [the approved plan](docs/plans/2026-09-02-sync-core-0.8.0.md). 
 | `rust-toolchain.toml` | Select stable Rust, rustfmt, and Clippy while leaving the target native to each Windows host. |
 | `crates/api/Cargo.toml` | Remove libc from tests; add the approved tempfile dependency for file-read proofs. |
 | `crates/api/src/lib.rs` | Prepare before PHP startup; retain the PHP Unix address type; read file ranges with seek_read; test offset and EOF behavior. |
-| `crates/api/src/prepare.rs` | Own Windows sockets; bind TCP with default socket options; test nonblocking accept, bind conflicts, and rebind with a live connection. |
+| `crates/api/src/prepare.rs` | Store the prepared TCP listener directly; bind TCP with default socket options; test nonblocking accept, bind conflicts, and rebind with a live connection. |
 | `crates/config/src/lib.rs` | Remove Unix-derived server ports and pool scaling exports; test the Windows pool keys and absolute paths; describe the runtime timeout bound. |
 | `crates/config/src/listen.rs` | Accept only TCP addresses with explicit ports. |
 | `crates/config/src/pool.rs` | Use a static interpreter thread count and remove the five excluded pool keys. |
@@ -84,12 +84,12 @@ All runtime, HTTP, and static-file files were copied and compared with the appro
 |---|---|
 | `Cargo.toml` | Replace the old host and Pingora members with runtime and HTTP; add static-file middleware. |
 | `Cargo.lock` | Resolve hyper, hyper-util, and the exact tower-http 0.7.1 dependency. |
-| `crates/runtime/Cargo.toml` | Remove libc and use windows-sys 0.61 console and process APIs. |
-| `crates/runtime/src/lib.rs` | Use the retained Windows console handler and Running::serve; force the second event through TerminateProcess with code 130. |
+| `crates/runtime/Cargo.toml` | Remove libc and use the shared windows-sys 0.61 console and process APIs. |
+| `crates/runtime/src/lib.rs` | Use the retained Windows console handler and Running::serve; report a handler installation failure; force the second event through TerminateProcess with code 130. |
 | `crates/plugins/http/Cargo.toml` | Remove libc and use the core hyper dependencies. |
 | `crates/plugins/http/README.md` | Describe the TCP server and the Windows listener behavior. |
 | `crates/plugins/http/src/lib.rs` | Remove Unix listener configuration arms. |
-| `crates/plugins/http/src/serve.rs` | Consume the owned Windows socket and classify fatal Winsock errors; test accept and immediate rebind with a live connection. |
+| `crates/plugins/http/src/serve.rs` | Consume the prepared standard listener and classify fatal Winsock errors; test accept and immediate rebind with a live connection. |
 | `crates/plugins/http/src/bridge.rs` | Read file ranges with seek_read. |
 | `crates/middleware/static_files/Cargo.toml` | Remove libc and pin tower-http to 0.7.1. |
 | `crates/middleware/static_files/src/lib.rs` | Reject Windows path aliases before name filtering; test five bypasses; gate the symlink-loop proof on privilege error 1314; and advance the test cache clock in TTL proofs. |
@@ -105,14 +105,15 @@ The root manifest, main, worker, logging, and pidfile files were copied from the
 
 | File | Reason |
 |---|---|
-| `Cargo.toml` | Use Windows package metadata and version 0.8.0; remove master, libc, log, and env_logger; add the approved Windows process APIs and core tracing dependencies. |
+| `Cargo.toml` | Use Windows package metadata and version 0.8.0; remove master, libc, log, and env_logger; share the approved Windows process API dependency and core tracing dependencies. |
 | `Cargo.lock` | Resolve the final binary dependencies. |
-| `src/main.rs` | Use the core CLI and single-process boot order; validate paths and listeners before PHP starts; probe spool owners through Windows process APIs; preserve the pidfile until the shutdown verdict. |
+| `src/main.rs` | Use the core CLI and single-process boot order; validate paths and listeners before PHP starts; probe spool owners through Windows process APIs; guard owned process handles; reclaim the current PID directory after PID reuse; preserve the pidfile until the shutdown verdict. |
+| `src/version_tests.rs` | Verify one product version across the workspace packages, CLI, and PHP API. |
 | `src/worker.rs` | Wire the static PHP pool, upload limits, boot-failure stopper, bounded shutdown, exit codes, and joined-only spool cleanup; log extension failures and retain the console guard. |
 | `src/pidfile.rs` | Place the unchanged master pidfile guard beside the Windows binary. |
-| `crates/runtime/src/lib.rs` | Return a Served holder so console handling stays active through PHP shutdown and the binary's forced-exit decision. |
+| `crates/runtime/src/lib.rs` | Return a Served holder so console handling stays active through PHP shutdown and the binary's forced-exit decision; report a failed SetConsoleCtrlHandler call. |
 
-The spool probe proof was saved before implementation. It covers invalid names, a live process, an exited child, OpenProcess errors, query errors, and STILL_ACTIVE. Four worker proofs cover boot-failure precedence, runtime failures, and the stopper-registration race. PHP 8.4 and PHP 8.5 each pass the full binary build, all 14 binary unit tests, and all 16 runtime unit tests. A PHP 8.5 server with two interpreter threads answered a live request with HTTP 200 and body `ok`. Formatting and whitespace checks pass.
+The spool probe proof was saved before implementation. It covers invalid names, the current PID, a live process, an exited child, OpenProcess errors, query errors, and STILL_ACTIVE. Four worker proofs cover boot-failure precedence, runtime failures, and the stopper-registration race. PHP 8.4 and PHP 8.5 each pass the full binary build, all 17 binary unit tests, and all 16 runtime unit tests. A PHP 8.5 server with two interpreter threads answered a live request with HTTP 200 and body `ok`. Formatting and whitespace checks pass.
 
 Review found that the retained Windows watcher originally ended when extension serving returned. The PHP join can still have live threads at that point. A prewritten lifecycle test covers a second control event during that join. The Served holder now keeps the watcher through PHP shutdown while allowing the Tokio runtime to drop first. The main function calls TerminateProcess before either the holder or pidfile can drop when joining fails.
 
@@ -127,17 +128,19 @@ The tests crate uses the core path and package name. The 16 in-process suites an
 | `Cargo.toml` | Replace the old integration test member with crates/tests. |
 | `Cargo.lock` | Resolve the renamed test package and its Windows dependencies. |
 | `dev.ps1` | Use the lockfile for build, test, e2e, and coverage tasks. |
-| `crates/tests/Cargo.toml` | Use Windows console APIs and gate the server tests behind the e2e feature. |
+| `crates/tests/Cargo.toml` | Use the shared Windows console and process APIs and gate the server tests behind the e2e feature. |
 | `crates/tests/src/lib.rs` | Read file ranges with seek_read and load required DLLs through a process-local scan INI while preserving fixture PHPRC files. |
-| `crates/tests/tests/dispatcher_loop.rs` | Remove the Unix address case and use an existing Windows file outside the sendfile root. |
+| `crates/tests/tests/exchange_api.rs` | Rename the dispatcher API suite to avoid the observed Windows error 740 for its original executable name. |
+| `crates/tests/tests/exchange_loop.rs` | Rename the dispatcher loop suite to avoid the observed Windows error 740 for its original executable name; remove the Unix address case and use an existing Windows file outside the sendfile root. |
 | `crates/tests/tests/http_values.rs` | Check an InetAddress server value. |
 | `crates/tests/fixtures/http_values/construct.php` | Construct the server address with InetAddress. |
 | `crates/tests/tests/php_ext_tests.rs` | Remove the two IMAP tests outside the bundled extension set. |
 | `crates/php_sys/build.rs` | Map sapi_startup to the Windows C priority bridge. |
 | `crates/php_sys/wrapper.c` | Translate native error and warning priorities before the unchanged Rust log callback. |
 | `crates/php_sys/wrapper.h` | Declare the SAPI startup bridge with PHP's exact signature. |
-| `crates/tests/tests/e2e/main.rs` | Select the approved Windows suites and place the console-delivery proof first. |
-| `crates/tests/tests/e2e/harness.rs` | Use process groups, checked Ctrl+Break delivery, a console probe, taskkill cleanup, thread readiness sets, and Windows PHP extension and INI paths. |
+| `crates/tests/tests/e2e/main.rs` | Select the approved Windows suites, place the console-delivery proof first, and run the shipped example proof. |
+| `crates/tests/tests/e2e/harness.rs` | Use generated process-creation flags, process groups, checked Ctrl+Break delivery, a console probe, taskkill cleanup, thread readiness sets, repository examples, and Windows PHP extension and INI paths. |
+| `crates/tests/tests/e2e/examples.rs` | Run the shipped Fiber example and verify its complete streamed response. |
 | `crates/tests/tests/e2e/lifecycle.rs` | Test Windows shutdown and exit codes, bind failure, restart, per-thread recycle, memory bounds, and interruptible crash backoff. |
 | `crates/tests/tests/e2e/fixtures/lifecycle/windows-lifecycle-worker.php` | Hold requests and PHP thread teardown at observable lifecycle points. |
 | `crates/tests/tests/e2e/fixtures/lifecycle/quota-worker.php` | Keep queued work active across four interpreter threads. |
@@ -184,7 +187,7 @@ The formatter and tidy policy were copied from the live core checkout at `f9644c
 | `.github/pull_request_template.md` | Use the Windows repository review checklist and contribution terms. |
 | `.github/workflows/ci.yml` | Resolve PHP 8.4 and 8.5 once, test x64 with verified official Windows packages, build PHP for native ARM64 tests, and keep coverage on the native x64 lane. |
 | `.github/workflows/build-binaries.yml` | Build PHP and Rapira for PHP 8.4 and 8.5 on native x64 and ARM64 runners, smoke each bundle, and create architecture-specific archives and checksums. |
-| `.github/workflows/nightly.yml` | Refresh a rolling Windows prerelease from a successful main CI run without Docker publishing. |
+| `.github/workflows/nightly.yml` | Read the root Cargo package version and refresh a rolling Windows prerelease from a successful main CI run without Docker publishing. |
 | `.github/workflows/release-please.yml` | Build the four native Windows archives after Release Please creates a tag and publish only after every bundle is uploaded. |
 | `.github/workflows/clippy.yml` | Omit the Unix lint workflow because native formatting and Clippy checks run in `ci.yml`. |
 | `.github/workflows/coverage.yml` | Omit the Unix coverage workflow because Windows coverage runs in `ci.yml`. |
@@ -210,11 +213,14 @@ The formatter and tidy policy were copied from the live core checkout at `f9644c
 | `ci/php-src-8.5-arm64.patch` | Select PHP's scalar fallback for the unsupported MSVC ARM64 SIMD compatibility path in PHP 8.5. |
 | `ci/windows-extensions.txt` | Require the fileinfo and mbstring DLLs produced by both native source builds. |
 | `examples/rapira.toml` | Use Windows paths and the fixed interpreter thread pool configuration. |
-| `examples/README.md` | Use PowerShell commands and explain Windows interpreter threads. |
+| `examples/README.md` | Use PowerShell commands and explain Windows interpreter threads and the one-active-exchange rule. |
+| `examples/dispatcher-async.php` | Complete the active Fiber before receiving the next exchange. |
 
-`.clang-format`, `codecov.yml`, `release-please-config.json`, and `rust-toolchain.toml` match the specified core commit byte for byte. The PHP example scripts have comment-only deltas listed in the comment audit section. `AGENTS.md` applies the compatible instruction sections from live core commit `f9644c449684bca8262e81f5a83659cbe2ca7fbb` and retains the Windows settled design.
+`.clang-format`, `codecov.yml`, `release-please-config.json`, and `rust-toolchain.toml` match the specified core commit byte for byte. The classic, synchronous dispatcher, and worker example scripts have comment-only deltas listed in the comment audit section. `AGENTS.md` applies the compatible instruction sections from live core commit `f9644c449684bca8262e81f5a83659cbe2ca7fbb` and retains the Windows settled design.
 
 The Release Please configuration also matches live core commit `f9644c449684bca8262e81f5a83659cbe2ca7fbb` byte for byte. The Windows workflows use the base release pull request, draft release, stable release, nightly release, and manual recovery behavior. Each published release contains four native Windows archives and two architecture checksum files.
+
+All workspace packages use version 0.8.0. The root package version sets the Nightly artifact version. The release manifest records the last released version.
 
 ## Comment audit deltas
 
@@ -248,7 +254,6 @@ The comment audit applies the writing rules from live core commit `f9644c449684b
 - `crates/tests/tests/app_logger_limits.rs`: The copied comments use STE wording.
 - `crates/tests/tests/app_logger_types.rs`: The copied comments use STE wording.
 - `crates/tests/tests/basic_tests.rs`: The copied comments use STE wording.
-- `crates/tests/tests/dispatcher.rs`: The copied comments use STE wording.
 - `crates/tests/tests/extension_tests.rs`: The copied comments use STE wording.
 - `crates/tests/tests/failboot_tests.rs`: The copied comments use STE wording.
 - `crates/tests/tests/general_tests.rs`: The copied comments use STE wording.
@@ -356,7 +361,6 @@ The comment audit applies the writing rules from live core commit `f9644c449684b
 - `crates/tests/tests/e2e/fixtures/lifecycle/upload-worker.php`: The copied comments use STE wording.
 - `crates/tests/tests/e2e/fixtures/shared/echo-worker.php`: The copied comments use STE wording.
 - `examples/classic.php`: The copied comments use STE wording.
-- `examples/dispatcher-async.php`: The copied comments use STE wording.
 - `examples/dispatcher-sync.php`: The copied comments use STE wording.
 - `examples/worker.php`: The copied comments use STE wording.
 

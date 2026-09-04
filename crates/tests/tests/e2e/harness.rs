@@ -9,15 +9,13 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use windows_sys::Win32::Foundation::GetLastError;
 use windows_sys::Win32::System::Console::{
     AllocConsole, CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent, GetConsoleProcessList,
     SetConsoleCtrlHandler,
 };
+use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
 use windows_sys::core::BOOL;
 
-const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const CONSOLE_PROBE: &str = "RAPIRA_E2E_CONSOLE_PROBE";
 
 /// Connection timeout for a new Windows server process.
@@ -36,8 +34,8 @@ pub fn assert_console_delivery() {
             // A redirected test runner can start without a console. Allocate one console and verify that new process groups inherit it.
             if unsafe { AllocConsole() } == 0 {
                 return Err(format!(
-                    "{first}; AllocConsole failed: GetLastError={} (no shared console)",
-                    unsafe { GetLastError() }
+                    "{first}; AllocConsole failed: {} (no shared console)",
+                    io::Error::last_os_error()
                 ));
             }
             console_delivery_attempt()
@@ -80,8 +78,8 @@ fn console_delivery_attempt() -> Result<(), String> {
         // SAFETY: The child is the leader of this process group, and the test has not reaped it.
         if unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, child.id()) } == 0 {
             return Err(format!(
-                "GenerateConsoleCtrlEvent failed: GetLastError={} (no shared console)",
-                unsafe { GetLastError() }
+                "GenerateConsoleCtrlEvent failed: {} (no shared console)",
+                io::Error::last_os_error()
             ));
         }
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -96,10 +94,10 @@ fn console_delivery_attempt() -> Result<(), String> {
                 };
             }
             if Instant::now() >= deadline {
-                return Err(format!(
-                    "GenerateConsoleCtrlEvent succeeded but the child did not observe it; GetLastError={} (no shared console)",
-                    unsafe { GetLastError() }
-                ));
+                return Err(
+                    "GenerateConsoleCtrlEvent succeeded but the child did not observe it (no shared console)"
+                        .into(),
+                );
             }
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -130,12 +128,12 @@ fn console_probe_child() {
         }
     }
     // SAFETY: This handler runs only in the child, has the system ABI, and remains valid until exit.
-    assert_ne!(
-        unsafe { SetConsoleCtrlHandler(Some(handler), 1) },
-        0,
-        "SetConsoleCtrlHandler failed: GetLastError={} (no shared console)",
-        unsafe { GetLastError() }
-    );
+    if unsafe { SetConsoleCtrlHandler(Some(handler), 1) } == 0 {
+        panic!(
+            "SetConsoleCtrlHandler failed: {} (no shared console)",
+            io::Error::last_os_error()
+        );
+    }
     std::fs::write(ready, b"handler installed").unwrap();
     let deadline = Instant::now() + BOOT;
     while !OBSERVED.load(Ordering::Acquire) {
@@ -149,12 +147,12 @@ fn console_probe_child() {
 
 pub fn send_ctrl_break(pid: u32) {
     // SAFETY: Callers retain the `Child` while they send events to its process group.
-    assert_ne!(
-        unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) },
-        0,
-        "GenerateConsoleCtrlEvent({pid}) failed: GetLastError={} (no shared console)",
-        unsafe { GetLastError() }
-    );
+    if unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) } == 0 {
+        panic!(
+            "GenerateConsoleCtrlEvent({pid}) failed: {} (no shared console)",
+            io::Error::last_os_error()
+        );
+    }
 }
 
 fn force_reap(child: &mut Child) {
@@ -266,6 +264,14 @@ pub fn spawn_with_config(fixture: &str, processes: usize, extra_toml: &str) -> S
     spawn_with_extras(fixture, processes, "", extra_toml, Some("info"), None)
 }
 
+/// Starts an example from the repository `examples` directory.
+pub fn spawn_example(name: &str, processes: usize) -> Server {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples")
+        .join(name);
+    spawn_with_source(&source, name, processes, "", "", Some("info"), None)
+}
+
 /// Calls [`spawn_with_config`] with keys in `[http]`, where the final `extra_toml` cannot add values.
 pub fn spawn_with_http_extra(fixture: &str, processes: usize, http_extra: &str) -> Server {
     spawn_with_extras(fixture, processes, http_extra, "", Some("info"), None)
@@ -332,7 +338,27 @@ fn spawn_with_extras(
     rust_log: Option<&str>,
     cwd_ini: Option<CwdIni<'_>>,
 ) -> Server {
-    let (dir, entrypoint) = stage_fixture(fixture);
+    spawn_with_source(
+        &fixture_path(fixture),
+        fixture,
+        processes,
+        http_extra,
+        extra_toml,
+        rust_log,
+        cwd_ini,
+    )
+}
+
+fn spawn_with_source(
+    source: &Path,
+    name: &str,
+    processes: usize,
+    http_extra: &str,
+    extra_toml: &str,
+    rust_log: Option<&str>,
+    cwd_ini: Option<CwdIni<'_>>,
+) -> Server {
+    let (dir, entrypoint) = stage_source(source, name);
     if let Some(ini) = &cwd_ini {
         std::fs::write(dir.join("php.ini"), ini.contents).expect("write php.ini");
         if let Some((relative, contents)) = ini.phprc_file {
@@ -367,12 +393,16 @@ fn spawn_with_extras(
 
 /// A temporary directory with a copy of the fixture and its entrypoint name for the configuration.
 fn stage_fixture(fixture: &str) -> (PathBuf, String) {
+    stage_source(&fixture_path(fixture), fixture)
+}
+
+fn stage_source(source: &Path, name: &str) -> (PathBuf, String) {
     let dir = scratch_dir();
-    let name = Path::new(fixture)
+    let name = Path::new(name)
         .file_name()
-        .unwrap_or_else(|| panic!("fixture {fixture} has no file name"));
-    std::fs::copy(fixture_path(fixture), dir.join(name))
-        .unwrap_or_else(|e| panic!("copy fixture {fixture}: {e}"));
+        .unwrap_or_else(|| panic!("source {} has no file name", source.display()));
+    std::fs::copy(source, dir.join(name))
+        .unwrap_or_else(|e| panic!("copy source {}: {e}", source.display()));
     let entrypoint = name.to_str().expect("fixture name is utf-8").to_owned();
     (dir, entrypoint)
 }
