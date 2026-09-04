@@ -1,5 +1,5 @@
-/// Separator for repeated values of `name`. `None` identifies a singleton field. For a singleton field, the function retains the first line and discards the other lines.
-/// Combining is legal only for comma-list fields: https://www.rfc-editor.org/rfc/rfc9110#section-5.3
+/// Separator for repeated values of `name`. `None` identifies a known singleton field. The function retains its first line and discards later lines.
+/// Other fields use comma and space. This supports list fields, including extension fields: https://www.rfc-editor.org/rfc/rfc9110#section-5.3
 /// `Cookie` values use `"; "` as the separator: https://www.rfc-editor.org/rfc/rfc6265#section-4.2.1
 pub(crate) fn field_line_separator(name: &str) -> Option<&'static [u8]> {
     const SINGLETON: &[&str] = &[
