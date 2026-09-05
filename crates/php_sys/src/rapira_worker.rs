@@ -16,7 +16,7 @@ use crate::{
     context::{bind_server_context, ctx, populate_request_context, unbind_server_context},
     executor::run_script,
     php_request_startup, rapira_eg, rapira_pg, rapira_run_handler,
-    types::Job,
+    types::Context,
     zend_fcall_info, zend_fcall_info_cache, *,
 };
 
@@ -91,26 +91,9 @@ fn run_cycle(script: &Path) -> Cycle {
         return Cycle::Restart;
     }
 
-    classify(CycleEnd {
-        closed: crate::exchange::closed_seen(),
-        recycle,
-        served: crate::exchange::served_any(),
-        received: crate::exchange::received_any(),
-    })
-}
-
-struct CycleEnd {
-    closed: bool,
-    recycle: bool,
-    served: bool,
-    received: bool,
-}
-
-/// The caller decides whether to restart after a shutdown bailout before this function runs.
-fn classify(end: CycleEnd) -> Cycle {
-    if end.closed {
+    if crate::exchange::closed_seen() {
         Cycle::Stop
-    } else if end.recycle || end.served || end.received {
+    } else if recycle || crate::exchange::served_any() || crate::exchange::received_any() {
         Cycle::Recycle
     } else {
         Cycle::Failed
@@ -143,8 +126,8 @@ pub fn rapira_worker(script: PathBuf) -> WorkerExit {
                 match pull_job() {
                     None => break WorkerExit::Closed,
                     Some(mut job) => {
-                        send_error_head(&mut job.ctx, 503);
-                        job.ctx.finish(false);
+                        send_error_head(&mut job, 503);
+                        job.finish(false);
                         sb_update(scoreboard::Event::Shed);
                     }
                 }
@@ -178,21 +161,21 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
         };
     };
 
-    bind_server_context(&mut job.ctx);
+    bind_server_context(&mut job);
     unsafe {
-        populate_request_context(&mut job.ctx);
+        populate_request_context(&mut job);
         rapira_release_temporary_streams();
     }
 
     let mut outcome = Outcome::from_c(unsafe { rapira_request_activate() });
     if outcome != Outcome::Bailout {
         unsafe {
-            crate::context::apply_proto_num(&job.ctx);
+            crate::context::apply_proto_num(&job);
             outcome = Outcome::from_c(rapira_run_handler(fci, fcc));
         }
     }
 
-    job.ctx.tearing_down = true;
+    job.tearing_down = true;
     let flushed = match outcome {
         Outcome::Bailout | Outcome::Throw => Outcome::from_c(unsafe { rapira_finish_output() }),
         _ => Outcome::Ok,
@@ -201,7 +184,7 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
 
     let recycle: bool = [outcome, flushed, teardown].contains(&Outcome::Bailout);
     let errored: bool = recycle || outcome == Outcome::Throw;
-    let truncated: bool = finalize_response(&mut job.ctx, errored);
+    let truncated: bool = finalize_response(&mut job, errored);
 
     log_and_clear_last_error();
     unbind_server_context();
@@ -209,7 +192,7 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
     if recycle {
         set_worker_recycle();
     }
-    job.ctx.finish(truncated);
+    job.finish(truncated);
     crate::exchange::note_served();
     if recycle {
         HandleAction::Recycle
@@ -219,7 +202,7 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
 }
 
 /// The first call ends the startup request that php_request_startup() created before the worker processes a job.
-fn next_job() -> Option<Job> {
+fn next_job() -> Option<Context> {
     WORKER.with_borrow_mut(|w| {
         let wc = w.as_mut()?;
         if std::mem::take(&mut wc.first_call) {
@@ -237,7 +220,7 @@ fn next_job() -> Option<Job> {
         loop {
             match pull_job() {
                 Some(job) => {
-                    if job.ctx.sender.as_ref().is_some_and(|s| s.is_closed()) {
+                    if job.sender.as_ref().is_some_and(|s| s.is_closed()) {
                         sb_update(scoreboard::Event::Handled(true));
                         continue;
                     }

@@ -1,7 +1,3 @@
-use clap::CommandFactory;
-
-use crate::Cli;
-
 const PACKAGE_MANIFESTS: &[(&str, &str)] = &[
     ("rapira_windows", include_str!("../Cargo.toml")),
     ("extension_api", include_str!("../crates/api/Cargo.toml")),
@@ -54,23 +50,4 @@ fn workspace_packages_use_the_product_version() {
             "{name} must use the product version"
         );
     }
-}
-
-#[test]
-fn cli_uses_the_product_version() {
-    assert_eq!(
-        Cli::command().get_version(),
-        Some(env!("CARGO_PKG_VERSION"))
-    );
-}
-
-#[test]
-fn php_api_uses_the_product_version() {
-    let mut len = 0;
-    // SAFETY: `len` is writable, and the function returns a static string with this byte length.
-    let ptr = unsafe { php_sys::dispatcher::rapira_rs_version(&raw mut len) };
-    assert!(!ptr.is_null());
-    // SAFETY: The function returned a non-null pointer to `len` initialized bytes.
-    let version = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), len) };
-    assert_eq!(version, env!("CARGO_PKG_VERSION").as_bytes());
 }

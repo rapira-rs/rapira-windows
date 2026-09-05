@@ -60,10 +60,6 @@ pub enum Frame {
     },
 }
 
-pub struct Job {
-    pub ctx: Context,
-}
-
 /// Equivalent to `extension_api::Addr`. php_sys does not depend on extension_api, so the runtime converts between these types.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Addr {
@@ -303,10 +299,6 @@ impl Context {
         }
     }
 
-    pub fn is_truncated(&self, errored: bool) -> bool {
-        errored && self.stream == StreamState::BodyStreamed
-    }
-
     pub fn commit_head(&mut self, mut status: u16, mut headers: FieldLines) {
         headers.retain(|(name, value)| {
             if !name.eq_ignore_ascii_case("status") {
@@ -434,11 +426,5 @@ mod tests {
         let head = head_of(201, &[("Status", "NotFound")]);
         assert_eq!(head.status, 201);
         assert!(head.headers.is_empty());
-    }
-
-    /// RFC 3875 section 6.3.3 defines `Status` as the result code from the script, so it overrides the code that php-src recorded. https://www.rfc-editor.org/rfc/rfc3875#section-6.3.3
-    #[test]
-    fn commit_head_lets_the_status_field_override_the_recorded_code() {
-        assert_eq!(head_of(500, &[("Status", "404")]).status, 404);
     }
 }

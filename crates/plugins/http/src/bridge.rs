@@ -61,20 +61,16 @@ impl ReplyBody {
         }
     }
 
-    fn drain_after_declared_length(&mut self) {
-        if self.declared_cl.is_some_and(|length| self.sent >= length)
-            && let Some(reply) = self.reply.take()
-        {
-            spawn_drain(reply, self.closed.clone(), Arc::clone(&self.guard));
-        }
-    }
-
     fn data_frame(
         &mut self,
         bytes: Bytes,
     ) -> Poll<Option<Result<http_body::Frame<Bytes>, BoxError>>> {
         self.sent += bytes.len() as u64;
-        self.drain_after_declared_length();
+        if self.declared_cl.is_some_and(|length| self.sent >= length)
+            && let Some(reply) = self.reply.take()
+        {
+            spawn_drain(reply, self.closed.clone(), Arc::clone(&self.guard));
+        }
         Poll::Ready(Some(Ok(http_body::Frame::data(bytes))))
     }
 
@@ -193,14 +189,6 @@ impl http_body::Body for ReplyBody {
             }
         }
     }
-
-    fn is_end_stream(&self) -> bool {
-        false
-    }
-
-    fn size_hint(&self) -> http_body::SizeHint {
-        http_body::SizeHint::default()
-    }
 }
 
 pub(crate) fn spawn_drain(
@@ -238,20 +226,6 @@ impl<T> TimedIo<T> {
         }
     }
 
-    fn stalled(&mut self, cx: &mut Context<'_>) -> Option<std::io::Error> {
-        let deadline = self
-            .deadline
-            .get_or_insert_with(|| Box::pin(tokio::time::sleep(self.timeout)));
-        if deadline.as_mut().poll(cx).is_ready() {
-            tracing::debug!(target: "http", "response write timed out; closing the connection");
-            return Some(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "response write timed out",
-            ));
-        }
-        None
-    }
-
     fn gate<R>(
         &mut self,
         cx: &mut Context<'_>,
@@ -262,10 +236,20 @@ impl<T> TimedIo<T> {
                 self.deadline = None;
                 Poll::Ready(r)
             }
-            Poll::Pending => match self.stalled(cx) {
-                Some(e) => Poll::Ready(Err(e)),
-                None => Poll::Pending,
-            },
+            Poll::Pending => {
+                let deadline = self
+                    .deadline
+                    .get_or_insert_with(|| Box::pin(tokio::time::sleep(self.timeout)));
+                if deadline.as_mut().poll(cx).is_ready() {
+                    tracing::debug!(target: "http", "response write timed out; closing the connection");
+                    Poll::Ready(Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "response write timed out",
+                    )))
+                } else {
+                    Poll::Pending
+                }
+            }
         }
     }
 }

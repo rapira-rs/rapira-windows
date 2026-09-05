@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use extension_api::{
     Addr, BoxError, BoxFuture, Handler, HttpRequest, HttpResponse, Middleware, Next, Peer, Php,
-    Protocol, Rejected, ReplyEvent,
+    Rejected, ReplyEvent,
 };
 use http_body::Body;
 use http_body_util::BodyExt;
@@ -179,7 +179,6 @@ where
         .await;
     }
 
-    parts.extensions.insert(Protocol::Http);
     parts.extensions.insert(peer);
     parts.extensions.insert(ReqState {
         authority,

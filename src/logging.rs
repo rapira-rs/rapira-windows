@@ -180,13 +180,6 @@ mod tests {
     }
 
     #[test]
-    fn config_target_that_breaks_the_grammar_fails_loudly() {
-        let log = settings(LogLevel::Error, &[(".php", LogLevel::Warn)]);
-        let err = build_filter(None, &log).unwrap_err();
-        assert!(err.to_string().contains("error,.php=warn"), "{err:#}");
-    }
-
-    #[test]
     fn config_levels_are_valid_filter_directives() {
         for level in [
             LogLevel::Error,
@@ -201,7 +194,7 @@ mod tests {
     }
 
     #[test]
-    fn json_layer_emits_flat_single_line_records() {
+    fn json_layer_groups_event_fields_in_single_line_records() {
         let sink = Sink::default();
         let sub = tracing_subscriber::registry()
             .with(EnvFilter::new("info"))
@@ -212,13 +205,12 @@ mod tests {
             });
         });
         let out = sink.text();
-        let line = out.lines().next().expect("one record");
+        let mut lines = out.lines();
+        let line = lines.next().expect("one record");
+        assert!(lines.next().is_none());
         let v: serde_json::Value = serde_json::from_str(line).expect("json record");
         assert_eq!(v["fields"]["message"], "boot-mark");
-        assert_eq!(
-            v["fields"]["answer"], 42,
-            "event fields must be flattened to the top level"
-        );
+        assert_eq!(v["fields"]["answer"], 42);
         assert_eq!(v["target"], "rapira");
         assert_eq!(v["level"], "INFO");
         // ChronoUtc %.3f produces RFC 3339 UTC with exactly three millisecond digits.

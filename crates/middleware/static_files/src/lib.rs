@@ -93,7 +93,7 @@ impl Middleware for StaticFiles {
                 return next.run(req).await;
             }
 
-            // The probe contains only the request metadata. The original request remains unchanged so the fallback handler receives the `Peer` and `Protocol` extensions.
+            // The probe contains only the request metadata. The fallback handler receives the original body and request extensions.
             let mut probe = http::Request::new(Empty::<Bytes>::new());
             *probe.method_mut() = req.method().clone();
             *probe.uri_mut() = req.uri().clone();
@@ -124,7 +124,7 @@ impl Middleware for StaticFiles {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use extension_api::{Addr, Handler, Peer, Protocol};
+    use extension_api::{Addr, Handler, Peer};
     use http_body_util::Full;
     use std::net::SocketAddr;
     use std::sync::Arc;
@@ -146,8 +146,7 @@ mod tests {
     impl Handler for Fallthrough {
         fn call<'a>(&'a self, req: HttpRequest) -> BoxFuture<'a, HttpResponse> {
             Box::pin(async move {
-                let kept = req.extensions().get::<Peer>().is_some()
-                    && req.extensions().get::<Protocol>().is_some();
+                let kept = req.extensions().get::<Peer>().is_some();
                 let body = req.into_body().collect().await.unwrap().to_bytes();
                 http::Response::builder()
                     .status(200)
@@ -169,7 +168,6 @@ mod tests {
                     .boxed_unsync(),
             )
             .unwrap();
-        req.extensions_mut().insert(Protocol::Http);
         req.extensions_mut().insert(peer());
         req
     }

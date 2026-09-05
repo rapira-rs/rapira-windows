@@ -754,32 +754,6 @@ pub fn fixture_path(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// Returns the bundled DLL for `name`. A missing required extension must fail the test.
-#[allow(dead_code)] // Supports extension-specific end-to-end cases outside the bundled test suite.
-pub fn php_extension(name: &str) -> Option<PathBuf> {
-    let stem = name
-        .trim_start_matches("php_")
-        .trim_end_matches(".dll")
-        .trim_end_matches(".so");
-    let p = std::env::var_os("PHP_RUNTIME").map(|root| {
-        PathBuf::from(root)
-            .join("ext")
-            .join(format!("php_{stem}.dll"))
-    });
-    if let Some(p) = &p
-        && p.exists()
-    {
-        return p.clone().into();
-    }
-    if let Ok(required) = std::env::var("RAPIRA_REQUIRE_EXTS") {
-        assert!(
-            !required.split(',').any(|e| e.trim() == stem),
-            "RAPIRA_REQUIRE_EXTS demands {stem}, but {name} is not at {p:?}"
-        );
-    }
-    None
-}
-
 fn free_port() -> u16 {
     let l = TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral port");
     l.local_addr().expect("local_addr").port()

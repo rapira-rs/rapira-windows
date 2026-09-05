@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     start::Rapira,
-    types::{Context, Frame, Job, Request},
+    types::{Context, Frame, Request},
 };
 
 // A capacity of four accepts a buffered Head, Chunk, and End group plus one interim head without blocking the PHP thread.
@@ -34,7 +34,7 @@ impl std::error::Error for HandleError {}
 
 #[derive(Clone)]
 pub struct RapiraHandle {
-    intake: Sender<Job>,
+    intake: Sender<Context>,
     pending: Arc<AtomicUsize>,
     superglobals: bool,
     dispatcher: bool,
@@ -88,9 +88,7 @@ impl RapiraHandle {
     pub async fn handle(&self, mut req: Request) -> Result<mpsc::Receiver<Frame>, HandleError> {
         req.received_at.get_or_insert_with(now_unix_f64);
         let (tx, rx) = mpsc::channel::<Frame>(FRAME_CAP);
-        let mut job = Job {
-            ctx: Context::new(req, tx, self.superglobals),
-        };
+        let mut job = Context::new(req, tx, self.superglobals);
         let pending = PendingGuard::arm(&self.pending);
         let deadline = Instant::now() + INTAKE_WAIT;
         loop {
@@ -122,9 +120,7 @@ impl RapiraHandle {
         let pending = PendingGuard::arm(&self.pending);
         if self
             .intake
-            .send(Job {
-                ctx: Context::new(req, tx, self.superglobals),
-            })
+            .send(Context::new(req, tx, self.superglobals))
             .is_err()
         {
             return Err(HandleError::Stopped);

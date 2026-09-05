@@ -41,9 +41,7 @@
 #include <main/php_memory_streams.h>
 #include <main/php_streams.h>
 
-#if defined(PHP_WIN32) && defined(ZTS)
 ZEND_TSRMLS_CACHE_EXTERN()
-#endif
 
 sapi_globals_struct *rapira_sg(void);
 zend_executor_globals *rapira_eg(void);

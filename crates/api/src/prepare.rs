@@ -29,9 +29,7 @@ impl PreparedListener {
 }
 
 /// Prepares listener sockets before PHP starts.
-pub struct PrepareCtx {
-    backlog: i32,
-}
+pub struct PrepareCtx;
 
 impl Default for PrepareCtx {
     fn default() -> Self {
@@ -41,9 +39,7 @@ impl Default for PrepareCtx {
 
 impl PrepareCtx {
     pub fn new() -> Self {
-        Self {
-            backlog: LISTEN_BACKLOG,
-        }
+        Self
     }
 
     /// Sets nonblocking mode before the extension creates a Tokio listener. https://docs.rs/tokio/latest/tokio/net/struct.TcpListener.html#method.from_std
@@ -54,7 +50,7 @@ impl PrepareCtx {
             .bind(&addr.into())
             .with_context(|| format!("bind {addr}"))?;
         socket
-            .listen(self.backlog)
+            .listen(LISTEN_BACKLOG)
             .with_context(|| format!("listen {addr}"))?;
         socket.set_nonblocking(true)?;
         let resolved = socket

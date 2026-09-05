@@ -332,25 +332,19 @@ fn parse_part(
 
     let mut headers: Vec<(String, Vec<u8>)> = Vec::with_capacity(parsed.len());
     let mut disposition: Option<&[u8]> = None;
-    let mut dispositions = 0usize;
     let mut media_type: Option<&[u8]> = None;
     for h in parsed {
         if h.name.eq_ignore_ascii_case("content-disposition") {
-            dispositions += 1;
-            disposition = Some(h.value);
+            if disposition.replace(h.value).is_some() {
+                return Err(bad("duplicated content-disposition in a part"));
+            }
         } else if h.name.eq_ignore_ascii_case("content-type") && media_type.is_none() {
             media_type = Some(h.value);
         }
         headers.push((h.name.to_owned(), h.value.to_vec()));
     }
-    if dispositions == 0 {
-        return Err(bad("part without content-disposition"));
-    }
-    if dispositions > 1 {
-        return Err(bad("duplicated content-disposition in a part"));
-    }
-
-    let (name, filename) = disposition_params(disposition.unwrap_or_default())?;
+    let disposition = disposition.ok_or_else(|| bad("part without content-disposition"))?;
+    let (name, filename) = disposition_params(disposition)?;
     let Some(name) = name.filter(|n| !n.is_empty()) else {
         return Err(bad(
             "content-disposition without a non-empty name parameter",
@@ -397,12 +391,8 @@ fn parse_part(
 mod tests {
     use super::*;
 
-    fn limits() -> Limits {
-        Limits::default()
-    }
-
     fn ok(body: &[u8]) -> MultipartBody {
-        parse(body, b"B", &limits()).unwrap_or_else(|_| panic!("expected a parse"))
+        parse(body, b"B", &Limits::default()).expect("expected a parse")
     }
 
     fn rejected(body: &[u8], l: &Limits) -> Rejected {
@@ -498,14 +488,14 @@ mod tests {
 
         let r = rejected(
             b"--B\r\ncontent-disposition: form-data; name=\"\"\r\n\r\nv\r\n--B--",
-            &limits(),
+            &Limits::default(),
         );
         assert_eq!(r.status, 400);
     }
 
     #[test]
     fn malformed_bodies_reject_with_400() {
-        let l = limits();
+        let l = Limits::default();
         for body in [
             &b"no boundary anywhere"[..],
             b"--B\r\ncontent-disposition: form-data; name=x\r\n\r\nunclosed",
@@ -526,8 +516,10 @@ mod tests {
 
     #[test]
     fn limits_reject_with_413() {
-        let mut l = limits();
-        l.max_field_size = 2;
+        let l = Limits {
+            max_field_size: 2,
+            ..Limits::default()
+        };
         assert_eq!(
             rejected(
                 b"--B\r\ncontent-disposition: form-data; name=x\r\n\r\ntoolong\r\n--B--",
@@ -536,8 +528,10 @@ mod tests {
             .status,
             413
         );
-        let mut l = limits();
-        l.max_file_size = 2;
+        let l = Limits {
+            max_file_size: 2,
+            ..Limits::default()
+        };
         assert_eq!(
             rejected(
                 b"--B\r\ncontent-disposition: form-data; name=f; filename=a\r\n\r\ntoolong\r\n--B--",
@@ -546,8 +540,10 @@ mod tests {
             .status,
             413
         );
-        let mut l = limits();
-        l.max_parts = 1;
+        let l = Limits {
+            max_parts: 1,
+            ..Limits::default()
+        };
         assert_eq!(
             rejected(
                 b"--B\r\ncontent-disposition: form-data; name=a\r\n\r\n1\r\n--B\r\ncontent-disposition: form-data; name=b\r\n\r\n2\r\n--B--",
@@ -556,8 +552,10 @@ mod tests {
             .status,
             413
         );
-        let mut l = limits();
-        l.max_files = 0;
+        let l = Limits {
+            max_files: 0,
+            ..Limits::default()
+        };
         assert_eq!(
             rejected(
                 b"--B\r\ncontent-disposition: form-data; name=f; filename=a\r\n\r\nx\r\n--B--",
@@ -572,9 +570,11 @@ mod tests {
     #[test]
     fn spooled_files_unlink_on_a_later_rejection() {
         let dir = tempfile::tempdir().unwrap();
-        let mut l = limits();
-        l.dir = dir.path().to_path_buf();
-        l.max_field_size = 1;
+        let l = Limits {
+            dir: dir.path().to_path_buf(),
+            max_field_size: 1,
+            ..Limits::default()
+        };
         let body = b"--B\r\ncontent-disposition: form-data; name=f; filename=a\r\n\r\nDATA\r\n\
 --B\r\ncontent-disposition: form-data; name=x\r\n\r\ntoolong\r\n--B--";
         assert_eq!(rejected(body, &l).status, 413);
@@ -599,9 +599,8 @@ mod tests {
     fn non_utf8_boundary_bytes_round_trip() {
         let b = boundary(b"multipart/form-data; boundary=RAP\xff\xfeIRA").unwrap();
         assert_eq!(b, b"RAP\xff\xfeIRA");
-        let mut body = Vec::new();
-        body.extend_from_slice(b"--RAP\xff\xfeIRA\r\ncontent-disposition: form-data; name=x\r\n\r\nv\r\n--RAP\xff\xfeIRA--");
-        let mb = parse(&body, &b, &limits()).map_err(|_| ()).expect("parses");
+        let body = b"--RAP\xff\xfeIRA\r\ncontent-disposition: form-data; name=x\r\n\r\nv\r\n--RAP\xff\xfeIRA--";
+        let mb = parse(body, &b, &Limits::default()).expect("parses");
         assert_eq!(mb.fields[0].value, b"v");
     }
 }

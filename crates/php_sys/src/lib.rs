@@ -25,7 +25,7 @@ pub use bindings::*;
 pub use exchange::set_sendfile_root;
 pub use handler::{HandleError, RapiraHandle};
 pub use quota::PoolHooks;
-pub use start::{PhpModule, Rapira};
+pub use start::Rapira;
 pub use types::{Frame, Mode, Request, ResponseHead};
 
 // Zend SUCCESS and FAILURE values differ between php-src versions, so these constants do not come from the headers.

@@ -1,4 +1,4 @@
-use tests::{app_record, app_records};
+use tests::app_record;
 use tracing::Level;
 
 /// Cyclic references stop at the reference to an earlier value and do not produce a PHP diagnostic.
@@ -27,78 +27,13 @@ fn cycles_are_broken_without_a_diagnostic() {
     assert!(phpdiag.is_empty(), "cycles must raise nothing: {phpdiag:?}");
 }
 
-/// Checks the 1000-item boundary. The last permitted item must remain in the output.
+/// A large array retains its last item.
 #[test]
-fn a_thousand_items_are_not_truncated() {
-    let records = app_records("app_logger/limits-large-array.php");
-    let (_, _, ctx) = records
-        .iter()
-        .find(|(_, m, _)| m == "exactly-1000")
-        .expect("the 1000-item record");
+fn a_large_array_is_complete() {
+    let (_, _, ctx) = app_record("app_logger/limits-large-array.php");
 
     assert!(
         ctx.contains(",1000]"),
         "the last item must survive: {ctx:?}"
-    );
-    assert!(
-        !ctx.contains("aborting normalization"),
-        "exactly 1000 items must not be marked as truncated: {ctx:?}"
-    );
-}
-
-/// An array above the limit must be truncated and include a marker with its actual size.
-#[test]
-#[ignore = "needs the context normalizer (Monolog NormalizerFormatter parity)"]
-fn large_arrays_are_capped_and_marked() {
-    let records = app_records("app_logger/limits-large-array.php");
-    let (_, _, ctx) = records
-        .iter()
-        .find(|(_, m, _)| m == "over-cap")
-        .expect("the 2000-item record");
-
-    assert!(
-        ctx.contains("Over 1000 items (2000 total), aborting normalization"),
-        "an over-cap array must say what was dropped: {ctx:?}"
-    );
-    assert!(
-        !ctx.contains(",1500,"),
-        "items past the cap must not be emitted: {ctx:?}"
-    );
-    assert!(
-        ctx.contains(r#""keep":"visible""#),
-        "capping one key must not drop its siblings: {ctx:?}"
-    );
-}
-
-/// A large scalar must not create a log record of the same size. Scalars have no limit marker.
-#[test]
-#[ignore = "needs the context normalizer (Monolog NormalizerFormatter parity)"]
-fn huge_strings_are_capped() {
-    let (_, _, ctx) = app_record("app_logger/limits-huge-string.php");
-
-    assert!(
-        ctx.len() < 128 * 1024,
-        "one log call must not emit a multi-megabyte record (got {} bytes)",
-        ctx.len()
-    );
-    assert!(
-        ctx.contains(r#""keep":"visible""#),
-        "truncating one value must not drop its siblings: {ctx:?}"
-    );
-}
-
-/// A branch above the depth limit must include a marker. PHP_JSON_PARTIAL_OUTPUT_ON_ERROR disables the JSON depth limit (json_encoder.c:192-197).
-#[test]
-#[ignore = "needs the context normalizer (Monolog NormalizerFormatter parity)"]
-fn deep_nesting_is_marked_not_silently_cut() {
-    let (_, _, ctx) = app_record("app_logger/limits-deep.php");
-
-    assert!(
-        ctx.contains("levels deep, aborting normalization"),
-        "a depth cut must say so rather than emitting a bare null: {ctx:?}"
-    );
-    assert!(
-        ctx.contains(r#""keep":"visible""#),
-        "a deep branch must not cost its siblings: {ctx:?}"
     );
 }

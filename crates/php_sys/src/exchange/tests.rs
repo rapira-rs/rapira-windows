@@ -68,9 +68,7 @@ fn state_of(
     tokio::sync::mpsc::Receiver<crate::types::Frame>,
 ) {
     let (tx, rx) = tokio::sync::mpsc::channel(64);
-    let job = Box::new(Job {
-        ctx: Context::new(req, tx, /*superglobals=*/ false),
-    });
+    let job = Box::new(Context::new(req, tx, false));
     let Ok(st) = ExchangeState::new(job) else {
         unreachable!("empty cursor body always reads")
     };
@@ -92,7 +90,7 @@ fn full_response_channel_waits_for_capacity() {
     let (mut st, old_rx) = state();
     drop(old_rx);
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-    st.job.ctx.sender = Some(tx);
+    st.job.sender = Some(tx);
     assert!(send_frame(&mut st, Frame::Chunk(Bytes::from_static(b"first"))).is_ok());
 
     let (started_tx, started_rx) = std::sync::mpsc::channel();

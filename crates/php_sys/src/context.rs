@@ -24,7 +24,7 @@ pub(crate) fn bind_server_context(ctx: &mut Context) {
     }
 }
 
-/// Also clears the `SG(request_info)` pointers into `job.ctx`. A panic can recycle this context before `rapira_request_teardown` runs.
+/// Also clears the `SG(request_info)` pointers into the context. A panic can recycle this context before `rapira_request_teardown` runs.
 pub(crate) fn unbind_server_context() {
     unsafe {
         let sg = &mut *rapira_sg();

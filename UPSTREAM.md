@@ -250,7 +250,6 @@ The comment audit applies the writing rules from live core commit `f9644c449684b
 - `crates/runtime/src/multipart.rs`: The copied comments use STE wording.
 - `crates/tests/tests/app_logger.rs`: The copied comments use STE wording.
 - `crates/tests/tests/app_logger_limits.rs`: The copied comments use STE wording.
-- `crates/tests/tests/app_logger_types.rs`: The copied comments use STE wording.
 - `crates/tests/tests/basic_tests.rs`: The copied comments use STE wording.
 - `crates/tests/tests/extension_tests.rs`: The copied comments use STE wording.
 - `crates/tests/tests/failboot_tests.rs`: The copied comments use STE wording.
@@ -278,11 +277,7 @@ The comment audit applies the writing rules from live core commit `f9644c449684b
 - `crates/tests/fixtures/app_logger/app-logger-throwing-serializer.php`: The copied comments use STE wording.
 - `crates/tests/fixtures/app_logger/app-logger-unencodable.php`: The copied comments use STE wording.
 - `crates/tests/fixtures/app_logger/limits-cycles.php`: The copied comments use STE wording.
-- `crates/tests/fixtures/app_logger/limits-deep.php`: The copied comments use STE wording.
-- `crates/tests/fixtures/app_logger/limits-huge-string.php`: The copied comments use STE wording.
 - `crates/tests/fixtures/app_logger/limits-large-array.php`: The copied comments use STE wording.
-- `crates/tests/fixtures/app_logger/types-objects.php`: The copied comments use STE wording.
-- `crates/tests/fixtures/app_logger/types-scalars.php`: The copied comments use STE wording.
 - `crates/tests/fixtures/basic_tests/boot-output-worker.php`: The copied comments use STE wording.
 - `crates/tests/fixtures/basic_tests/error-levels-worker.php`: The copied comments use STE wording.
 - `crates/tests/fixtures/basic_tests/fibers.php`: The copied comments use STE wording.
@@ -350,7 +345,6 @@ The comment audit applies the writing rules from live core commit `f9644c449684b
 - `crates/tests/tests/e2e/fixtures/lifecycle/fatal-worker.php`: The copied comments use STE wording.
 - `crates/tests/tests/e2e/fixtures/lifecycle/fiber-worker.php`: The copied comments use STE wording.
 - `crates/tests/tests/e2e/fixtures/lifecycle/fidelity-worker.php`: The copied comments use STE wording.
-- `crates/tests/tests/e2e/fixtures/lifecycle/hang-worker.php`: The copied comments use STE wording.
 - `crates/tests/tests/e2e/fixtures/lifecycle/never-loop-worker.php`: The copied comments use STE wording.
 - `crates/tests/tests/e2e/fixtures/lifecycle/repeated-headers-worker.php`: The copied comments use STE wording.
 - `crates/tests/tests/e2e/fixtures/lifecycle/status-1xx-worker.php`: The copied comments use STE wording.

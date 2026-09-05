@@ -2,9 +2,7 @@
 
 #include <Zend/zend_smart_str.h>
 
-#if defined(PHP_WIN32) && defined(ZTS)
 ZEND_TSRMLS_CACHE_DEFINE()
-#endif
 
 static void (*rapira_log_message)(const char *message, int syslog_type_int);
 
@@ -34,35 +32,19 @@ unsigned int rapira_headers_php_version_id(void) {
 
 // ts_resource_ex must initialize this thread before it accesses PHP globals. https://github.com/php/php-src/blob/PHP-8.5/TSRM/TSRM.h
 sapi_globals_struct *rapira_sg(void) {
-#ifdef ZTS
     return TSRMG_FAST_BULK(sapi_globals_offset, sapi_globals_struct *);
-#else
-    return &sapi_globals;
-#endif
 }
 
 zend_executor_globals *rapira_eg(void) {
-#ifdef ZTS
     return TSRMG_FAST_BULK(executor_globals_offset, zend_executor_globals *);
-#else
-    return &executor_globals;
-#endif
 }
 
 zend_compiler_globals *rapira_cg(void) {
-#ifdef ZTS
     return TSRMG_FAST_BULK(compiler_globals_offset, zend_compiler_globals *);
-#else
-    return &compiler_globals;
-#endif
 }
 
 php_core_globals *rapira_pg(void) {
-#ifdef ZTS
     return TSRMG_FAST_BULK(core_globals_offset, php_core_globals *);
-#else
-    return &core_globals;
-#endif
 }
 
 void rapira_array_init(zval *zv, uint32_t size) {
@@ -127,7 +109,5 @@ static zend_string *rapira_string_init_interned(const char *str, size_t size, bo
 rapira_string_init_interned_fn rapira_zend_string_init_interned = rapira_string_init_interned;
 
 void rapira_tsrmls_cache_update(void) {
-#if defined(PHP_WIN32) && defined(ZTS)
     ZEND_TSRMLS_CACHE_UPDATE();
-#endif
 }

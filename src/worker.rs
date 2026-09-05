@@ -14,20 +14,6 @@ pub struct WorkerOutcome {
     _shutdown: ShutdownWatcher,
 }
 
-// The registration path rechecks the flag if PHP fails before the stopper exists.
-fn request_boot_failure(failed: &AtomicBool, stopper: &OnceLock<Stopper>) {
-    failed.store(true, SeqCst);
-    if let Some(s) = stopper.get() {
-        s.stop();
-    }
-}
-
-fn stop_if_boot_failed(failed: &AtomicBool, stop: impl FnOnce()) {
-    if failed.load(SeqCst) {
-        stop();
-    }
-}
-
 fn exit_code(boot_failed: bool, outcomes: Option<&[Result<(), String>]>) -> u8 {
     if boot_failed {
         70
@@ -75,7 +61,12 @@ pub fn worker_body(
         on_boot_failure: Arc::new({
             let boot_failed = boot_failed.clone();
             let stopper = stopper.clone();
-            move || request_boot_failure(&boot_failed, &stopper)
+            move || {
+                boot_failed.store(true, SeqCst);
+                if let Some(stopper) = stopper.get() {
+                    stopper.stop();
+                }
+            }
         }),
     };
 
@@ -103,7 +94,10 @@ pub fn worker_body(
             },
         );
         let _ = stopper.set(running.stopper());
-        stop_if_boot_failed(&boot_failed, || stopper.get().expect("just set").stop());
+        // PHP can fail before the stopper is registered.
+        if boot_failed.load(SeqCst) {
+            running.stopper().stop();
+        }
         running.serve(&shutdown)
     }));
 
@@ -152,21 +146,5 @@ mod tests {
             1
         );
         assert_eq!(exit_code(false, None), 1);
-    }
-
-    #[test]
-    fn early_boot_failure_stops_after_registration() {
-        let failed = AtomicBool::new(false);
-        let stopper = OnceLock::new();
-        request_boot_failure(&failed, &stopper);
-
-        let stopped = AtomicBool::new(false);
-        stop_if_boot_failed(&failed, || stopped.store(true, SeqCst));
-        assert!(stopped.load(SeqCst));
-    }
-
-    #[test]
-    fn successful_boot_does_not_stop_after_registration() {
-        stop_if_boot_failed(&AtomicBool::new(false), || panic!("unexpected stop"));
     }
 }

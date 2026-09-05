@@ -32,7 +32,7 @@ fn open_send_file(
     offset: u64,
     length: Option<u64>,
 ) -> Result<(std::fs::File, u64), &'static CStr> {
-    let path = String::from_utf8(path.to_vec()).map_err(|_| c"the path is not valid UTF-8")?;
+    let path = std::str::from_utf8(path).map_err(|_| c"the path is not valid UTF-8")?;
     let canonical = std::fs::canonicalize(path).map_err(|_| c"no readable file at the path")?;
     let Some(root) = sendfile_root() else {
         return Err(c"no sendfile root is configured");

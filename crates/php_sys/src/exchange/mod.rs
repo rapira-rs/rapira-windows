@@ -25,7 +25,9 @@ pub(crate) use crate::{
     rapira_receive_timed, rapira_receive_untimed,
     scoreboard::{Event, sb_update},
     start::{Pulled, pending_depth, pull_job_try, pull_job_wait},
-    types::{Addr, Body, FieldLines, FormField, Frame, Job, ResponseHead, TlsView, UploadedFile},
+    types::{
+        Addr, Body, Context, FieldLines, FormField, Frame, ResponseHead, TlsView, UploadedFile,
+    },
     zend, zend_class_entry, zend_hash_get_current_data_ex, zend_hash_get_current_key_ex,
     zend_hash_internal_pointer_reset_ex, zend_hash_move_forward_ex, zend_object, zend_string, zval,
     zval_add_ref, zval_ptr_dtor,
@@ -205,7 +207,7 @@ impl Grouped {
 pub struct ExchangeState {
     // Declare body before job so Rust unlinks spool files before it closes the frame sender.
     body: BodyState,
-    job: Box<Job>,
+    job: Box<Context>,
     headers: Grouped,
     uri_abs: String,
     target: Vec<u8>,
@@ -227,8 +229,8 @@ pub struct ExchangeState {
 
 impl ExchangeState {
     /// `Err` returns the job with its sender intact. The caller marks the unit as failed.
-    fn new(mut job: Box<Job>) -> Result<Self, Box<Job>> {
-        let taken = std::mem::replace(&mut job.ctx.req.body, Body::Raw(Box::new(std::io::empty())));
+    fn new(mut job: Box<Context>) -> Result<Self, Box<Context>> {
+        let taken = std::mem::replace(&mut job.req.body, Body::Raw(Box::new(std::io::empty())));
         let body = match taken {
             Body::Raw(mut reader) => {
                 let mut buf = Vec::new();
@@ -236,9 +238,8 @@ impl ExchangeState {
                     tracing::error!(
                         target: "rapira",
                         "request body read failed for {} {}: {e}",
-                        job.ctx.req.method, job.ctx.req.uri
+                        job.req.method, job.req.uri
                     );
-                    job.ctx.req.body = Body::Raw(Box::new(std::io::empty()));
                     return Err(job);
                 }
                 BodyState::Raw(buf)
@@ -264,7 +265,7 @@ impl ExchangeState {
             },
         };
 
-        let req = &job.ctx.req;
+        let req = &job.req;
         let headers = Grouped::new(&req.headers);
         let authority = req.authority.clone();
         let target = req
@@ -319,7 +320,7 @@ impl ExchangeState {
     fn host_closed(&self) -> bool {
         self.discarded
             || (self.stage != Stage::Finalized
-                && self.job.ctx.sender.as_ref().is_some_and(Sender::is_closed))
+                && self.job.sender.as_ref().is_some_and(Sender::is_closed))
     }
 }
 

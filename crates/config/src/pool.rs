@@ -48,7 +48,6 @@ impl std::str::FromStr for RunMode {
     }
 }
 
-/// This section uses a named field because serde does not support `#[serde(flatten)]` with `deny_unknown_fields`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PoolSection {
@@ -64,19 +63,17 @@ fn default_processes() -> usize {
         .unwrap_or(1)
 }
 
-/// `table` is the key path in error messages. `cli` applies only to the root pool. Pass `&Overrides::default()` for another pool.
 pub(crate) fn resolve_pool(
     section: PoolSection,
     cli: &Overrides,
     config_dir: Option<&Path>,
-    table: &str,
 ) -> anyhow::Result<PoolSettings> {
     let processes = cli
         .processes
         .or(section.processes)
         .unwrap_or_else(default_processes);
     if processes == 0 {
-        bail!("{table}.processes must be at least 1");
+        bail!("pool.processes must be at least 1");
     }
 
     let mode = cli.mode.or(section.mode).unwrap_or_default();
@@ -86,7 +83,7 @@ pub(crate) fn resolve_pool(
     } else if let Some(ep) = section.entrypoint.as_deref().filter(|s| !s.is_empty()) {
         config_relative(config_dir, ep)?
     } else {
-        bail!("no entrypoint: pass a SCRIPT argument or set {table}.entrypoint in the config file");
+        bail!("no entrypoint: pass a SCRIPT argument or set pool.entrypoint in the config file");
     };
 
     Ok(PoolSettings {

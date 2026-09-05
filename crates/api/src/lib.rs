@@ -7,7 +7,7 @@ mod middleware;
 mod prepare;
 pub use middleware::{
     Body, BoxError, BoxFuture, Handler, HttpRequest, HttpResponse, Middleware, Next, Peer,
-    Protocol, empty_body,
+    empty_body,
 };
 pub use prepare::{LISTEN_BACKLOG, ListenAddr, PrepareCtx, PreparedListener};
 
@@ -297,5 +297,65 @@ mod tests {
             error.downcast_ref::<std::io::Error>().unwrap().kind(),
             std::io::ErrorKind::UnexpectedEof
         );
+    }
+    fn reply(events: Vec<ReplyEvent>) -> Reply {
+        Reply::new(Box::new(Events(events.into())))
+    }
+
+    fn head() -> ReplyEvent {
+        ReplyEvent::Head {
+            status: 200,
+            headers: vec![("x-a".into(), b"1".to_vec())],
+            content_length: None,
+            bodiless: false,
+            body_coded: false,
+        }
+    }
+
+    fn end(truncated: bool) -> ReplyEvent {
+        ReplyEvent::End {
+            trailers: Vec::new(),
+            truncated,
+        }
+    }
+
+    /// Maps the four stream results to the three documented errors and `Ok`.
+    #[tokio::test]
+    async fn collect_maps_stream_outcomes() {
+        let died = reply(Vec::new()).collect().await.unwrap_err();
+        assert!(died.to_string().contains("died mid-response"), "{died:#}");
+
+        let cut = reply(vec![head()]).collect().await.unwrap_err();
+        assert!(cut.to_string().contains("truncated"), "{cut:#}");
+
+        let cut = reply(vec![head(), end(true)]).collect().await.unwrap_err();
+        assert!(cut.to_string().contains("truncated"), "{cut:#}");
+
+        let headless = reply(vec![end(false)]).collect().await.unwrap_err();
+        assert!(
+            headless.to_string().contains("no response head"),
+            "{headless:#}"
+        );
+    }
+
+    /// Concatenates chunks in order and discards interim heads.
+    #[tokio::test]
+    async fn collect_concatenates_the_stream() {
+        let r = reply(vec![
+            ReplyEvent::Interim {
+                status: 103,
+                headers: Vec::new(),
+            },
+            head(),
+            ReplyEvent::Chunk(bytes::Bytes::from_static(b"one,")),
+            ReplyEvent::Chunk(bytes::Bytes::from_static(b"two")),
+            end(false),
+        ])
+        .collect()
+        .await
+        .unwrap();
+        assert_eq!(r.status, 200);
+        assert_eq!(r.headers, vec![("x-a".to_string(), b"1".to_vec())]);
+        assert_eq!(r.body, b"one,two");
     }
 }

@@ -55,23 +55,9 @@ pub fn set_phprc(_php: &sync::MutexGuard<'static, ()>, ini: &Path) {
     unsafe { set_php_env("PHPRC", ini.as_os_str()) };
 }
 
-/// Acquires `php_lock()` and overrides PHPRC for this test binary.
-pub fn php_lock_with_ini(ini: &Path) -> sync::MutexGuard<'static, ()> {
-    let guard = php_lock();
-    set_phprc(&guard, ini);
-    guard
-}
-
-/// One resident worker serves every request. `ini` overrides PHPRC for this test binary as in [`php_lock_with_ini`].
-pub fn run_worker(
-    name: &str,
-    uris: &[&str],
-    ini: Option<&Path>,
-) -> anyhow::Result<Vec<(u16, String)>> {
-    let guard = php_lock();
-    if let Some(ini) = ini {
-        set_phprc(&guard, ini);
-    }
+/// One resident worker serves every request.
+pub fn run_worker(name: &str, uris: &[&str]) -> anyhow::Result<Vec<(u16, String)>> {
+    let _guard = php_lock();
     let r = Rapira::start(Mode::Worker(fixture(name)))?;
     let h = r.handle();
     let mut out = Vec::with_capacity(uris.len());

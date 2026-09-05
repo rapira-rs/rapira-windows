@@ -55,7 +55,7 @@ pub(super) struct Closed;
 
 /// Keeps the wall timer active while it waits for response channel capacity.
 pub(super) fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<(), Closed> {
-    let Some(tx) = st.job.ctx.sender.as_ref() else {
+    let Some(tx) = st.job.sender.as_ref() else {
         return Err(Closed);
     };
     match tx.try_send(frame) {
@@ -132,7 +132,7 @@ pub(super) fn discard_unit(st: &mut ExchangeState) {
         }
     });
     sb_update(Event::Handled(true));
-    if let Some(tx) = st.job.ctx.sender.take() {
+    if let Some(tx) = st.job.sender.take() {
         let _ = tx.try_send(Frame::End {
             trailers: Vec::new(),
             truncated: true,
@@ -371,7 +371,7 @@ pub(super) fn seal(st: &mut ExchangeState, truncated: bool, trailers: FieldLines
             truncated,
         },
     );
-    st.job.ctx.sender = None;
+    st.job.sender = None;
 }
 
 /// # Safety
@@ -410,7 +410,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_flush(job: *mut c_void) -> bool {
 pub unsafe extern "C" fn rapira_rs_exchange_is_finalized(job: *const c_void) -> bool {
     guard(false, || unsafe {
         let st = &*job.cast::<ExchangeState>();
-        st.stage == Stage::Finalized || st.job.ctx.sender.as_ref().is_some_and(Sender::is_closed)
+        st.stage == Stage::Finalized || st.job.sender.as_ref().is_some_and(Sender::is_closed)
     })
 }
 
@@ -450,7 +450,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_drop(job: *mut c_void) {
                     p.upload.file.unlink();
                 }
             }
-            if let Some(tx) = st.job.ctx.sender.take() {
+            if let Some(tx) = st.job.sender.take() {
                 if st.head_sent {
                     let _ = tx.try_send(Frame::End {
                         trailers: Vec::new(),

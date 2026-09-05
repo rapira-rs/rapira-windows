@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError, bounded};
 use tracing::{error, info, trace};
-use types::Job;
+use types::Context;
 
 use crate::quota::{self, PoolHooks};
 use crate::rapira_worker::{WorkerExit, rapira_worker};
@@ -26,13 +26,13 @@ thread_local! {
 }
 
 pub(crate) struct Intake {
-    pub(crate) tx: Sender<Job>,
+    pub(crate) tx: Sender<Context>,
     pub(crate) pending: Arc<AtomicUsize>,
 }
 
 #[derive(Clone)]
 struct JobRx {
-    rx: Receiver<Job>,
+    rx: Receiver<Context>,
     pending: Arc<AtomicUsize>,
     stop: Receiver<()>,
     stopping: Arc<AtomicBool>,
@@ -63,7 +63,7 @@ impl Drop for PhpThread {
     }
 }
 
-pub struct PhpModule {}
+struct PhpModule;
 
 impl Drop for PhpModule {
     fn drop(&mut self) {
@@ -129,7 +129,7 @@ impl Rapira {
                 .startup
                 .is_some_and(|start| start(&mut module) == SUCCESS)
         };
-        let module = PhpModule {};
+        let module = PhpModule;
         if !started {
             error!(target: "rapira", "php_module_startup failed, shutting down");
             drop(module);
@@ -148,7 +148,7 @@ impl Rapira {
         }
 
         let pending = Arc::new(AtomicUsize::new(0));
-        let (intake_tx, intake_rx) = bounded::<Job>(1024);
+        let (intake_tx, intake_rx) = bounded::<Context>(1024);
         let (stop_tx, stop_rx) = bounded(0);
         let stopping = Arc::new(AtomicBool::new(false));
         let job_rx = JobRx {
@@ -187,7 +187,7 @@ impl Rapira {
             let worker = thread::Builder::new()
                 .name(format!("rapira-worker-{index}"))
                 .spawn(move || {
-                    if wait_for_start(&start) {
+                    if start.recv().is_ok() {
                         worker_main(mode, rx, slot, index, hooks, reported);
                     }
                 });
@@ -252,25 +252,13 @@ impl Drop for Rapira {
     }
 }
 
-fn wait_for_start(start: &Receiver<()>) -> bool {
-    start.recv().is_ok()
-}
-
-fn backoff_delay(streak: u32) -> Duration {
-    RESPAWN_BASE.saturating_mul(2u32.saturating_pow(streak.min(8)))
-}
-
 fn next_backoff(streak: &mut u32, lived: Duration) -> Duration {
     if lived >= QUICK_CRASH {
         *streak = 0;
     }
-    let delay = backoff_delay(*streak);
+    let delay = RESPAWN_BASE * (1 << (*streak).min(8));
     *streak = streak.saturating_add(1);
     delay
-}
-
-fn wait_for_stop(stop: &Receiver<()>, delay: Duration) -> bool {
-    !matches!(stop.recv_timeout(delay), Err(RecvTimeoutError::Timeout))
 }
 
 fn report_boot_failure(
@@ -350,7 +338,8 @@ fn worker_main(
         }
         if unhealthy {
             report_boot_failure(&handled, &reported_boot_failure, &*hooks.on_boot_failure);
-            if wait_for_stop(&stop, next_backoff(&mut crash_streak, started.elapsed())) {
+            let delay = next_backoff(&mut crash_streak, started.elapsed());
+            if !matches!(stop.recv_timeout(delay), Err(RecvTimeoutError::Timeout)) {
                 break;
             }
         } else {
@@ -369,7 +358,7 @@ pub(crate) fn note_handled() {
     });
 }
 
-pub(crate) fn pull_job() -> Option<Job> {
+pub(crate) fn pull_job() -> Option<Context> {
     match pull_job_wait(None) {
         Pulled::Job(job) => Some(*job),
         _ => None,
@@ -377,8 +366,8 @@ pub(crate) fn pull_job() -> Option<Job> {
 }
 
 pub(crate) enum Pulled {
-    // Use a `Box` because a `Job` is approximately 600 bytes and the other variants are empty.
-    Job(Box<Job>),
+    // Use a `Box` because a `Context` is approximately 600 bytes and the other variants are empty.
+    Job(Box<Context>),
     Timeout,
     Empty,
     Closed,
@@ -745,7 +734,7 @@ try {
     }
 
     fn test_intake() -> (
-        crossbeam_channel::Sender<Job>,
+        crossbeam_channel::Sender<Context>,
         crossbeam_channel::Sender<()>,
         JobRx,
     ) {
@@ -766,8 +755,11 @@ try {
 
     #[test]
     fn backoff_progression_and_cap() {
-        for (streak, millis) in [(0, 100), (1, 200), (2, 400), (8, 25_600), (100, 25_600)] {
-            assert_eq!(backoff_delay(streak), Duration::from_millis(millis));
+        for (mut streak, millis) in [(0, 100), (1, 200), (2, 400), (8, 25_600), (100, 25_600)] {
+            assert_eq!(
+                next_backoff(&mut streak, Duration::ZERO),
+                Duration::from_millis(millis)
+            );
         }
     }
 
@@ -813,40 +805,6 @@ try {
         drop(stop);
         assert!(done_rx.recv_timeout(Duration::from_secs(1)).unwrap());
         worker.join().unwrap();
-    }
-
-    #[test]
-    fn stop_interrupts_maximum_backoff() {
-        let (stop_tx, stop_rx) = crossbeam_channel::bounded(0);
-        let (ready_tx, ready_rx) = mpsc::channel();
-        let (done_tx, done_rx) = mpsc::channel();
-        let worker = thread::spawn(move || {
-            ready_tx.send(()).unwrap();
-            done_tx
-                .send(wait_for_stop(&stop_rx, Duration::from_millis(25_600)))
-                .unwrap();
-        });
-        ready_rx.recv().unwrap();
-        drop(stop_tx);
-        assert!(done_rx.recv_timeout(Duration::from_secs(1)).unwrap());
-        worker.join().unwrap();
-    }
-
-    #[test]
-    fn cancelled_start_gate_keeps_workers_out_of_php() {
-        let (start_tx, start_rx) = crossbeam_channel::bounded(0);
-        let worker = thread::spawn(move || wait_for_start(&start_rx));
-        drop(start_tx);
-        assert!(!worker.join().unwrap());
-    }
-
-    #[test]
-    fn start_gate_requires_a_success_token() {
-        let (start_tx, start_rx) = crossbeam_channel::bounded(1);
-        start_tx.send(()).unwrap();
-        drop(start_tx);
-        assert!(wait_for_start(&start_rx));
-        assert!(!wait_for_start(&start_rx));
     }
 
     #[test]

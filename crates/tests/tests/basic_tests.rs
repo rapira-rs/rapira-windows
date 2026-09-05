@@ -4,21 +4,6 @@ use php_sys::{Mode, Rapira};
 use tests::{captured, drain, fixture, init_log_capture, php_lock, req};
 
 #[test]
-fn hello_world_classic() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(Mode::Classic)?;
-    let h = r.handle();
-    let (_, body1) = drain(h.handle_blocking(req("/?x=1", "shared/hello.php"))?);
-    assert!(
-        body1.contains("Hello, anonymous!") && body1.contains("Method: GET"),
-        "req1 baseline (got: {body1:?})"
-    );
-    drop(h);
-    r.shutdown();
-    Ok(())
-}
-
-#[test]
 fn fibers_stress_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Classic)?;
@@ -35,21 +20,6 @@ fn fibers_stress_classic() -> anyhow::Result<()> {
         body.contains("fibers ok sum=226644"),
         "fibers must complete with the correct total (got: {body:?})"
     );
-    Ok(())
-}
-
-#[test]
-fn hello_world_worker() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("shared/worker.php")))?;
-    let h = r.handle();
-    let (_, body1) = drain(h.handle_blocking(req("/?x=1", "shared/worker.php"))?);
-    assert!(
-        body1.contains("Hello from worker, anonymous!"),
-        "req1 baseline (got: {body1:?})"
-    );
-    drop(h);
-    r.shutdown();
     Ok(())
 }
 

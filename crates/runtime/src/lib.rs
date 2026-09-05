@@ -388,10 +388,6 @@ mod win_ctrl {
     static STOP_TX: OnceLock<watch::Sender<bool>> = OnceLock::new();
     static ASKED: AtomicBool = AtomicBool::new(false);
 
-    fn record_request(asked: &AtomicBool) -> bool {
-        asked.swap(true, Ordering::SeqCst)
-    }
-
     fn register_stop(
         asked: &AtomicBool,
         slot: &OnceLock<watch::Sender<bool>>,
@@ -411,7 +407,7 @@ mod win_ctrl {
     unsafe extern "system" fn handler(ctrl_type: u32) -> BOOL {
         match ctrl_type {
             CTRL_C_EVENT | CTRL_BREAK_EVENT => {
-                if record_request(&ASKED) {
+                if ASKED.swap(true, Ordering::SeqCst) {
                     // SAFETY: This terminates the process without DLL detach and does not return.
                     // https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-terminateprocess
                     // https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-exitprocess
@@ -455,13 +451,13 @@ mod win_ctrl {
         fn registration_replays_an_early_request() {
             let asked = AtomicBool::new(false);
             let slot = OnceLock::new();
-            assert!(!record_request(&asked));
+            assert!(!asked.swap(true, Ordering::SeqCst));
 
             let (stop_tx, stop_rx) = watch::channel(false);
             register_stop(&asked, &slot, stop_tx);
 
             assert!(*stop_rx.borrow());
-            assert!(record_request(&asked));
+            assert!(asked.swap(true, Ordering::SeqCst));
         }
     }
 }
@@ -503,8 +499,13 @@ impl Running {
     }
 
     fn drain_all(&mut self) -> Vec<Outcome> {
-        let mut tasks = std::mem::take(&mut self.tasks);
-        self.rt.block_on(drain(&mut tasks))
+        self.rt.block_on(async {
+            let mut out = Vec::with_capacity(self.tasks.len());
+            while let Some(joined) = self.tasks.join_next().await {
+                out.push(joined.unwrap_or_else(|_| Err("driver task panicked".into())));
+            }
+            out
+        })
     }
 }
 
@@ -515,98 +516,9 @@ impl Drop for Running {
     }
 }
 
-async fn drain(tasks: &mut JoinSet<Outcome>) -> Vec<Outcome> {
-    let mut out = Vec::with_capacity(tasks.len());
-    while let Some(joined) = tasks.join_next().await {
-        out.push(joined.unwrap_or_else(|_| Err("driver task panicked".into())));
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Prepared launchers must implement `Send` because spawned tasks receive them.
-    #[test]
-    fn rapira_runtime_is_send() {
-        fn assert_send<T: Send>() {}
-        assert_send::<ExtensionRuntime>();
-    }
-
-    use extension_api::{Reply, ReplyEvent, ReplySource};
-
-    struct VecSource(std::collections::VecDeque<ReplyEvent>);
-
-    impl ReplySource for VecSource {
-        fn poll_next(
-            &mut self,
-            _cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<Option<ReplyEvent>> {
-            std::task::Poll::Ready(self.0.pop_front())
-        }
-    }
-
-    fn reply(events: Vec<ReplyEvent>) -> Reply {
-        Reply::new(Box::new(VecSource(events.into())))
-    }
-
-    fn head() -> ReplyEvent {
-        ReplyEvent::Head {
-            status: 200,
-            headers: vec![("x-a".into(), b"1".to_vec())],
-            content_length: None,
-            bodiless: false,
-            body_coded: false,
-        }
-    }
-
-    fn end(truncated: bool) -> ReplyEvent {
-        ReplyEvent::End {
-            trailers: Vec::new(),
-            truncated,
-        }
-    }
-
-    /// Maps the four stream results to the three documented errors and `Ok`.
-    #[tokio::test]
-    async fn collect_maps_stream_outcomes() {
-        let died = reply(Vec::new()).collect().await.unwrap_err();
-        assert!(died.to_string().contains("died mid-response"), "{died:#}");
-
-        let cut = reply(vec![head()]).collect().await.unwrap_err();
-        assert!(cut.to_string().contains("truncated"), "{cut:#}");
-
-        let cut = reply(vec![head(), end(true)]).collect().await.unwrap_err();
-        assert!(cut.to_string().contains("truncated"), "{cut:#}");
-
-        let headless = reply(vec![end(false)]).collect().await.unwrap_err();
-        assert!(
-            headless.to_string().contains("no response head"),
-            "{headless:#}"
-        );
-    }
-
-    /// Concatenates chunks in order and discards interim heads.
-    #[tokio::test]
-    async fn collect_concatenates_the_stream() {
-        let r = reply(vec![
-            ReplyEvent::Interim {
-                status: 103,
-                headers: Vec::new(),
-            },
-            head(),
-            ReplyEvent::Chunk(bytes::Bytes::from_static(b"one,")),
-            ReplyEvent::Chunk(bytes::Bytes::from_static(b"two")),
-            end(false),
-        ])
-        .collect()
-        .await
-        .unwrap();
-        assert_eq!(r.status, 200);
-        assert_eq!(r.headers, vec![("x-a".to_string(), b"1".to_vec())]);
-        assert_eq!(r.body, b"one,two");
-    }
 
     /// `parse_err` preserves both error types. The error chain contains `io::Error`, and `Rejected` remains downcastable.
     #[test]

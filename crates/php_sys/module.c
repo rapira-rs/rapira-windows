@@ -3,11 +3,6 @@
 #include "wrapper.h"
 #include "zend_types.h"
 
-// build.rs defines RAPIRA_VERSION.
-#ifndef RAPIRA_VERSION
-#define RAPIRA_VERSION "0.0.0-dev"
-#endif
-
 extern void rapira_rs_finish_response(void);
 
 // php_handle_aborted_connection transfers control past Rust's catch_unwind (main.c:2722).
@@ -184,29 +179,20 @@ static void rapira_request_init(void) {
     // init_compiler clears this flag for each cycle, but each job needs a clear flag (zend_compile.c:461).
     CG(unclean_shutdown) = false;
 
-#if defined(ZEND_MAX_EXECUTION_TIMERS) || defined(ZEND_WIN32) || !defined(ZTS)
     if (rapira_job_timeout < 0) {
         rapira_job_timeout = EG(timeout_seconds);
     }
     zend_unset_timeout();
     zend_set_timeout(rapira_job_timeout, false);
-#endif
 
     if (PG(expose_php)) {
         sapi_add_header(SAPI_PHP_VERSION_HEADER,
                         sizeof(SAPI_PHP_VERSION_HEADER) - 1, 1);
     }
 
-    // PHP 8.6 uses zend_string* for output_handler and NULL for an empty value (php-src e0221be8).
-#if PHP_VERSION_ID >= 80600
-    if (PG(output_handler)) {
-        zval oh;
-        ZVAL_STR_COPY(&oh, PG(output_handler));
-#else
     if (PG(output_handler) && PG(output_handler)[0]) {
         zval oh;
         ZVAL_STRING(&oh, PG(output_handler));
-#endif
         php_output_start_user(&oh, 0, PHP_OUTPUT_HANDLER_STDFLAGS);
         zval_ptr_dtor(&oh);
     } else if (PG(output_buffering)) {
@@ -378,17 +364,10 @@ int rapira_request_activate(void) {
 
 // sapi_activate replaces this value without releasing it, which causes a leak for each job (SAPI.c).
 static void rapira_release_header_callback(void) {
-#if PHP_VERSION_ID >= 80600
-    if (ZEND_FCC_INITIALIZED(SG(send_header_fcc))) {
-        zend_fcc_dtor(
-            &SG(send_header_fcc)); // zend_fcc_dtor resets the value to empty_fcall_info_cache.
-    }
-#else
     if (!Z_ISUNDEF(SG(callback_func))) {
         zval_ptr_dtor(&SG(callback_func));
         ZVAL_UNDEF(&SG(callback_func));
     }
-#endif
 }
 
 // Run SAPI cleanup for each request (main/main.c:1985,2002,2031).
@@ -458,13 +437,6 @@ void rapira_process_init(void) {
     // Set ext_functions before php_module_startup because the array has file scope.
     rapira_module_entry.functions = rapira_php_functions();
 
-#if defined(SIGPIPE) && defined(SIG_IGN)
-    // Ignore SIGPIPE so writes to a closed client return EPIPE.
-    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
-        perror("rapira: signal(SIGPIPE, SIG_IGN)");
-        abort();
-    }
-#endif
     zend_signal_startup();
 }
 

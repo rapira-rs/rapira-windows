@@ -23,13 +23,6 @@ pub fn empty_body() -> Body {
         .boxed_unsync()
 }
 
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Protocol {
-    Http,
-    Grpc,
-}
-
 #[derive(Debug, Clone)]
 pub struct Peer {
     pub remote: Addr,

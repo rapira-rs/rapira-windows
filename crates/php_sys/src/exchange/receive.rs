@@ -31,12 +31,12 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
                     let st = match ExchangeState::new(job) {
                         Ok(st) => st,
                         Err(mut job) => {
-                            job.ctx.finish(true);
+                            job.finish(true);
                             sb_update(Event::Handled(true));
                             continue;
                         }
                     };
-                    if st.job.ctx.sender.as_ref().is_some_and(Sender::is_closed) {
+                    if st.job.sender.as_ref().is_some_and(Sender::is_closed) {
                         sb_update(Event::Handled(true));
                         continue;
                     }

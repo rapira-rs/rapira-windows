@@ -52,26 +52,18 @@ struct FileConfig {
     log: LogSection,
 }
 
-fn default_listen() -> Listen {
-    Listen::Tcp(SocketAddr::from((Ipv4Addr::LOCALHOST, 8000)))
-}
-
 pub fn resolve(config_path: Option<&Path>, cli: Overrides) -> anyhow::Result<Settings> {
     let (file, config_dir) = match config_path {
         Some(path) => {
             let text = std::fs::read_to_string(path)
                 .with_context(|| format!("reading config file {}", path.display()))?;
-            let file = load_str(&text)
+            let file = toml::from_str(&text)
                 .with_context(|| format!("parsing config file {}", path.display()))?;
             (file, path.parent().map(Path::to_owned))
         }
         None => (FileConfig::default(), None),
     };
     merge(file, cli, config_dir.as_deref())
-}
-
-fn load_str(text: &str) -> anyhow::Result<FileConfig> {
-    Ok(toml::from_str(text)?)
 }
 
 fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow::Result<Settings> {
@@ -81,7 +73,7 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
             Some(s) => s
                 .parse::<Listen>()
                 .with_context(|| format!("invalid http.listen `{s}`"))?,
-            None => default_listen(),
+            None => Listen::Tcp(SocketAddr::from((Ipv4Addr::LOCALHOST, 8000))),
         },
     };
 
@@ -123,7 +115,7 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
         None => None,
     };
 
-    let pool = resolve_pool(file.pool, &cli, config_dir, "pool")?;
+    let pool = resolve_pool(file.pool, &cli, config_dir)?;
     if file.http.uploads.is_some() && pool.mode != RunMode::Dispatcher {
         bail!(
             "http.uploads applies to dispatcher mode only (pool.mode = \"{}\")",
@@ -177,7 +169,7 @@ mod tests {
 
     #[test]
     fn precedence_cli_over_file_over_default() {
-        let file = load_str(
+        let file = toml::from_str::<FileConfig>(
             r#"
             [http]
             listen = "0.0.0.0:9000"
@@ -202,7 +194,7 @@ mod tests {
 
     #[test]
     fn server_port_derives_from_listen_and_mb_converts() {
-        let file = load_str(
+        let file = toml::from_str::<FileConfig>(
             "[http]\nlisten = \":9000\"\nmax_body_size_mb = 2\n[pool]\nentrypoint = \"a.php\"\n",
         )
         .unwrap();
@@ -210,9 +202,10 @@ mod tests {
         assert_eq!(s.http.server_port, 9000);
         assert_eq!(s.http.max_body_size, 2 * 1024 * 1024);
 
-        let file =
-            load_str("[http]\nlisten = \"unix:/run/r.sock\"\n[pool]\nentrypoint = \"a.php\"\n")
-                .unwrap();
+        let file = toml::from_str::<FileConfig>(
+            "[http]\nlisten = \"unix:/run/r.sock\"\n[pool]\nentrypoint = \"a.php\"\n",
+        )
+        .unwrap();
         let err = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap_err();
         assert!(format!("{err:#}").contains("use an IP address with a port or :port"));
     }
@@ -223,7 +216,7 @@ mod tests {
             ("drop", UnsafeFieldNames::Drop),
             ("reject", UnsafeFieldNames::Reject),
         ] {
-            let file = load_str(&format!(
+            let file = toml::from_str::<FileConfig>(&format!(
                 "[http]\nunsafe_field_names = \"{text}\"\n[pool]\nentrypoint = \"a.php\"\n"
             ))
             .unwrap();
@@ -231,7 +224,7 @@ mod tests {
             assert_eq!(s.http.unsafe_field_names, want, "{text}");
         }
 
-        let file = load_str("[pool]\nentrypoint = \"a.php\"\n").unwrap();
+        let file = toml::from_str::<FileConfig>("[pool]\nentrypoint = \"a.php\"\n").unwrap();
         let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
         assert_eq!(s.http.unsafe_field_names, UnsafeFieldNames::Drop);
     }
@@ -241,7 +234,7 @@ mod tests {
     fn unknown_unsafe_field_names_value_is_rejected() {
         for value in ["dorp", "allow"] {
             assert!(
-                load_str(&format!(
+                toml::from_str::<FileConfig>(&format!(
                     "[http]\nunsafe_field_names = \"{value}\"\n[pool]\nentrypoint = \"a.php\"\n"
                 ))
                 .is_err(),
@@ -252,7 +245,8 @@ mod tests {
 
     #[test]
     fn file_entrypoint_is_config_dir_relative() {
-        let file = load_str("[pool]\nentrypoint = \"public/index.php\"\n").unwrap();
+        let file =
+            toml::from_str::<FileConfig>("[pool]\nentrypoint = \"public/index.php\"\n").unwrap();
         let s = merge(file, Overrides::default(), Some(Path::new("/srv/app"))).unwrap();
         assert_eq!(
             s.pool.entrypoint,
@@ -265,55 +259,35 @@ mod tests {
         let err = merge(FileConfig::default(), Overrides::default(), None).unwrap_err();
         assert!(err.to_string().contains("entrypoint"));
 
-        let file = load_str("[pool]\nentrypoint = \"\"\n").unwrap();
+        let file = toml::from_str::<FileConfig>("[pool]\nentrypoint = \"\"\n").unwrap();
         let err = merge(file, Overrides::default(), Some(Path::new("/srv/app"))).unwrap_err();
         assert!(err.to_string().contains("no entrypoint"));
     }
 
     #[test]
     fn max_body_size_overflow_is_rejected() {
-        let file =
-            load_str("[http]\nmax_body_size_mb = 17592186044416\n[pool]\nentrypoint = \"a.php\"\n")
-                .unwrap();
+        let file = toml::from_str::<FileConfig>(
+            "[http]\nmax_body_size_mb = 17592186044416\n[pool]\nentrypoint = \"a.php\"\n",
+        )
+        .unwrap();
         let err = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap_err();
         assert!(err.to_string().contains("too large"));
     }
 
     #[test]
     fn unknown_keys_are_rejected() {
-        assert!(load_str("[pool]\nbogus = 1\n").is_err());
-        assert!(load_str("[nope]\nx = 1\n").is_err());
-        assert!(load_str("[supervisor]\nbogus = 1\n").is_err());
-        assert!(load_str("[pool]\nthreads = 1\n").is_err());
-        assert!(load_str("[pool]\nclassic = true\n").is_err());
-        assert!(load_str("[pm]\nmode = \"static\"\n").is_err());
-        assert!(load_str("[pool]\npidfile = \"r.pid\"\n").is_err());
-        assert!(load_str("[supervisor]\nmax_requests = 1\n").is_err());
-        assert!(load_str("[log]\nbogus = 1\n").is_err());
-        assert!(load_str("[log]\nlevel = \"verbose\"\n").is_err());
-        assert!(load_str("[log]\nformat = \"pretty\"\n").is_err());
-        assert!(load_str("[http.static]\nbogus = 1\n").is_err());
-    }
-
-    #[test]
-    fn removed_pool_keys_are_unknown_fields() {
-        for (key, value) in [
-            ("scaling", "\"static\""),
-            ("min_spare", "1"),
-            ("max_spare", "2"),
-            ("process_idle_timeout_secs", "10"),
-            ("request_terminate_timeout_secs", "30"),
-        ] {
-            let err = load_str(&format!(
-                "[pool]\nentrypoint = \"a.php\"\n{key} = {value}\n"
-            ))
-            .unwrap_err()
-            .to_string();
-            assert!(
-                err.contains(&format!("unknown field `{key}`")),
-                "{key}: {err}"
-            );
-        }
+        assert!(toml::from_str::<FileConfig>("[pool]\nbogus = 1\n").is_err());
+        assert!(toml::from_str::<FileConfig>("[nope]\nx = 1\n").is_err());
+        assert!(toml::from_str::<FileConfig>("[supervisor]\nbogus = 1\n").is_err());
+        assert!(toml::from_str::<FileConfig>("[pool]\nthreads = 1\n").is_err());
+        assert!(toml::from_str::<FileConfig>("[pool]\nclassic = true\n").is_err());
+        assert!(toml::from_str::<FileConfig>("[pm]\nmode = \"static\"\n").is_err());
+        assert!(toml::from_str::<FileConfig>("[pool]\npidfile = \"r.pid\"\n").is_err());
+        assert!(toml::from_str::<FileConfig>("[supervisor]\nmax_requests = 1\n").is_err());
+        assert!(toml::from_str::<FileConfig>("[log]\nbogus = 1\n").is_err());
+        assert!(toml::from_str::<FileConfig>("[log]\nlevel = \"verbose\"\n").is_err());
+        assert!(toml::from_str::<FileConfig>("[log]\nformat = \"pretty\"\n").is_err());
+        assert!(toml::from_str::<FileConfig>("[http.static]\nbogus = 1\n").is_err());
     }
 
     #[test]
@@ -333,7 +307,7 @@ mod tests {
             ),
         ] {
             let err = merge(
-                load_str(toml).unwrap(),
+                toml::from_str::<FileConfig>(toml).unwrap(),
                 Overrides::default(),
                 Some(Path::new("/w")),
             )
@@ -345,7 +319,7 @@ mod tests {
             );
         }
 
-        let file = load_str(
+        let file = toml::from_str::<FileConfig>(
             "[pool]\nentrypoint = \"a.php\"\n[supervisor]\nprocess_control_timeout_secs = 86400\n",
         )
         .unwrap();
@@ -355,7 +329,7 @@ mod tests {
     /// The drain requires a positive stop budget.
     #[test]
     fn supervisor_control_timeout_zero_is_rejected() {
-        let file = load_str(
+        let file = toml::from_str::<FileConfig>(
             "[pool]\nentrypoint = \"a.php\"\n[supervisor]\nprocess_control_timeout_secs = 0\n",
         )
         .unwrap();
@@ -371,13 +345,15 @@ mod tests {
     /// Validation runs after precedence. Therefore, a CLI value of 0 is invalid even when the file contains a valid value.
     #[test]
     fn pool_processes_zero_is_rejected_from_either_layer() {
-        let file = load_str("[pool]\nprocesses = 0\nentrypoint = \"a.php\"\n").unwrap();
+        let file = toml::from_str::<FileConfig>("[pool]\nprocesses = 0\nentrypoint = \"a.php\"\n")
+            .unwrap();
         let err = merge(file, Overrides::default(), Some(Path::new("/w")))
             .unwrap_err()
             .to_string();
         assert!(err.contains("pool.processes must be at least 1"), "{err}");
 
-        let file = load_str("[pool]\nprocesses = 4\nentrypoint = \"a.php\"\n").unwrap();
+        let file = toml::from_str::<FileConfig>("[pool]\nprocesses = 4\nentrypoint = \"a.php\"\n")
+            .unwrap();
         let err = merge(
             file,
             Overrides {
@@ -394,7 +370,7 @@ mod tests {
     /// The resolver converts all units and resolves the directory relative to the configuration file. A zero `max_files` value would reject every file part after a successful start.
     #[test]
     fn http_uploads_resolve_and_reject_zero_files() {
-        let file = load_str(
+        let file = toml::from_str::<FileConfig>(
             "[pool]\nentrypoint = \"a.php\"\n[http.uploads]\ndir = \"spool\"\n\
              max_file_size_mb = 3\nmax_field_size_kb = 7\nmax_files = 4\n\
              max_parts = 9\nmax_part_headers = 5\n",
@@ -409,8 +385,10 @@ mod tests {
         assert_eq!(u.max_parts, 9);
         assert_eq!(u.max_part_headers, 5);
 
-        let file =
-            load_str("[pool]\nentrypoint = \"a.php\"\n[http.uploads]\nmax_files = 0\n").unwrap();
+        let file = toml::from_str::<FileConfig>(
+            "[pool]\nentrypoint = \"a.php\"\n[http.uploads]\nmax_files = 0\n",
+        )
+        .unwrap();
         let err = merge(file, Overrides::default(), Some(Path::new("/w")))
             .unwrap_err()
             .to_string();
@@ -424,7 +402,7 @@ mod tests {
     fn pool_max_requests_resolves_for_worker_and_dispatcher() {
         for mode in ["worker", "dispatcher"] {
             for max_requests in [0, 500] {
-                let file = load_str(&format!(
+                let file = toml::from_str::<FileConfig>(&format!(
                     "[pool]\nentrypoint = \"a.php\"\nmode = \"{mode}\"\nmax_requests = {max_requests}\n"
                 ))
                 .unwrap();
@@ -442,7 +420,7 @@ mod tests {
             ("worker", RunMode::Worker),
             ("dispatcher", RunMode::Dispatcher),
         ] {
-            let file = load_str(&format!(
+            let file = toml::from_str::<FileConfig>(&format!(
                 "[pool]\nentrypoint = \"a.php\"\nmode = \"{key}\"\n"
             ))
             .unwrap();
@@ -450,11 +428,13 @@ mod tests {
             assert_eq!(s.pool.mode, want, "{key}");
         }
 
-        let file = load_str("[pool]\nentrypoint = \"a.php\"\n").unwrap();
+        let file = toml::from_str::<FileConfig>("[pool]\nentrypoint = \"a.php\"\n").unwrap();
         let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
         assert_eq!(s.pool.mode, RunMode::Dispatcher, "default");
 
-        let file = load_str("[pool]\nentrypoint = \"a.php\"\nmode = \"classic\"\n").unwrap();
+        let file =
+            toml::from_str::<FileConfig>("[pool]\nentrypoint = \"a.php\"\nmode = \"classic\"\n")
+                .unwrap();
         let s = merge(
             file,
             Overrides {
@@ -466,14 +446,17 @@ mod tests {
         .unwrap();
         assert_eq!(s.pool.mode, RunMode::Dispatcher, "CLI beats file");
 
-        assert!(load_str("[pool]\nentrypoint = \"a.php\"\nmode = \"async\"\n").is_err());
+        assert!(
+            toml::from_str::<FileConfig>("[pool]\nentrypoint = \"a.php\"\nmode = \"async\"\n")
+                .is_err()
+        );
     }
 
     /// The table is valid only in dispatcher mode.
     #[test]
     fn http_uploads_require_dispatcher_mode() {
         for mode in ["classic", "worker"] {
-            let file = load_str(&format!(
+            let file = toml::from_str::<FileConfig>(&format!(
                 "[pool]\nentrypoint = \"a.php\"\nmode = \"{mode}\"\n[http.uploads]\nmax_files = 4\n"
             ))
             .unwrap();
@@ -486,18 +469,22 @@ mod tests {
             );
         }
 
-        let file = load_str("[pool]\nentrypoint = \"a.php\"\n[http.uploads]\n").unwrap();
+        let file = toml::from_str::<FileConfig>("[pool]\nentrypoint = \"a.php\"\n[http.uploads]\n")
+            .unwrap();
         assert!(merge(file, Overrides::default(), Some(Path::new("/w"))).is_ok());
 
-        let file = load_str("[pool]\nentrypoint = \"a.php\"\nmode = \"classic\"\n").unwrap();
+        let file =
+            toml::from_str::<FileConfig>("[pool]\nentrypoint = \"a.php\"\nmode = \"classic\"\n")
+                .unwrap();
         assert!(merge(file, Overrides::default(), Some(Path::new("/w"))).is_ok());
     }
 
     #[test]
     fn supervisor_pidfile_resolves_against_config_dir() {
-        let file =
-            load_str("[pool]\nentrypoint = \"a.php\"\n[supervisor]\npidfile = \"rapira.pid\"\n")
-                .unwrap();
+        let file = toml::from_str::<FileConfig>(
+            "[pool]\nentrypoint = \"a.php\"\n[supervisor]\npidfile = \"rapira.pid\"\n",
+        )
+        .unwrap();
         let s = merge(file, Overrides::default(), Some(Path::new("/etc/rapira"))).unwrap();
         assert_eq!(
             s.supervisor.pidfile,
@@ -508,7 +495,7 @@ mod tests {
     /// The root resolves relative to the configuration file. The default `forbid` value prevents access to PHP source files.
     #[test]
     fn http_static_resolves_with_defaults() {
-        let file = load_str(
+        let file = toml::from_str::<FileConfig>(
             "[pool]\nentrypoint = \"a.php\"\n[http]\nmiddleware = [\"static\"]\n[http.static]\nroot = \"public\"\n",
         )
         .unwrap();
@@ -517,11 +504,11 @@ mod tests {
         assert_eq!(st.root, std::path::absolute("/w/public").unwrap());
         assert_eq!(st.forbid, vec![".php".to_owned()]);
 
-        let file = load_str("[pool]\nentrypoint = \"a.php\"\n").unwrap();
+        let file = toml::from_str::<FileConfig>("[pool]\nentrypoint = \"a.php\"\n").unwrap();
         let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
         assert!(s.http.middleware.is_empty());
 
-        let file = load_str(
+        let file = toml::from_str::<FileConfig>(
             "[pool]\nentrypoint = \"a.php\"\n[http]\nmiddleware = [\"static\"]\n[http.static]\nroot = \"/srv/pub\"\n",
         )
         .unwrap();
@@ -548,7 +535,9 @@ mod tests {
             ),
             ("[http.static]\nroot = \"p\"\n", "does not list \"static\""),
         ] {
-            let file = load_str(&format!("[pool]\nentrypoint = \"a.php\"\n{toml}")).unwrap();
+            let file =
+                toml::from_str::<FileConfig>(&format!("[pool]\nentrypoint = \"a.php\"\n{toml}"))
+                    .unwrap();
             let err = merge(file, Overrides::default(), Some(Path::new("/w")))
                 .unwrap_err()
                 .to_string();
@@ -563,7 +552,7 @@ mod tests {
             "[pool]\nentrypoint = \"a.php\"\n[http.static]\nroot = \"\"\n",
         ] {
             let err = merge(
-                load_str(toml).unwrap(),
+                toml::from_str::<FileConfig>(toml).unwrap(),
                 Overrides::default(),
                 Some(Path::new("/w")),
             )
@@ -576,7 +565,7 @@ mod tests {
     /// The resolver validates only the format. The middleware constructor converts the value to lowercase.
     #[test]
     fn http_static_forbid_validates() {
-        let file = load_str(
+        let file = toml::from_str::<FileConfig>(
             "[pool]\nentrypoint = \"a.php\"\n[http]\nmiddleware = [\"static\"]\n[http.static]\nroot = \"p\"\nforbid = [\".PHP\", \".Phtml\"]\n",
         )
         .unwrap();
@@ -584,7 +573,7 @@ mod tests {
         let MiddlewareSettings::Static(st) = &s.http.middleware[0];
         assert_eq!(st.forbid, vec![".PHP".to_owned(), ".Phtml".to_owned()]);
 
-        let file = load_str(
+        let file = toml::from_str::<FileConfig>(
             "[pool]\nentrypoint = \"a.php\"\n[http]\nmiddleware = [\"static\"]\n[http.static]\nroot = \"p\"\nforbid = []\n",
         )
         .unwrap();
@@ -593,7 +582,7 @@ mod tests {
         assert!(st.forbid.is_empty());
 
         for entry in ["php", "", ".", ".php ", "./php"] {
-            let file = load_str(&format!(
+            let file = toml::from_str::<FileConfig>(&format!(
                 "[pool]\nentrypoint = \"a.php\"\n[http.static]\nroot = \"p\"\nforbid = [\"{entry}\"]\n"
             ))
             .unwrap();
@@ -616,7 +605,7 @@ mod tests {
             "\"http[request]\" = \"info\"",
             "\".php\" = \"info\"",
         ] {
-            let file = load_str(&format!(
+            let file = toml::from_str::<FileConfig>(&format!(
                 "[pool]\nentrypoint = \"a.php\"\n[log.targets]\n{entry}\n"
             ))
             .unwrap();

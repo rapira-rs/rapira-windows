@@ -46,8 +46,7 @@ struct PhpAbi {
 }
 
 fn main() -> anyhow::Result<()> {
-    // php_zts is always set. The PHP minor version selects php84 or php85.
-    println!("cargo:rustc-check-cfg=cfg(php84, php85, php_zts)");
+    println!("cargo:rustc-check-cfg=cfg(php84, php85)");
     println!("cargo:rerun-if-env-changed=PHP_DEVEL_DIR");
     println!("cargo:rerun-if-env-changed=PHP_SDK_PATH");
     println!("cargo:rerun-if-env-changed=LIBCLANG_PATH"); // Locates bindgen and libclang.
@@ -57,8 +56,6 @@ fn main() -> anyhow::Result<()> {
     println!("cargo:rustc-link-search=native={}", php.lib_dir);
     println!("cargo:rustc-link-lib=dylib={}", php.lib_name);
 
-    // ZTS is mandatory. Define the configuration unconditionally so all #[cfg(php_zts)] code remains enabled. Enable php85 according to the development package version.
-    println!("cargo:rustc-cfg=php_zts");
     if php.abi.version >= (8, 5) {
         println!("cargo:rustc-cfg=php85");
     } else {
@@ -106,9 +103,6 @@ fn main() -> anyhow::Result<()> {
         .clang_arg("-DZTS")
         // This parse-only marker enables the Windows substitutions in wrapper.h. The substitutions provide overflow builtins and remove ZEND_FASTCALL so bindgen represents the __vectorcall handler field as an 8-byte pointer. This preserves the layout tests. cl.exe does not receive this marker.
         .clang_arg("-DRAPIRA_BINDGEN=1")
-        // On php-src master with clang 19 or later, zend_op.handler is a `preserve_none` pointer. bindgen 0.72.1 cannot generate this pointer and panics. opaque_type represents _zend_op as a byte array with the size and alignment that clang reports. Rapira does not read _zend_op fields. This setting has no effect on PHP 8.4 or 8.5.
-        // https://clang.llvm.org/docs/AttributeReference.html#preserve-none
-        .opaque_type("_zend_op")
         .layout_tests(true);
 
     for binding in ALLOWED_BINDINGS {
@@ -160,13 +154,6 @@ fn windows_defines(abi: &PhpAbi) -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-fn parse_version(v: &str) -> anyhow::Result<(u32, u32)> {
-    let mut it = v.trim().split('.');
-    let major: u32 = it.next().context("php version missing major")?.parse()?;
-    let minor: u32 = it.next().context("php version missing minor")?.parse()?;
-    Ok((major, minor))
-}
-
 // PHP_DEVEL_DIR, or PHP_SDK_PATH as a fallback, identifies the extracted development package root:
 //   {root}\include\{,main,Zend,TSRM,ext,win32}, {root}\lib\php{major}ts[_debug].lib
 fn discover_php() -> anyhow::Result<PhpBuild> {
@@ -181,7 +168,7 @@ fn discover_php() -> anyhow::Result<PhpBuild> {
         .map(|d| inc.join(d).display().to_string())
         .collect();
     let lib_dir = root.join("lib");
-    let version = parse_version(&read_php_version(&inc)?)?;
+    let version = read_php_version(&inc)?;
     let major = version.0;
 
     // The import libraries in the development package define the linked ABI. This build requires php{major}ts.lib or its _debug variant because it supports only ZTS.
@@ -193,7 +180,7 @@ fn discover_php() -> anyhow::Result<PhpBuild> {
          rapira-windows is ZTS-only",
         lib_dir.display()
     );
-    let lib_name = windows_lib_name(&lib_dir, major)?;
+    let lib_name = format!("php{major}ts{}", if debug { "_debug" } else { "" });
     Ok(PhpBuild {
         includes,
         lib_dir: lib_dir.display().to_string(),
@@ -202,20 +189,7 @@ fn discover_php() -> anyhow::Result<PhpBuild> {
     })
 }
 
-// Use the `_debug` import library when the development package contains it. Otherwise, use the release TS library.
-fn windows_lib_name(lib_dir: &Path, major: u32) -> anyhow::Result<String> {
-    for stem in [format!("php{major}ts_debug"), format!("php{major}ts")] {
-        if lib_dir.join(format!("{stem}.lib")).exists() {
-            return Ok(stem);
-        }
-    }
-    anyhow::bail!(
-        "no ZTS PHP import lib (php{major}ts_debug.lib / php{major}ts.lib) in {}",
-        lib_dir.display()
-    )
-}
-
-fn read_php_version(include: &Path) -> anyhow::Result<String> {
+fn read_php_version(include: &Path) -> anyhow::Result<(u32, u32)> {
     let header = include.join("main").join("php_version.h");
     let text = std::fs::read_to_string(&header)
         .with_context(|| format!("reading {}", header.display()))?;
@@ -223,9 +197,9 @@ fn read_php_version(include: &Path) -> anyhow::Result<String> {
         let needle = format!("#define {name} ");
         text.lines()
             .find_map(|l| l.strip_prefix(needle.as_str()))
-            .map(|v| v.trim().to_string())
+            .map(str::trim)
     };
     let major = grab("PHP_MAJOR_VERSION").context("PHP_MAJOR_VERSION not found")?;
     let minor = grab("PHP_MINOR_VERSION").context("PHP_MINOR_VERSION not found")?;
-    Ok(format!("{major}.{minor}"))
+    Ok((major.parse()?, minor.parse()?))
 }

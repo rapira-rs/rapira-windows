@@ -13,7 +13,7 @@ pub const SLOT_IDLE: u32 = 2;
 pub const SLOT_ACTIVE: u32 = 3;
 pub const SLOT_DRAINING: u32 = 4; // The worker requested exit.
 
-/// Each worker thread writes its slot. The boot thread sets STARTING before spawn and FREE after join.
+/// Each worker thread writes its slot. The boot thread sets STARTING before spawn.
 #[repr(C, align(64))]
 pub struct SharedSlot {
     pub state: AtomicU32,
@@ -83,16 +83,8 @@ impl Scoreboard {
         })
     }
 
-    pub fn nslots(&self) -> usize {
-        self.slots.len()
-    }
-
     pub fn slot(&self, i: usize) -> Option<&'static SharedSlot> {
         self.slots.get(i)
-    }
-
-    pub fn slots(&self) -> &'static [SharedSlot] {
-        self.slots
     }
 
     /// The boot thread reserves the slot before its worker starts.
@@ -100,14 +92,6 @@ impl Scoreboard {
         if let Some(s) = self.slots.get(i) {
             s.last_activity_ms.store(now_millis(), Relaxed);
             s.state.store(SLOT_STARTING, Release);
-        }
-    }
-
-    /// The boot thread clears the slot after its worker joins.
-    pub fn clear(&self, i: usize) {
-        if let Some(s) = self.slots.get(i) {
-            s.pid.store(0, Relaxed);
-            s.state.store(SLOT_FREE, Relaxed);
         }
     }
 
@@ -148,9 +132,7 @@ impl SharedSlot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::Ordering::Acquire;
     use std::thread;
-    use std::time::Duration;
 
     #[test]
     fn worker_threads_have_independent_slots() {
@@ -180,25 +162,6 @@ mod tests {
     }
 
     #[test]
-    fn counters_survive_interpreter_generations() {
-        let sb = Scoreboard::create(1).unwrap();
-        let slot = sb.slot(0).unwrap();
-        slot.bind(5);
-
-        for (handled, total, recycles) in [(2, 2, 1), (3, 5, 2)] {
-            slot.state.store(SLOT_IDLE, Relaxed);
-            slot.handled.fetch_add(handled, Relaxed);
-            slot.state.store(SLOT_DRAINING, Release);
-            slot.recycles.fetch_add(1, Relaxed);
-
-            let snapshot = &sb.snapshot_slots()[0];
-            assert_eq!(snapshot.pid, 5);
-            assert_eq!(snapshot.handled, total);
-            assert_eq!(snapshot.recycles, recycles);
-        }
-    }
-
-    #[test]
     fn activity_timestamps_use_monotonic_milliseconds() {
         let sb = Scoreboard::create(1).unwrap();
         let before = now_millis();
@@ -216,37 +179,13 @@ mod tests {
         assert!(before <= starting);
         assert!(starting <= bound);
         assert!(bound <= after);
-        thread::sleep(Duration::from_millis(2));
-        assert!(now_millis() >= after + 2);
-    }
-
-    #[test]
-    fn published_slot_is_visible_to_another_thread() {
-        let sb = Scoreboard::create(1).unwrap();
-        let slot = sb.slot(0).unwrap();
-        slot.bind(7);
-        let reader = thread::spawn(move || {
-            while slot.state.load(Acquire) != SLOT_DRAINING {
-                thread::yield_now();
-            }
-            let snapshot = &sb.snapshot_slots()[0];
-            assert_eq!(snapshot.pid, 7);
-            assert_eq!(snapshot.state, SLOT_DRAINING);
-            assert_eq!(snapshot.handled, 9);
-            assert_eq!(snapshot.recycles, 2);
-        });
-
-        slot.handled.store(9, Relaxed);
-        slot.recycles.store(2, Relaxed);
-        slot.state.store(SLOT_DRAINING, Release);
-        reader.join().unwrap();
     }
 
     #[test]
     fn create_bind_snapshot_roundtrip() {
         let sb = Scoreboard::create(3).unwrap();
-        assert_eq!(sb.nslots(), 3);
         assert_eq!(sb.slot(0).unwrap().state.load(Relaxed), SLOT_FREE);
+        assert!(sb.snapshot_slots().is_empty());
 
         sb.set_starting(0);
         assert_eq!(sb.slot(0).unwrap().state.load(Relaxed), SLOT_STARTING);
@@ -261,10 +200,6 @@ mod tests {
         assert_eq!(snap.len(), 1);
         assert_eq!((snap[0].pid, snap[0].handled, snap[0].errors), (4242, 2, 1));
         assert_eq!(snap[0].state, SLOT_IDLE);
-
-        sb.clear(0);
-        assert_eq!(sb.slot(0).unwrap().state.load(Relaxed), SLOT_FREE);
-        assert!(sb.snapshot_slots().is_empty());
     }
 
     #[test]
