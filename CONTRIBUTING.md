@@ -90,3 +90,5 @@ Pull request titles follow [Conventional Commits](https://www.conventionalcommit
 ## Releases
 
 Release Please updates the release pull request after each merge to `main`. Merging that pull request creates the tag and starts four native Windows builds: PHP 8.4 and 8.5 on x64 and ARM64. Each build creates the matching PHP runtime from official release source before it builds Rapira. The release stays in draft state until all four archives and the two architecture checksum files are ready. Re-run failed jobs when a release pipeline fails.
+
+After a stable release is published, the `Mirror release to upstream` workflow copies the six Windows assets to the release with the same tag in [rapira-rs/rapira](https://github.com/rapira-rs/rapira). The workflow uses the `UPSTREAM_RELEASE_TOKEN` repository secret. This secret is a fine-grained personal access token with `Contents: Read and write` permission on `rapira-rs/rapira` only. The job fails when the upstream tag or release does not exist. In that case dispatch the workflow by hand with the tag name after the upstream release exists. A prerelease version with a hyphen does not get a copy.

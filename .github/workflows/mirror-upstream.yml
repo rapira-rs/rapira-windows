@@ -1,0 +1,68 @@
+name: Mirror release to upstream
+# The stable release workflow calls this workflow after it publishes the Windows release. It copies the Windows assets to the release with the same tag in rapira-rs/rapira. Dispatch it by hand to repeat the copy for a tag.
+on:
+    workflow_call:
+        inputs:
+            tag:
+                description: "Release tag, such as v0.8.0. The same tag must exist in the upstream repository."
+                type: string
+                required: true
+    workflow_dispatch:
+        inputs:
+            tag:
+                description: "Release tag, such as v0.8.0. The same tag must exist in the upstream repository."
+                type: string
+                required: true
+
+permissions:
+    contents: read
+
+env:
+    UPSTREAM_REPO: rapira-rs/rapira
+
+jobs:
+    mirror:
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        env:
+            TAG: ${{ inputs.tag }}
+        steps:
+            - name: Download the Windows assets
+              shell: bash
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  GH_REPO: ${{ github.repository }}
+              run: |
+                  set -euo pipefail
+                  mkdir -p dist
+                  gh release download "$TAG" --dir dist --pattern "rapira-${TAG}-*windows*"
+                  ls -1 dist
+                  # A release has four archives and two checksum files. Refuse a partial copy.
+                  count=$(find dist -type f | wc -l)
+                  if [ "$count" -ne 6 ]; then
+                      echo "::error::expected six Windows assets on $TAG, found $count"
+                      exit 1
+                  fi
+
+            # The caller passes the repository secrets with `secrets: inherit`. The fine-grained token limits the job to the upstream repository. The step fails when the upstream tag is missing so the release owner can dispatch the workflow again after the upstream release exists.
+            - name: Upload to the upstream release
+              shell: bash
+              env:
+                  GH_TOKEN: ${{ secrets.UPSTREAM_RELEASE_TOKEN }}
+                  GH_REPO: ${{ env.UPSTREAM_REPO }}
+              run: |
+                  set -euo pipefail
+                  if [ -z "$GH_TOKEN" ]; then
+                      echo "::error::the UPSTREAM_RELEASE_TOKEN secret is not set"
+                      exit 1
+                  fi
+                  if ! gh api "repos/$GH_REPO/git/ref/tags/$TAG" >/dev/null 2>&1; then
+                      echo "::error::tag $TAG does not exist in $GH_REPO"
+                      exit 1
+                  fi
+                  if ! gh release view "$TAG" >/dev/null 2>&1; then
+                      echo "::error::tag $TAG exists in $GH_REPO but has no release"
+                      exit 1
+                  fi
+                  gh release upload "$TAG" dist/* --clobber
+                  gh release view "$TAG" --json assets --jq '.assets[].name' | grep -- '-windows-'

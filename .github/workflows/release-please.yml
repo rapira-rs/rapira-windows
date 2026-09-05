@@ -72,3 +72,14 @@ jobs:
                     *-*) gh release edit "$TAG" --draft=false --prerelease ;;
                     *) gh release edit "$TAG" --draft=false --latest ;;
                   esac
+
+    # Copy the Windows assets to the release with the same tag in rapira-rs/rapira. Only a stable release gets a copy.
+    mirror:
+        needs: [release-please, publish]
+        if: ${{ !contains(needs.release-please.outputs.version, '-') }}
+        permissions:
+            contents: read
+        uses: ./.github/workflows/mirror-upstream.yml
+        with:
+            tag: ${{ needs.release-please.outputs.tag_name }}
+        secrets: inherit
