@@ -53,6 +53,20 @@ impl FromStr for Listen {
     }
 }
 
+pub(crate) fn resolve_listen(
+    value: Option<&str>,
+    protocol: &str,
+    port: u16,
+) -> anyhow::Result<Listen> {
+    use anyhow::Context;
+    match value {
+        Some(value) => value
+            .parse()
+            .with_context(|| format!("invalid {protocol}.listen `{value}`")),
+        None => Ok(Listen::Tcp(([127, 0, 0, 1], port).into())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

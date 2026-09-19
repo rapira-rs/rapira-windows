@@ -49,19 +49,19 @@ struct ServeArgs {
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
 
-    /// PHP interpreter threads in the single server process. Defaults to the CPU count.
+    /// HTTP interpreter threads in the server process. Defaults to the CPU count.
     #[arg(long)]
     processes: Option<usize>,
 
-    /// Run mode: classic, worker, or dispatcher. Overrides `pool.mode`.
+    /// HTTP run mode: classic, worker, or dispatcher. Overrides `pool.mode`.
     #[arg(long, value_name = "MODE")]
     mode: Option<RunMode>,
 
-    /// Listen on an IP address and port. Use `:port` for all interfaces.
+    /// HTTP listen address and port. Use `:port` for all interfaces.
     #[arg(long, value_name = "ADDR")]
     listen: Option<Listen>,
 
-    /// PHP entry script. Overrides `pool.entrypoint` from the configuration file.
+    /// HTTP PHP entry script. Overrides `pool.entrypoint` from the configuration file.
     #[arg(value_name = "SCRIPT")]
     script: Option<PathBuf>,
 }
@@ -169,23 +169,68 @@ fn serve(args: ServeArgs) -> anyhow::Result<ExitCode> {
         .map(pidfile::PidFile::write)
         .transpose()?;
 
-    let mode: Mode = match settings.pool.mode {
+    let grace = settings.supervisor.process_control_timeout;
+    let mut pools = Vec::new();
+    if let (Some(http), Some(pool)) = (settings.http, settings.pool) {
+        pools.push(http_pool(http, pool, settings.supervisor.drain_grace())?);
+    }
+    if let Some(grpc) = settings.grpc {
+        let registry = Arc::new(rapira_grpc::Registry::load(
+            &grpc.protos,
+            &grpc.import_paths,
+        )?);
+        let mode = Mode::GrpcDispatcher {
+            entrypoint: grpc.pool.entrypoint.clone(),
+            services: rapira_runtime::grpc_services(registry.services()),
+        };
+        let mut host = ExtensionRuntime::new();
+        host.register::<rapira_grpc::Server>(rapira_grpc::Config {
+            listen: match grpc.listen {
+                Listen::Tcp(addr) => ListenAddr::Tcp(addr),
+            },
+            registry,
+            reflection: grpc.reflection,
+            gzip_responses: grpc.gzip_responses,
+            max_request_message_size: grpc.max_request_message_size,
+            max_response_message_size: grpc.max_response_message_size,
+            drain_grace: settings.supervisor.drain_grace(),
+            interceptors: Vec::new(),
+        })?;
+        pools.push(worker::PoolArgs {
+            host,
+            mode,
+            script: grpc.pool.entrypoint,
+            processes: grpc.pool.processes,
+            max_requests: grpc.pool.max_requests,
+            uploads: None,
+        });
+    }
+    let mut prepare_ctx = PrepareCtx::new();
+    for pool in &mut pools {
+        pool.host.prepare_all(&mut prepare_ctx)?;
+    }
+    let outcome = worker::worker_body(pools, grace)?;
+    if !outcome.joined {
+        force_exit(outcome.code);
+    }
+    Ok(ExitCode::from(outcome.code))
+}
+
+fn http_pool(
+    http: rapira_config::HttpSettings,
+    pool: rapira_config::PoolSettings,
+    grace: std::time::Duration,
+) -> anyhow::Result<worker::PoolArgs> {
+    let mode: Mode = match pool.mode {
         RunMode::Classic => Mode::Classic,
-        RunMode::Worker => Mode::Worker(settings.pool.entrypoint.clone()),
-        RunMode::Dispatcher => Mode::Dispatcher(settings.pool.entrypoint.clone()),
+        RunMode::Worker => Mode::Worker(pool.entrypoint.clone()),
+        RunMode::Dispatcher => Mode::Dispatcher(pool.entrypoint.clone()),
     };
 
-    let sendfile_root = settings
-        .http
+    let sendfile_root = http
         .sendfile_root
         .clone()
-        .or_else(|| {
-            settings
-                .pool
-                .entrypoint
-                .parent()
-                .map(std::path::Path::to_path_buf)
-        })
+        .or_else(|| pool.entrypoint.parent().map(std::path::Path::to_path_buf))
         .ok_or_else(|| anyhow::anyhow!("pool.entrypoint has no parent directory"))?;
     let sendfile_root = std::fs::canonicalize(&sendfile_root).map_err(|error| {
         anyhow::anyhow!(
@@ -196,7 +241,7 @@ fn serve(args: ServeArgs) -> anyhow::Result<ExitCode> {
     php_sys::set_sendfile_root(sendfile_root);
 
     let mut middleware: Vec<Arc<dyn Middleware>> = Vec::new();
-    for mw in &settings.http.middleware {
+    for mw in &http.middleware {
         match mw {
             MiddlewareSettings::Static(st) => {
                 // is_dir() converts every metadata error to false. `metadata` preserves the error code.
@@ -220,31 +265,30 @@ fn serve(args: ServeArgs) -> anyhow::Result<ExitCode> {
         }
     }
     let http_cfg: HttpConfig = HttpConfig {
-        listen: match settings.http.listen {
+        listen: match http.listen {
             Listen::Tcp(addr) => ListenAddr::Tcp(addr),
         },
-        server_name: settings.http.server_name,
-        server_port: settings.http.server_port,
-        max_body_size: settings.http.max_body_size,
-        write_timeout: settings.http.write_timeout,
-        drain_grace: settings.supervisor.drain_grace(),
-        unsafe_field_names: match settings.http.unsafe_field_names {
+        server_name: http.server_name,
+        server_port: http.server_port,
+        max_body_size: http.max_body_size,
+        write_timeout: http.write_timeout,
+        drain_grace: grace,
+        unsafe_field_names: match http.unsafe_field_names {
             UnsafeFieldNames::Drop => HttpUnsafeFieldNames::Drop,
             UnsafeFieldNames::Reject => HttpUnsafeFieldNames::Reject,
         },
         superglobals: !matches!(mode, Mode::Dispatcher(_)),
-        keepalive_timeout: settings.http.keepalive_timeout,
+        keepalive_timeout: http.keepalive_timeout,
         middleware,
     };
     if matches!(mode, Mode::Dispatcher(_)) {
-        std::fs::create_dir_all(&settings.http.uploads.dir).map_err(|e| {
+        std::fs::create_dir_all(&http.uploads.dir).map_err(|e| {
             anyhow::anyhow!(
                 "creating http.uploads.dir {}: {e}",
-                settings.http.uploads.dir.display()
+                http.uploads.dir.display()
             )
         })?;
-        let probe = settings
-            .http
+        let probe = http
             .uploads
             .dir
             .join(format!(".rapira-probe-{}", std::process::id()));
@@ -256,11 +300,11 @@ fn serve(args: ServeArgs) -> anyhow::Result<ExitCode> {
             .map_err(|e| {
                 anyhow::anyhow!(
                     "http.uploads.dir {} is not writable: {e}",
-                    settings.http.uploads.dir.display()
+                    http.uploads.dir.display()
                 )
             })?;
         let _ = remove_file(&probe);
-        match read_dir(&settings.http.uploads.dir) {
+        match read_dir(&http.uploads.dir) {
             Ok(entries) => {
                 for entry in entries.flatten() {
                     if !spool_dir_reclaimable(&entry.file_name().to_string_lossy()) {
@@ -273,38 +317,32 @@ fn serve(args: ServeArgs) -> anyhow::Result<ExitCode> {
                 }
             }
             Err(e) => {
-                tracing::warn!(target: "rapira", "listing {} for the spool sweep: {e}", settings.http.uploads.dir.display());
+                tracing::warn!(target: "rapira", "listing {} for the spool sweep: {e}", http.uploads.dir.display());
             }
         }
     }
     let upload_limits = rapira_runtime::multipart::Limits {
-        dir: settings.http.uploads.dir.clone(),
-        max_file_size: settings.http.uploads.max_file_size,
-        max_field_size: settings.http.uploads.max_field_size,
-        max_files: settings.http.uploads.max_files,
-        max_parts: settings.http.uploads.max_parts,
-        max_part_headers: settings.http.uploads.max_part_headers,
+        dir: http.uploads.dir.clone(),
+        max_file_size: http.uploads.max_file_size,
+        max_field_size: http.uploads.max_field_size,
+        max_files: http.uploads.max_files,
+        max_parts: http.uploads.max_parts,
+        max_part_headers: http.uploads.max_part_headers,
     };
 
     let mut host: ExtensionRuntime = ExtensionRuntime::new();
     host.register::<HttpServer>(http_cfg)?;
 
-    let mut prepare_ctx: PrepareCtx = PrepareCtx::new();
-    host.prepare_all(&mut prepare_ctx)?;
-    let outcome = worker::worker_body(
+    Ok(worker::PoolArgs {
         host,
         mode,
-        settings.pool.entrypoint,
-        settings.pool.processes,
-        settings.pool.max_requests,
-        upload_limits,
-        settings.supervisor.process_control_timeout,
-    )?;
-    if !outcome.joined {
-        force_exit(outcome.code);
-    }
-    Ok(ExitCode::from(outcome.code))
+        script: pool.entrypoint,
+        processes: pool.processes,
+        max_requests: pool.max_requests,
+        uploads: Some(upload_limits),
+    })
 }
+
 #[cfg(test)]
 mod tests {
     use super::{ProcessStatus, spool_dir_reclaimable, spool_dir_reclaimable_with};

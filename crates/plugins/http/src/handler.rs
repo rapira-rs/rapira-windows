@@ -179,6 +179,7 @@ where
         .await;
     }
 
+    parts.extensions.insert(extension_api::Protocol::Http);
     parts.extensions.insert(peer);
     parts.extensions.insert(ReqState {
         authority,

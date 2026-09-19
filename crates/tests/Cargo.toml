@@ -17,9 +17,21 @@ tracing-subscriber = "0.3"
 tracing-log = "0.2"
 
 [dev-dependencies]
+bytes = { workspace = true }
+h2 = "0.4"
+http = { workspace = true }
+http-body-util = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+rapira_http = { workspace = true }
+
 extension_api = { workspace = true }
 rapira_runtime = { path = "../runtime" }
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "net"] }
+tokio-stream = "0.1"
+tonic = { workspace = true, features = ["transport"] }
+tonic-prost = { workspace = true }
+tonic-reflection = { workspace = true }
 # The end-to-end test harness controls the Rapira process.
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading"] }
 # The end-to-end tests check the log format with serde_json.

@@ -5,12 +5,18 @@ enum RecvMode {
     Try,
 }
 
-/// Allocates the wrapper object before it receives a unit. A received unit without an owner would leak its `Frame` sender and prevent the client from completing.
+/// Allocates the wrapper object before pulling: a unit pulled with no owner would leak its Frame sender and hang the client.
 /// # Safety
-/// `return_value` must be writable. The engine must be active on this thread.
+/// `return_value` writable; engine active on this thread.
 unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
     unsafe {
-        if matches!(CYCLE.get().unit, Unit::Handling(_)) {
+        if let Unit::Handling(ptr) = CURRENT.get()
+            && (*ptr).host_closed()
+        {
+            tracing::debug!(target: "rapira", "receive() discarded an unfinalized exchange whose client left");
+            super::respond::discard_unit(&mut *ptr);
+        }
+        if matches!(CURRENT.get(), Unit::Handling(_)) {
             zend::throw_error(
                 c"receive() while a Rapira\\Http\\Exchange is unfinalized; finalize it first",
             );
@@ -18,16 +24,21 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
         }
         let mut obj: zval = std::mem::zeroed();
         let _ = object_init_ex(&mut obj, rapira_ce_internal_http_exchange);
-        // SAFETY: the C zend_try contains any timer bailout.
-        rapira_receive_untimed();
+        let wait = ReceiveWait::new(match mode {
+            RecvMode::Try => 0,
+            RecvMode::Wait(t) => t,
+        });
         loop {
-            let pulled = match mode {
-                RecvMode::Try | RecvMode::Wait(0) => pull_job_try(),
-                RecvMode::Wait(-1) => pull_job_wait(None),
-                RecvMode::Wait(t) => pull_job_wait(Some(Duration::from_micros(t as u64))),
-            };
+            // SAFETY: plain Zend timer bookkeeping on this thread; no bailout path.
+            rapira_receive_untimed();
+            let pulled = wait.pull();
+            rapira_receive_timed();
             match pulled {
                 Pulled::Job(job) => {
+                    let Work::Http(job) = job else {
+                        job.unavailable();
+                        continue;
+                    };
                     let st = match ExchangeState::new(job) {
                         Ok(st) => st,
                         Err(mut job) => {
@@ -41,18 +52,14 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
                         continue;
                     }
                     let ptr = Box::into_raw(Box::new(st));
-                    update(|c| {
-                        c.unit = Unit::Handling(ptr);
-                        c.received = true;
-                    });
+                    CURRENT.set(Unit::Handling(ptr));
+                    work::note_received();
                     (*exchange_from(obj.value.obj)).job = ptr.cast();
-                    // SAFETY: the C zend_try contains any timer bailout.
-                    rapira_receive_timed();
                     *return_value = obj;
                     return true;
                 }
                 Pulled::Closed => {
-                    update(|c| c.closed_seen = true);
+                    work::note_closed();
                     zval_ptr_dtor(&mut obj);
                     zend::throw_exception(
                         rapira_ce_closed_exception,
@@ -79,7 +86,7 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
 }
 
 /// # Safety
-/// `return_value` must be writable. The engine must be active on this thread because receive operations access the Zend timer.
+/// `return_value` writable; engine active on this thread (the receive verbs touch the zend timer).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_receive(timeout_us: i64, return_value: *mut zval) -> bool {
     guard(false, || unsafe {
@@ -92,7 +99,7 @@ pub unsafe extern "C" fn rapira_rs_receive(timeout_us: i64, return_value: *mut z
 }
 
 /// # Safety
-/// Has the safety requirements of `rapira_rs_receive`. It does not block. An empty channel writes null and does not throw.
+/// As `rapira_rs_receive`; never blocks. Empty writes null instead of throwing.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_try_receive(return_value: *mut zval) -> bool {
     guard(false, || unsafe {
@@ -101,14 +108,14 @@ pub unsafe extern "C" fn rapira_rs_try_receive(return_value: *mut zval) -> bool 
 }
 
 /// # Safety
-/// `return_value` must be writable. The engine must be active on this thread.
+/// `return_value` writable; engine active on this thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_dispatcher_info(return_value: *mut zval) -> bool {
     guard(false, || unsafe {
         let _ = object_init_ex(return_value, rapira_ce_internal_http_dispatcher_info);
         let info = info_from((*return_value).value.obj);
         (*info).pending = pending_depth() as i64;
-        (*info).active = i64::from(matches!(CYCLE.get().unit, Unit::Handling(_)));
+        (*info).active = i64::from(matches!(CURRENT.get(), Unit::Handling(_)));
         true
     })
 }
@@ -117,20 +124,20 @@ thread_local! {
     static DISPATCHER: Cell<Option<zval>> = const { Cell::new(None) };
 }
 
-/// The previous interpreter released the cached zval.
+/// The previous interpreter released the cached value.
 pub(crate) fn forget_dispatcher() {
     DISPATCHER.set(None);
 }
 
 /// # Safety
-/// `return_value` must be writable. The engine must be active on this thread.
+/// `return_value` writable; engine active on this thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_get_dispatcher(return_value: *mut zval) -> bool {
     guard(false, || unsafe {
-        if crate::rapira_mode != RAPIRA_MODE_DISPATCHER as c_int {
+        if crate::rapira_current_mode() != RAPIRA_MODE_DISPATCHER as c_int {
             zend::throw_exception(
                 rapira_ce_no_dispatcher_error,
-                c"nothing dispatches work to this process outside dispatcher mode",
+                c"no dispatcher is available in this interpreter mode",
             );
             return false;
         }
@@ -138,7 +145,12 @@ pub unsafe extern "C" fn rapira_rs_get_dispatcher(return_value: *mut zval) -> bo
             Some(zv) => zv,
             None => {
                 let mut zv: zval = std::mem::zeroed();
-                let _ = object_init_ex(&mut zv, rapira_ce_internal_http_dispatcher);
+                let class = if crate::grpc::installed() {
+                    crate::rapira_ce_internal_grpc_dispatcher
+                } else {
+                    rapira_ce_internal_http_dispatcher
+                };
+                let _ = object_init_ex(&mut zv, class);
                 d.set(Some(zv));
                 zv
             }
@@ -149,7 +161,7 @@ pub unsafe extern "C" fn rapira_rs_get_dispatcher(return_value: *mut zval) -> bo
     })
 }
 
-/// The C RSHUTDOWN code calls this function.
+/// Called from the C RSHUTDOWN bracket.
 #[unsafe(no_mangle)]
 pub extern "C" fn rapira_rs_dispatcher_release() {
     guard((), || {

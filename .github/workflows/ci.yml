@@ -116,6 +116,25 @@ jobs:
         run: cargo test --locked --workspace --target $env:CARGO_TARGET
       - name: Build server for e2e
         run: cargo build --locked --bin rapira --target $env:CARGO_TARGET
+      - name: Restore gRPC test tools
+        id: grpc-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/rapira-grpc-tools-*/build/Release/protoc.exe
+            ${{ runner.temp }}/rapira-grpc-tools-*/protobuf-36.2/php/src
+          key: grpc-tests-v36.2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ci/setup-grpc-tests.ps1') }}
+      - name: Prepare gRPC test tools
+        shell: pwsh
+        run: ./ci/setup-grpc-tests.ps1
+      - name: Save gRPC test tools
+        if: steps.grpc-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/rapira-grpc-tools-*/build/Release/protoc.exe
+            ${{ runner.temp }}/rapira-grpc-tools-*/protobuf-36.2/php/src
+          key: grpc-tests-v36.2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ci/setup-grpc-tests.ps1') }}
       - name: Test e2e
         run: cargo test --locked -p tests --test e2e --features e2e --target $env:CARGO_TARGET -- --test-threads=1
 
@@ -196,6 +215,25 @@ jobs:
         run: cargo test --locked --workspace --target $env:CARGO_TARGET
       - name: Build server for e2e
         run: cargo build --locked --bin rapira --target $env:CARGO_TARGET
+      - name: Restore gRPC test tools
+        id: grpc-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/rapira-grpc-tools-*/build/Release/protoc.exe
+            ${{ runner.temp }}/rapira-grpc-tools-*/protobuf-36.2/php/src
+          key: grpc-tests-v36.2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ci/setup-grpc-tests.ps1') }}
+      - name: Prepare gRPC test tools
+        shell: pwsh
+        run: ./ci/setup-grpc-tests.ps1
+      - name: Save gRPC test tools
+        if: steps.grpc-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/rapira-grpc-tools-*/build/Release/protoc.exe
+            ${{ runner.temp }}/rapira-grpc-tools-*/protobuf-36.2/php/src
+          key: grpc-tests-v36.2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ci/setup-grpc-tests.ps1') }}
       - name: Test e2e
         run: cargo test --locked -p tests --test e2e --features e2e --target $env:CARGO_TARGET -- --test-threads=1
 

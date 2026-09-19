@@ -8,9 +8,9 @@ use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use crate::work::{Queued, Work};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError, bounded};
 use tracing::{error, info, trace};
-use types::Context;
 
 use crate::quota::{self, PoolHooks};
 use crate::rapira_worker::{WorkerExit, rapira_worker};
@@ -26,13 +26,15 @@ thread_local! {
 }
 
 pub(crate) struct Intake {
-    pub(crate) tx: Sender<Context>,
+    pub(crate) dispatcher: bool,
+    pub(crate) grpc: bool,
+    pub(crate) tx: Sender<Queued>,
     pub(crate) pending: Arc<AtomicUsize>,
 }
 
 #[derive(Clone)]
 struct JobRx {
-    rx: Receiver<Context>,
+    rx: Receiver<Queued>,
     pending: Arc<AtomicUsize>,
     stop: Receiver<()>,
     stopping: Arc<AtomicBool>,
@@ -75,10 +77,14 @@ impl Drop for PhpModule {
     }
 }
 
+pub struct PoolConfig {
+    pub mode: Mode,
+    pub processes: usize,
+    pub hooks: PoolHooks,
+}
+
 pub struct Rapira {
-    pub(crate) intake: Option<Intake>,
-    pub(crate) superglobals: bool,
-    pub(crate) dispatcher: bool,
+    pub(crate) intakes: Vec<Intake>,
     workers: Vec<JoinHandle<()>>,
     board: rapira_scoreboard::Scoreboard,
     module: Option<PhpModule>,
@@ -116,9 +122,27 @@ impl Rapira {
     }
 
     pub fn start_pool(mode: Mode, processes: usize, hooks: PoolHooks) -> anyhow::Result<Self> {
+        Self::start_pools(vec![PoolConfig {
+            mode,
+            processes,
+            hooks,
+        }])
+    }
+
+    /// Starts PHP once and gives each protocol a fixed group of interpreter threads.
+    pub fn start_pools(pools: Vec<PoolConfig>) -> anyhow::Result<Self> {
+        anyhow::ensure!(!pools.is_empty(), "at least one PHP pool is required");
+        let mut processes = 0usize;
+        for pool in &pools {
+            anyhow::ensure!(pool.processes > 0, "pool.processes must be at least 1");
+            processes = processes
+                .checked_add(pool.processes)
+                .filter(|count| *count < c_int::MAX as usize)
+                .ok_or_else(|| anyhow::anyhow!("PHP thread count is too large"))?;
+        }
         check_linked_php()?;
         let board = rapira_scoreboard::Scoreboard::create(processes)?;
-        info!(target: "rapira", "booting with mode: {mode:?}, threads: {processes}");
+        info!(target: "rapira", "booting PHP with {processes} interpreter threads");
         let mut module: _sapi_module_struct = module::build_sapi_module();
         let started: bool = unsafe {
             php_tsrm_startup_ex((processes + 1) as c_int);
@@ -136,70 +160,68 @@ impl Rapira {
             return Err(anyhow::anyhow!("php_module_startup failed"));
         }
 
-        let superglobals = !matches!(mode, Mode::Dispatcher(_));
-        let dispatcher = matches!(mode, Mode::Dispatcher(_));
-        // SAFETY: safe, trust me, I'm a developer
-        unsafe {
-            crate::rapira_mode = match &mode {
-                Mode::Classic => RAPIRA_MODE_CLASSIC,
-                Mode::Worker(_) => RAPIRA_MODE_WORKER,
-                Mode::Dispatcher(_) => RAPIRA_MODE_DISPATCHER,
-            } as c_int;
-        }
-
-        let pending = Arc::new(AtomicUsize::new(0));
-        let (intake_tx, intake_rx) = bounded::<Context>(1024);
         let (stop_tx, stop_rx) = bounded(0);
         let stopping = Arc::new(AtomicBool::new(false));
-        let job_rx = JobRx {
-            rx: intake_rx,
-            pending: pending.clone(),
-            stop: stop_rx,
-            stopping: stopping.clone(),
-            handled: Arc::new(AtomicBool::new(false)),
-        };
         let reported_boot_failure = Arc::new(AtomicBool::new(false));
         let (start_tx, start_rx) = bounded(processes);
         let mut rapira = Self {
-            intake: Some(Intake {
-                tx: intake_tx,
-                pending,
-            }),
-            superglobals,
-            dispatcher,
+            intakes: Vec::with_capacity(pools.len()),
             workers: Vec::with_capacity(processes),
             board,
             module: Some(module),
-            stopping,
+            stopping: stopping.clone(),
             stop_tx: Some(stop_tx),
             _not_send: PhantomData,
         };
 
-        for index in 0..processes {
-            let slot = board.slot(index).expect("worker slot exists");
-            board.set_starting(index);
-            let rx = job_rx.clone();
-            let mode = mode.clone();
-            let hooks = hooks.clone();
-            let reported = reported_boot_failure.clone();
-            let start = start_rx.clone();
-            trace!(target: "rapira", "spawning worker thread {index}");
-            let worker = thread::Builder::new()
-                .name(format!("rapira-worker-{index}"))
-                .spawn(move || {
-                    if start.recv().is_ok() {
-                        worker_main(mode, rx, slot, index, hooks, reported);
+        for PoolConfig {
+            mode,
+            processes,
+            hooks,
+        } in pools
+        {
+            let pending = Arc::new(AtomicUsize::new(0));
+            let (intake_tx, intake_rx) = bounded::<Queued>(1024);
+            let job_rx = JobRx {
+                rx: intake_rx,
+                pending: pending.clone(),
+                stop: stop_rx.clone(),
+                stopping: stopping.clone(),
+                handled: Arc::new(AtomicBool::new(false)),
+            };
+            rapira.intakes.push(Intake {
+                tx: intake_tx,
+                pending,
+                dispatcher: matches!(mode, Mode::Dispatcher(_) | Mode::GrpcDispatcher { .. }),
+                grpc: matches!(mode, Mode::GrpcDispatcher { .. }),
+            });
+            for _ in 0..processes {
+                let index = rapira.workers.len();
+                let slot = board.slot(index).expect("worker slot exists");
+                board.set_starting(index);
+                let rx = job_rx.clone();
+                let mode = mode.clone();
+                let hooks = hooks.clone();
+                let reported = reported_boot_failure.clone();
+                let start = start_rx.clone();
+                trace!(target: "rapira", "spawning worker thread {index}");
+                let worker = thread::Builder::new()
+                    .name(format!("rapira-worker-{index}"))
+                    .spawn(move || {
+                        if start.recv().is_ok() {
+                            worker_main(mode, rx, slot, index, hooks, reported);
+                        }
+                    });
+                match worker {
+                    Ok(worker) => rapira.workers.push(worker),
+                    Err(error) => {
+                        rapira.stopping.store(true, Ordering::Release);
+                        drop(start_tx);
+                        for worker in rapira.workers.drain(..) {
+                            let _ = worker.join();
+                        }
+                        return Err(error.into());
                     }
-                });
-            match worker {
-                Ok(worker) => rapira.workers.push(worker),
-                Err(error) => {
-                    rapira.stopping.store(true, Ordering::Release);
-                    drop(start_tx);
-                    for worker in rapira.workers.drain(..) {
-                        let _ = worker.join();
-                    }
-                    return Err(error.into());
                 }
             }
         }
@@ -227,7 +249,7 @@ impl Rapira {
         info!(target: "rapira", "stopping worker threads");
         self.stopping.store(true, Ordering::Release);
         self.stop_tx = None;
-        self.intake = None;
+        self.intakes.clear();
         let workers = std::mem::take(&mut self.workers);
         let deadline = Instant::now() + JOIN_GRACE;
         while Instant::now() < deadline && workers.iter().any(|worker| !worker.is_finished()) {
@@ -297,6 +319,16 @@ fn worker_main(
     hooks: PoolHooks,
     reported_boot_failure: Arc<AtomicBool>,
 ) {
+    let (entrypoint, services, php_mode) = match mode {
+        Mode::Classic => (None, None, RAPIRA_MODE_CLASSIC),
+        Mode::Worker(script) => (Some(script), None, RAPIRA_MODE_WORKER),
+        Mode::Dispatcher(script) => (Some(script), None, RAPIRA_MODE_DISPATCHER),
+        Mode::GrpcDispatcher {
+            entrypoint,
+            services,
+        } => (Some(entrypoint), Some(services), RAPIRA_MODE_DISPATCHER),
+    };
+    crate::grpc::install(services);
     let stop = rx.stop.clone();
     let stopping = rx.stopping.clone();
     let handled = rx.handled.clone();
@@ -308,23 +340,26 @@ fn worker_main(
         first_generation = false;
         let started = Instant::now();
         let php = PhpThread::new();
+        // SAFETY: safe, trust me, I'm a developer
+        unsafe { crate::rapira_set_mode(php_mode as c_int) };
+
         crate::exchange::forget_dispatcher();
-        crate::exchange::cycle_reset();
+        crate::work::cycle_reset();
         sb_set(slot);
         quota::install(effective_quota(hooks.max_requests, index));
         sb_update(Event::Healthy);
         sb_update(Event::Idle);
         info!(target: "rapira", "worker thread {index} ready");
-        let exit = catch_unwind(AssertUnwindSafe(|| match &mode {
-            Mode::Classic => {
+        let exit = catch_unwind(AssertUnwindSafe(|| match &entrypoint {
+            None => {
                 classic_worker();
                 WorkerExit::Closed
             }
-            Mode::Worker(script) | Mode::Dispatcher(script) => rapira_worker(script.clone()),
+            Some(script) => rapira_worker(script.clone()),
         }));
         if exit.is_err() {
             error!(target: "rapira", "worker thread {index} panicked");
-            crate::exchange::reclaim_current();
+            crate::work::reclaim_current();
             // An interrupted classic job can leave borrowed request pointers in SG.
             crate::context::unbind_server_context();
             sb_update(Event::Unhealthy);
@@ -348,6 +383,8 @@ fn worker_main(
         sb_update(Event::Recycled);
         info!(target: "rapira", "worker thread {index} recycling");
     }
+    JOB_RX.with_borrow_mut(|slot| *slot = None);
+    crate::grpc::install(None);
 }
 
 pub(crate) fn note_handled() {
@@ -358,16 +395,15 @@ pub(crate) fn note_handled() {
     });
 }
 
-pub(crate) fn pull_job() -> Option<Context> {
+pub(crate) fn pull_job() -> Option<Work> {
     match pull_job_wait(None) {
-        Pulled::Job(job) => Some(*job),
+        Pulled::Job(job) => Some(job),
         _ => None,
     }
 }
 
 pub(crate) enum Pulled {
-    // Use a `Box` because a `Context` is approximately 600 bytes and the other variants are empty.
-    Job(Box<Context>),
+    Job(Work),
     Timeout,
     Empty,
     Closed,
@@ -399,10 +435,7 @@ pub(crate) fn pull_job_wait(timeout: Option<Duration>) -> Pulled {
         };
         sb_update(Event::Active);
         match got {
-            Ok(job) => {
-                job_r.pending.fetch_sub(1, Ordering::Relaxed);
-                Pulled::Job(Box::new(job))
-            }
+            Ok(job) => Pulled::Job(job.work),
             Err(RecvTimeoutError::Timeout) => Pulled::Timeout,
             Err(RecvTimeoutError::Disconnected) => Pulled::Closed,
         }
@@ -427,10 +460,7 @@ pub(crate) fn pull_job_try() -> Pulled {
         let got = job_r.rx.try_recv();
         sb_update(Event::Active);
         match got {
-            Ok(job) => {
-                job_r.pending.fetch_sub(1, Ordering::Relaxed);
-                Pulled::Job(Box::new(job))
-            }
+            Ok(job) => Pulled::Job(job.work),
             Err(TryRecvError::Empty) => Pulled::Empty,
             Err(TryRecvError::Disconnected) => Pulled::Closed,
         }
@@ -734,7 +764,7 @@ try {
     }
 
     fn test_intake() -> (
-        crossbeam_channel::Sender<Context>,
+        crossbeam_channel::Sender<Queued>,
         crossbeam_channel::Sender<()>,
         JobRx,
     ) {

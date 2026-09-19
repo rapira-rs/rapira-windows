@@ -86,8 +86,12 @@ impl ExtensionRuntime {
         script: PathBuf,
         opts: RuntimeOptions,
     ) -> Running {
+        Self::run_pools(vec![(self, rapira, script)], opts)
+    }
+
+    /// Runs all protocol extensions with one stop signal and one shutdown budget.
+    pub fn run_pools(pools: Vec<(Self, RapiraHandle, PathBuf)>, opts: RuntimeOptions) -> Running {
         let grace = opts.grace;
-        let php = Php::new(Arc::new(RapiraBackend::new(rapira, script, opts)));
         let (stop_tx, stop_rx) = watch::channel(false);
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
@@ -97,29 +101,32 @@ impl ExtensionRuntime {
             .expect("build extension runtime");
 
         let mut tasks: JoinSet<Result<(), String>> = JoinSet::new();
-        for Registered { name, ext } in self.exts {
-            let (php, stop) = (php.clone(), stop_rx.clone());
-            let fut = ext.launch(php, stop, grace);
-            tasks.spawn_on(
-                async move {
-                    let outcome = fut.await;
-                    match &outcome {
-                        Ok(()) => tracing::info!(target: "ext", "{name} finished"),
-                        Err(msg) => tracing::error!(target: "ext", "{name}: {msg}"),
-                    }
-                    outcome
-                },
-                rt.handle(),
-            );
+        for (host, rapira, script) in pools {
+            let php = Php::new(Arc::new(RapiraBackend::new(rapira, script, opts.clone())));
+            for Registered { name, ext } in host.exts {
+                let (php, stop) = (php.clone(), stop_rx.clone());
+                let fut = ext.launch(php, stop, grace);
+                tasks.spawn_on(
+                    async move {
+                        let outcome = fut.await;
+                        match &outcome {
+                            Ok(()) => tracing::info!(target: "ext", "{name} finished"),
+                            Err(msg) => tracing::error!(target: "ext", "{name}: {msg}"),
+                        }
+                        outcome
+                    },
+                    rt.handle(),
+                );
+            }
         }
-
         Running { rt, tasks, stop_tx }
     }
 }
 
+#[derive(Clone)]
 pub struct RuntimeOptions {
     pub grace: Duration,
-    /// Multipart limits for host parsing. Only a dispatcher handle reads them. Worker mode uses the rfc1867 parser from php-src through read_post.
+    /// Multipart limits for HTTP dispatcher parsing. HTTP worker mode uses the rfc1867 parser from php-src through read_post.
     pub uploads: Arc<multipart::Limits>,
 }
 
@@ -160,6 +167,27 @@ fn map_tls(t: extension_api::Tls) -> php_sys::types::TlsView {
             fingerprint: c.fingerprint,
         }),
     }
+}
+
+/// Builds the native unary service list before the PHP entrypoint runs.
+pub fn grpc_services(
+    services: &[extension_api::grpc::ServiceInfo],
+) -> Vec<php_sys::grpc::ServiceInfo> {
+    services
+        .iter()
+        .map(|service| php_sys::grpc::ServiceInfo {
+            name: service.name.clone(),
+            methods: service
+                .methods
+                .iter()
+                .map(|method| php_sys::grpc::MethodInfo {
+                    name: method.name.clone(),
+                    input_type: method.input_type.clone(),
+                    output_type: method.output_type.clone(),
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 fn parse_err(e: multipart::ParseError) -> anyhow::Error {
@@ -265,6 +293,47 @@ impl RapiraBackend {
 }
 
 impl extension_api::Backend for RapiraBackend {
+    fn exec_grpc(
+        &self,
+        req: extension_api::grpc::Request,
+    ) -> Pin<Box<dyn Future<Output = extension_api::Result<extension_api::grpc::Reply>> + Send + '_>>
+    {
+        Box::pin(async move {
+            let request = php_sys::grpc::Request {
+                method: req.method,
+                message: req.message,
+                metadata: req.metadata,
+                remote: map_addr(req.remote),
+                tls: req.tls.map(map_tls),
+                received_at: req.received_at,
+                deadline: req.deadline,
+                expires_at: req.expires_at,
+            };
+            let reply = self.rapira.handle_grpc(request).await.map_err(|error| {
+                anyhow::Error::new(extension_api::Rejected {
+                    status: 503,
+                    reason: error.to_string(),
+                })
+            })?;
+            Ok(extension_api::grpc::Reply {
+                headers: reply.headers,
+                trailers: reply.trailers,
+                result: reply.result.map_err(|status| extension_api::grpc::Status {
+                    code: status.code,
+                    message: status.message,
+                    details: status
+                        .details
+                        .into_iter()
+                        .map(|detail| extension_api::grpc::ErrorDetail {
+                            type_url: detail.type_url,
+                            value: detail.value,
+                        })
+                        .collect(),
+                }),
+            })
+        })
+    }
+
     /// `Reply` directly contains the frame receiver, so dropping it signals the exchange layer that the client disconnected.
     fn exec(
         &self,

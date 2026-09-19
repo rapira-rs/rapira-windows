@@ -21,7 +21,7 @@ Download the archive for your PHP minor and architecture from [GitHub Releases](
 
 - Rapira starts one server process with a static pool of PHP interpreter threads.
 - MINIT runs once before the interpreter threads start.
-- `pool.processes` and `--processes` set the interpreter thread count.
+- `pool.processes` and `--processes` set the HTTP interpreter thread count. `grpc.pool.processes` sets the gRPC interpreter thread count.
 - The Windows build supports only a static pool. It rejects the main build's scaling settings. It does not support reload or status requests.
 - `pool.max_requests` rebuilds an interpreter on the same thread.
 - `getmypid()` returns the same process ID in every interpreter.
@@ -42,3 +42,11 @@ Download the archive for your PHP minor and architecture from [GitHub Releases](
 Source builds require native PowerShell 7, native MSVC tools with a Windows SDK, native LLVM with `libclang.dll`, and Rust. Use tools and PHP files for the host architecture. Release jobs build PHP 8.4 and 8.5 ZTS from verified official source on native x64 and ARM64 runners.
 
 Generate clangd commands with `.\dev.ps1 -Devel <native-devel-directory> -Task clangd`. The `.clangd` file reads them from the ignored `target/clangd` directory. See [CONTRIBUTING.md](CONTRIBUTING.md) for all Windows build commands.
+
+## Unary gRPC
+
+Rapira serves unary gRPC over cleartext HTTP/2 on TCP. It loads protobuf schemas in Rust and supports reflection, metadata, rich status details, deadlines, cancellation, and optional gzip responses. PHP receives and returns binary protobuf messages through `Rapira\Grpc\GrpcDispatcher`.
+
+HTTP and gRPC can run in one process. Each protocol has a fixed group of PHP interpreter threads and its own request queue. Set HTTP threads in `[pool]` and gRPC threads in `[grpc.pool]`. A gRPC-only configuration requires `[grpc]` and `[grpc.pool]`.
+
+See the [gRPC configuration and API](crates/plugins/grpc/README.md) and the [echo example](examples/grpc/README.md).

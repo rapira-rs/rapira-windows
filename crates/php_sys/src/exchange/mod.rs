@@ -17,17 +17,18 @@ pub(crate) use crate::{
     rapira_ce_closed_exception, rapira_ce_http_content_length_exceeded_error,
     rapira_ce_http_file_not_sendable_exception, rapira_ce_http_form_field,
     rapira_ce_http_head_already_written_error, rapira_ce_http_head_not_written_error,
-    rapira_ce_http_multipart, rapira_ce_http_request, rapira_ce_http_tls,
-    rapira_ce_http_uploaded_file, rapira_ce_inet_address, rapira_ce_internal_http_dispatcher,
+    rapira_ce_http_multipart, rapira_ce_http_request, rapira_ce_http_uploaded_file,
+    rapira_ce_inet_address, rapira_ce_internal_http_dispatcher,
     rapira_ce_internal_http_dispatcher_info, rapira_ce_internal_http_exchange,
-    rapira_ce_no_dispatcher_error, rapira_ce_timeout_exception, rapira_ce_unix_address,
-    rapira_ce_work_discarded_exception, rapira_dispatcher_info_obj, rapira_exchange_obj,
-    rapira_receive_timed, rapira_receive_untimed,
+    rapira_ce_no_dispatcher_error, rapira_ce_timeout_exception, rapira_ce_tls,
+    rapira_ce_unix_address, rapira_ce_work_discarded_exception, rapira_dispatcher_info_obj,
+    rapira_exchange_obj, rapira_receive_timed, rapira_receive_untimed,
     scoreboard::{Event, sb_update},
-    start::{Pulled, pending_depth, pull_job_try, pull_job_wait},
+    start::{Pulled, pending_depth},
     types::{
         Addr, Body, Context, FieldLines, FormField, Frame, ResponseHead, TlsView, UploadedFile,
     },
+    work::{self, ReceiveWait, Work},
     zend, zend_class_entry, zend_hash_get_current_data_ex, zend_hash_get_current_key_ex,
     zend_hash_internal_pointer_reset_ex, zend_hash_move_forward_ex, zend_object, zend_string, zval,
     zval_add_ref, zval_ptr_dtor,
@@ -35,7 +36,7 @@ pub(crate) use crate::{
 
 mod headers;
 mod receive;
-mod request;
+pub(crate) mod request;
 mod respond;
 mod sendfile;
 #[cfg(test)]
@@ -52,72 +53,27 @@ enum Unit {
     Sealed(*mut ExchangeState),
 }
 
-#[derive(Clone, Copy)]
-struct CycleState {
-    unit: Unit,
-    closed_seen: bool,
-    served: bool,
-    /// The cycle has received a unit. A later fatal error is an application failure.
-    received: bool,
-}
-
-const CYCLE_IDLE: CycleState = CycleState {
-    unit: Unit::Idle,
-    closed_seen: false,
-    served: false,
-    received: false,
-};
-
 thread_local! {
-    static CYCLE: Cell<CycleState> = const { Cell::new(CYCLE_IDLE) };
+    static CURRENT: Cell<Unit> = const { Cell::new(Unit::Idle) };
 }
 
-fn update(f: impl FnOnce(&mut CycleState)) {
-    let mut c = CYCLE.get();
-    f(&mut c);
-    CYCLE.set(c);
+fn update(f: impl FnOnce(&mut Unit)) {
+    let mut unit = CURRENT.get();
+    f(&mut unit);
+    CURRENT.set(unit);
 }
 
-pub(crate) fn cycle_reset() {
-    reclaim_current();
-    CYCLE.set(CYCLE_IDLE);
-}
-
-/// Reclaims a unit when a shutdown or allocation bailout prevents free_obj from receiving it.
+/// Reclaim a unit free_obj never saw (shutdown bailout / allocation bailout).
 pub(crate) fn reclaim_current() {
-    if let Unit::Handling(ptr) | Unit::Sealed(ptr) = CYCLE.get().unit {
-        update(|c| c.unit = Unit::Idle);
-        // SAFETY: The pointer came from Box::into_raw in finish_pull. exchange_drop removes the pointer from tracking before reclamation.
+    if let Unit::Handling(ptr) | Unit::Sealed(ptr) = CURRENT.get() {
+        CURRENT.set(Unit::Idle);
+        // SAFETY: the pointer came from Box::into_raw in finish_pull, and exchange_drop untracks before reclaiming.
         let st = unsafe { Box::from_raw(ptr) };
         if st.stage != Stage::Finalized {
             sb_update(Event::Handled(true));
         }
         drop(st);
     }
-}
-
-pub(crate) fn closed_seen() -> bool {
-    CYCLE.get().closed_seen
-}
-
-pub(crate) fn note_closed() {
-    update(|c| c.closed_seen = true);
-}
-
-pub(crate) fn note_received() {
-    update(|c| c.received = true);
-}
-
-pub(crate) fn note_served() {
-    update(|c| c.served = true);
-}
-
-pub(crate) fn served_any() -> bool {
-    CYCLE.get().served
-}
-
-pub(crate) fn received_any() -> bool {
-    CYCLE.get().received
 }
 
 /// The first head or body write fixes the response head. A body chunk first commits an implicit 200 response.
@@ -156,7 +112,7 @@ struct FilePart {
 }
 
 /// Created during construction so the builder frame contains no owned allocations, as required by the frame rule in zend.rs.
-enum AddrOwned {
+pub(crate) enum AddrOwned {
     Inet {
         ip: String,
         port: u16,
@@ -170,7 +126,7 @@ fn path_bytes(p: &Path) -> Vec<u8> {
 }
 
 impl AddrOwned {
-    fn new(a: &Addr) -> Self {
+    pub(crate) fn new(a: &Addr) -> Self {
         match a {
             Addr::Inet(sa) => Self::Inet {
                 ip: sa.ip().to_string(),

@@ -279,6 +279,7 @@ try {
             'module.c',
             'rapira_classes.c',
             'rapira_http.c',
+            'rapira_grpc.c',
             'rapira_dispatcher.c',
             'rapira_exchange.c'
         )
@@ -311,6 +312,7 @@ try {
                 Invoke-Tool -Command $cargo.Source -Arguments @('test', '--locked', '--workspace', '--target', $target)
             }
             'test_e2e' {
+                & (Join-Path $PSScriptRoot 'ci\setup-grpc-tests.ps1')
                 Invoke-Tool -Command $cargo.Source -Arguments @('build', '--locked', '--bin', 'rapira', '--target', $target)
                 Invoke-Tool -Command $cargo.Source -Arguments @('test', '--locked', '-p', 'tests', '--test', 'e2e', '--features', 'e2e', '--target', $target, '--', '--test-threads=1')
             }

@@ -4,6 +4,7 @@
 #include "zend_types.h"
 
 extern void rapira_rs_finish_response(void);
+extern void rapira_rs_grpc_message_shutdown(void);
 
 // php_handle_aborted_connection transfers control past Rust's catch_unwind (main.c:2722).
 extern size_t rapira_rs_ub_write(const char *str, size_t len, bool *aborted);
@@ -53,11 +54,11 @@ int rapira_finish_output(void) {
 
 PHP_FUNCTION(rapira_finish_request) {
     ZEND_PARSE_PARAMETERS_NONE();
-    if (rapira_mode == RAPIRA_MODE_DISPATCHER) {
-        // This function would write PHP output buffers to the log in dispatcher mode.
+    if (rapira_current_mode() == RAPIRA_MODE_DISPATCHER) {
+        // this function writes PHP output buffers to the log in dispatcher mode.
         zend_throw_error(
             NULL, "rapira_finish_request() is not available in dispatcher "
-                  "mode; finalize through the Exchange");
+                  "mode; finalize the current dispatcher work");
         RETURN_THROWS();
     }
     if (rapira_finish_output() != OK) {
@@ -78,6 +79,7 @@ PHP_MINIT_FUNCTION(rapira) {
 PHP_RSHUTDOWN_FUNCTION(rapira) {
     (void)type;
     (void)module_number;
+    rapira_rs_grpc_message_shutdown();
     rapira_rs_dispatcher_release();
     return SUCCESS;
 }

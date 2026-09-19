@@ -4,33 +4,6 @@
 
 namespace Rapira\Http {
     /**
-     * Contains the result of the TLS handshake. The certificate fields describe the client certificate. They are null when the client does not provide a certificate.
-     *
-     * @strict-properties
-     * @not-serializable
-     */
-    final readonly class Tls
-    {
-        public string $version;
-        public string $cipher;
-        public ?string $negotiatedProtocol;
-        public ?string $requestedServerName;
-        public ?string $certSerial;
-        public ?string $certOrganization;
-        public ?string $certFingerprint;
-
-        public function __construct(
-            string $version,
-            string $cipher,
-            ?string $negotiatedProtocol,
-            ?string $requestedServerName,
-            ?string $certSerial,
-            ?string $certOrganization,
-            ?string $certFingerprint,
-        ) {}
-    }
-
-    /**
      * Represents a field part of a multipart/form-data body. Its Content-Disposition field has no `filename` parameter. The host stores the part in memory.
      *
      * @strict-properties
@@ -106,7 +79,7 @@ namespace Rapira\Http {
         public string|Multipart $body;
         public \Rapira\InetAddress|\Rapira\UnixAddress $remote;
         public \Rapira\InetAddress|\Rapira\UnixAddress $server;
-        public ?Tls $tls;
+        public ?\Rapira\Tls $tls;
         public float $receivedAt;
 
         public function __construct(
@@ -119,7 +92,7 @@ namespace Rapira\Http {
             string|Multipart $body,
             \Rapira\InetAddress|\Rapira\UnixAddress $remote,
             \Rapira\InetAddress|\Rapira\UnixAddress $server,
-            ?Tls $tls,
+            ?\Rapira\Tls $tls,
             float $receivedAt,
         ) {}
     }

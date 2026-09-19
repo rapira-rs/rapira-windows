@@ -16,7 +16,11 @@ extern bool rapira_rs_get_dispatcher(zval *return_value);
 extern int rapira_rs_handle_request(zend_fcall_info *fci,
                                     zend_fcall_info_cache *fcc);
 
-int rapira_mode = RAPIRA_MODE_CLASSIC;
+ZEND_TLS int rapira_mode = RAPIRA_MODE_CLASSIC;
+
+int rapira_current_mode(void) { return rapira_mode; }
+
+void rapira_set_mode(int mode) { rapira_mode = mode; }
 
 ZEND_FUNCTION(Rapira_get_version) {
     ZEND_PARSE_PARAMETERS_NONE();
@@ -24,7 +28,7 @@ ZEND_FUNCTION(Rapira_get_version) {
     RETURN_STRING(RAPIRA_VERSION);
 }
 
-// start.rs sets rapira_mode before the PHP thread starts. The value stays constant for the process.
+// each interpreter thread has a fixed mode.
 ZEND_FUNCTION(Rapira_get_mode) {
     ZEND_PARSE_PARAMETERS_NONE();
 
@@ -70,7 +74,7 @@ ZEND_FUNCTION(Rapira_handle_request) {
     if (rapira_mode != RAPIRA_MODE_WORKER) {
         zend_throw_exception(
             rapira_ce_not_in_worker_mode_error,
-            "no host hands jobs to this process outside worker mode", 0);
+            "handle_request() is not available in this interpreter mode", 0);
         RETURN_THROWS();
     }
     if (rapira_in_handle_request) {

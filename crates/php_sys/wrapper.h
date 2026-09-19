@@ -34,8 +34,8 @@
 #ifdef HAVE_PHP_SESSION
 #include <ext/session/php_session.h>
 #endif
-#include <ext/json/php_json.h>
 #include <Zend/zend_observer.h>
+#include <ext/json/php_json.h>
 #include <ext/spl/spl_exceptions.h>
 #include <ext/standard/head.h>
 #include <main/php_memory_streams.h>
@@ -86,7 +86,8 @@ enum {
     RAPIRA_MODE_WORKER = 1,
     RAPIRA_MODE_DISPATCHER = 2,
 };
-extern int rapira_mode;
+int rapira_current_mode(void);
+void rapira_set_mode(int mode);
 
 // Keep these values the same as HandleAction in rapira_worker.rs.
 enum {
@@ -108,7 +109,20 @@ typedef struct {
     zend_object std;
 } rapira_dispatcher_info_obj;
 
-// Rust accesses these class entries. rapira_register_classes sets them in MINIT before PHP creates an object.
+typedef struct {
+    void *state;
+    zval context;
+    zval metadata;
+    zend_object std;
+} rapira_grpc_call_obj;
+
+typedef struct {
+    void *state;
+    zend_object std;
+} rapira_grpc_metadata_obj;
+
+// Rust accesses these class entries. rapira_register_classes sets them in MINIT
+// before PHP creates an object.
 extern zend_class_entry *rapira_ce_log_level;
 extern zend_class_entry *rapira_ce_mode;
 extern zend_class_entry *rapira_ce_closed_exception;
@@ -117,7 +131,7 @@ extern zend_class_entry *rapira_ce_work_discarded_exception;
 extern zend_class_entry *rapira_ce_no_dispatcher_error;
 extern zend_class_entry *rapira_ce_not_in_worker_mode_error;
 extern zend_class_entry *rapira_ce_already_finalized_error;
-extern zend_class_entry *rapira_ce_http_tls;
+extern zend_class_entry *rapira_ce_tls;
 extern zend_class_entry *rapira_ce_http_multipart;
 extern zend_class_entry *rapira_ce_internal_http_dispatcher;
 extern zend_class_entry *rapira_ce_inet_address;
@@ -132,7 +146,30 @@ extern zend_class_entry *rapira_ce_http_form_field;
 extern zend_class_entry *rapira_ce_http_uploaded_file;
 extern zend_class_entry *rapira_ce_http_request;
 
-// Return PHP_VERSION_ID from the compile-time headers. It can differ from php_version_id() in a replacement libphp.
+extern zend_class_entry *rapira_ce_grpc_status_code;
+extern zend_class_entry *rapira_ce_grpc_method_kind;
+extern zend_class_entry *rapira_ce_grpc_error_detail;
+extern zend_class_entry *rapira_ce_grpc_status;
+extern zend_class_entry *rapira_ce_grpc_method_info;
+extern zend_class_entry *rapira_ce_grpc_service_info;
+extern zend_class_entry *rapira_ce_grpc_exception;
+extern zend_class_entry *rapira_ce_grpc_metadata;
+void rapira_array_iterator(zval *out, zval *entries);
+extern zend_class_entry *rapira_ce_grpc_context;
+extern zend_class_entry *rapira_ce_grpc_protocol;
+extern zend_class_entry *rapira_ce_internal_grpc_dispatcher;
+extern zend_class_entry *rapira_ce_internal_grpc_dispatcher_info;
+extern zend_class_entry *rapira_ce_internal_grpc_call;
+extern zend_class_entry *rapira_ce_internal_grpc_metadata;
+bool rapira_grpc_build(void (*build)(const void *, zval *), const void *data,
+                       zval *out);
+zend_string *rapira_grpc_message_alloc(size_t len);
+zend_string *rapira_grpc_message_share(zend_string *string, size_t len);
+void rapira_grpc_message_release(zend_string *string);
+void rapira_enum_case(zend_class_entry *ce, const char *name, zval *out);
+
+// Return PHP_VERSION_ID from the compile-time headers. It can differ from
+// php_version_id() in a replacement libphp.
 unsigned int rapira_headers_php_version_id(void);
 
 void rapira_receive_untimed(void);

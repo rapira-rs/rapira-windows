@@ -1,15 +1,16 @@
 use anyhow::{Context, bail};
 use serde::Deserialize;
-use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+mod grpc;
 mod http;
 mod listen;
 mod log;
 mod pool;
 mod supervisor;
 
+pub use grpc::GrpcSettings;
 pub use http::{
     HttpSettings, MiddlewareSettings, StaticSettings, UnsafeFieldNames, UploadSettings,
 };
@@ -18,6 +19,7 @@ pub use log::{LogFormat, LogLevel, LogSettings};
 pub use pool::{PoolSettings, RunMode};
 pub use supervisor::SupervisorSettings;
 
+use grpc::{GrpcSection, resolve_grpc};
 use http::{HttpSection, resolve_middleware, resolve_static, resolve_uploads};
 use log::{LogSection, resolve_log};
 use pool::{PoolSection, resolve_pool};
@@ -33,8 +35,9 @@ pub struct Overrides {
 
 #[derive(Debug)]
 pub struct Settings {
-    pub http: HttpSettings,
-    pub pool: PoolSettings,
+    pub http: Option<HttpSettings>,
+    pub pool: Option<PoolSettings>,
+    pub grpc: Option<GrpcSettings>,
     pub supervisor: SupervisorSettings,
     pub log: LogSettings,
 }
@@ -43,9 +46,10 @@ pub struct Settings {
 #[serde(deny_unknown_fields)]
 struct FileConfig {
     #[serde(default)]
-    http: HttpSection,
+    http: Option<HttpSection>,
+    grpc: Option<GrpcSection>,
     #[serde(default)]
-    pool: PoolSection,
+    pool: Option<PoolSection>,
     #[serde(default)]
     supervisor: SupervisorSection,
     #[serde(default)]
@@ -67,24 +71,51 @@ pub fn resolve(config_path: Option<&Path>, cli: Overrides) -> anyhow::Result<Set
 }
 
 fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow::Result<Settings> {
-    let listen = match &cli.listen {
-        Some(l) => l.clone(),
-        None => match file.http.listen.as_deref() {
-            Some(s) => s
-                .parse::<Listen>()
-                .with_context(|| format!("invalid http.listen `{s}`"))?,
-            None => Listen::Tcp(SocketAddr::from((Ipv4Addr::LOCALHOST, 8000))),
-        },
+    let enable_http = file.grpc.is_none()
+        || file.http.is_some()
+        || file.pool.is_some()
+        || cli.listen.is_some()
+        || cli.processes.is_some()
+        || cli.mode.is_some()
+        || cli.entrypoint.is_some();
+    let grpc = file
+        .grpc
+        .map(|section| resolve_grpc(section, config_dir))
+        .transpose()?;
+    let (http, pool) = if enable_http {
+        let pool = resolve_pool(file.pool.unwrap_or_default(), &cli, config_dir)?;
+        let http = resolve_http(file.http.unwrap_or_default(), &cli, &pool, config_dir)?;
+        (Some(http), Some(pool))
+    } else {
+        (None, None)
     };
+    Ok(Settings {
+        http,
+        pool,
+        grpc,
+        supervisor: resolve_supervisor(file.supervisor, config_dir)?,
+        log: resolve_log(file.log)?,
+    })
+}
 
-    let server_port = match file.http.server_port {
+fn resolve_http(
+    section: HttpSection,
+    cli: &Overrides,
+    pool: &PoolSettings,
+    config_dir: Option<&Path>,
+) -> anyhow::Result<HttpSettings> {
+    let listen = match &cli.listen {
+        Some(listen) => listen.clone(),
+        None => listen::resolve_listen(section.listen.as_deref(), "http", 8000)?,
+    };
+    let server_port = match section.server_port {
         Some(p) => p,
         None => match &listen {
             Listen::Tcp(addr) => addr.port(),
         },
     };
 
-    let max_body_size_mb = file.http.max_body_size_mb.unwrap_or(8);
+    let max_body_size_mb = section.max_body_size_mb.unwrap_or(8);
     if max_body_size_mb == 0 {
         bail!("http.max_body_size_mb must be at least 1");
     }
@@ -92,60 +123,51 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
         .checked_mul(1024 * 1024)
         .ok_or_else(|| anyhow::anyhow!("http.max_body_size_mb {max_body_size_mb} is too large"))?;
 
-    let write_timeout_secs = file.http.write_timeout_secs.unwrap_or(30);
+    let write_timeout_secs = section.write_timeout_secs.unwrap_or(30);
     if write_timeout_secs == 0 {
         bail!("http.write_timeout_secs must be at least 1");
     }
     let write_timeout = capped_timeout("http", "write_timeout_secs", write_timeout_secs)?;
 
-    let keepalive_timeout_secs = file.http.keepalive_timeout_secs.unwrap_or(60);
+    let keepalive_timeout_secs = section.keepalive_timeout_secs.unwrap_or(60);
     if keepalive_timeout_secs == 0 {
         bail!("http.keepalive_timeout_secs must be at least 1");
     }
     let keepalive_timeout =
         capped_timeout("http", "keepalive_timeout_secs", keepalive_timeout_secs)?;
 
-    let sendfile_root = match file.http.sendfile.root.filter(|r| !r.is_empty()) {
+    let sendfile_root = match section.sendfile.root.filter(|r| !r.is_empty()) {
         Some(r) => Some(config_relative(config_dir, &r)?),
         None => None,
     };
 
-    let static_files = match file.http.r#static {
+    let static_files = match section.r#static {
         Some(section) => Some(resolve_static(section, config_dir)?),
         None => None,
     };
 
-    let pool = resolve_pool(file.pool, &cli, config_dir)?;
-    if file.http.uploads.is_some() && pool.mode != RunMode::Dispatcher {
+    if section.uploads.is_some() && pool.mode != RunMode::Dispatcher {
         bail!(
             "http.uploads applies to dispatcher mode only (pool.mode = \"{}\")",
             pool.mode.as_str()
         );
     }
-    let uploads = resolve_uploads(file.http.uploads.unwrap_or_default(), config_dir)?;
-    let supervisor = resolve_supervisor(file.supervisor, config_dir)?;
-    let log = resolve_log(file.log)?;
-    let middleware = resolve_middleware(file.http.middleware, static_files)?;
+    let uploads = resolve_uploads(section.uploads.unwrap_or_default(), config_dir)?;
+    let middleware = resolve_middleware(section.middleware, static_files)?;
 
-    Ok(Settings {
-        http: HttpSettings {
-            listen,
-            server_name: file
-                .http
-                .server_name
-                .unwrap_or_else(|| "localhost".to_owned()),
-            server_port,
-            max_body_size,
-            write_timeout,
-            keepalive_timeout,
-            unsafe_field_names: file.http.unsafe_field_names.unwrap_or_default(),
-            uploads,
-            sendfile_root,
-            middleware,
-        },
-        pool,
-        supervisor,
-        log,
+    Ok(HttpSettings {
+        listen,
+        server_name: section
+            .server_name
+            .unwrap_or_else(|| "localhost".to_owned()),
+        server_port,
+        max_body_size,
+        write_timeout,
+        keepalive_timeout,
+        unsafe_field_names: section.unsafe_field_names.unwrap_or_default(),
+        uploads,
+        sendfile_root,
+        middleware,
     })
 }
 
@@ -186,10 +208,13 @@ mod tests {
             entrypoint: Some(PathBuf::from("cli.php")),
         };
         let s = merge(file, cli, Some(Path::new("/etc/rapira"))).unwrap();
-        assert_eq!(s.http.listen.to_string(), "127.0.0.1:1234");
-        assert_eq!(s.pool.processes, 7);
-        assert!(s.pool.entrypoint.is_absolute());
-        assert!(s.pool.entrypoint.ends_with("cli.php"));
+        assert_eq!(
+            s.http.as_ref().unwrap().listen.to_string(),
+            "127.0.0.1:1234"
+        );
+        assert_eq!(s.pool.as_ref().unwrap().processes, 7);
+        assert!(s.pool.as_ref().unwrap().entrypoint.is_absolute());
+        assert!(s.pool.as_ref().unwrap().entrypoint.ends_with("cli.php"));
     }
 
     #[test]
@@ -199,8 +224,8 @@ mod tests {
         )
         .unwrap();
         let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
-        assert_eq!(s.http.server_port, 9000);
-        assert_eq!(s.http.max_body_size, 2 * 1024 * 1024);
+        assert_eq!(s.http.as_ref().unwrap().server_port, 9000);
+        assert_eq!(s.http.as_ref().unwrap().max_body_size, 2 * 1024 * 1024);
 
         let file = toml::from_str::<FileConfig>(
             "[http]\nlisten = \"unix:/run/r.sock\"\n[pool]\nentrypoint = \"a.php\"\n",
@@ -221,12 +246,15 @@ mod tests {
             ))
             .unwrap();
             let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
-            assert_eq!(s.http.unsafe_field_names, want, "{text}");
+            assert_eq!(s.http.as_ref().unwrap().unsafe_field_names, want, "{text}");
         }
 
         let file = toml::from_str::<FileConfig>("[pool]\nentrypoint = \"a.php\"\n").unwrap();
         let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
-        assert_eq!(s.http.unsafe_field_names, UnsafeFieldNames::Drop);
+        assert_eq!(
+            s.http.as_ref().unwrap().unsafe_field_names,
+            UnsafeFieldNames::Drop
+        );
     }
 
     /// `allow` is invalid because this check cannot be disabled.
@@ -249,7 +277,7 @@ mod tests {
             toml::from_str::<FileConfig>("[pool]\nentrypoint = \"public/index.php\"\n").unwrap();
         let s = merge(file, Overrides::default(), Some(Path::new("/srv/app"))).unwrap();
         assert_eq!(
-            s.pool.entrypoint,
+            s.pool.as_ref().unwrap().entrypoint,
             std::path::absolute("/srv/app/public/index.php").unwrap()
         );
     }
@@ -377,7 +405,7 @@ mod tests {
         )
         .unwrap();
         let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
-        let u = &s.http.uploads;
+        let u = &s.http.as_ref().unwrap().uploads;
         assert_eq!(u.dir, std::path::absolute("/w/spool").unwrap());
         assert_eq!(u.max_file_size, 3 * 1024 * 1024);
         assert_eq!(u.max_field_size, 7 * 1024);
@@ -407,7 +435,11 @@ mod tests {
                 ))
                 .unwrap();
                 let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
-                assert_eq!(s.pool.max_requests, max_requests, "{mode}");
+                assert_eq!(
+                    s.pool.as_ref().unwrap().max_requests,
+                    max_requests,
+                    "{mode}"
+                );
             }
         }
     }
@@ -425,12 +457,16 @@ mod tests {
             ))
             .unwrap();
             let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
-            assert_eq!(s.pool.mode, want, "{key}");
+            assert_eq!(s.pool.as_ref().unwrap().mode, want, "{key}");
         }
 
         let file = toml::from_str::<FileConfig>("[pool]\nentrypoint = \"a.php\"\n").unwrap();
         let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
-        assert_eq!(s.pool.mode, RunMode::Dispatcher, "default");
+        assert_eq!(
+            s.pool.as_ref().unwrap().mode,
+            RunMode::Dispatcher,
+            "default"
+        );
 
         let file =
             toml::from_str::<FileConfig>("[pool]\nentrypoint = \"a.php\"\nmode = \"classic\"\n")
@@ -444,7 +480,11 @@ mod tests {
             Some(Path::new("/w")),
         )
         .unwrap();
-        assert_eq!(s.pool.mode, RunMode::Dispatcher, "CLI beats file");
+        assert_eq!(
+            s.pool.as_ref().unwrap().mode,
+            RunMode::Dispatcher,
+            "CLI beats file"
+        );
 
         assert!(
             toml::from_str::<FileConfig>("[pool]\nentrypoint = \"a.php\"\nmode = \"async\"\n")
@@ -500,20 +540,20 @@ mod tests {
         )
         .unwrap();
         let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
-        let MiddlewareSettings::Static(st) = &s.http.middleware[0];
+        let MiddlewareSettings::Static(st) = &s.http.as_ref().unwrap().middleware[0];
         assert_eq!(st.root, std::path::absolute("/w/public").unwrap());
         assert_eq!(st.forbid, vec![".php".to_owned()]);
 
         let file = toml::from_str::<FileConfig>("[pool]\nentrypoint = \"a.php\"\n").unwrap();
         let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
-        assert!(s.http.middleware.is_empty());
+        assert!(s.http.as_ref().unwrap().middleware.is_empty());
 
         let file = toml::from_str::<FileConfig>(
             "[pool]\nentrypoint = \"a.php\"\n[http]\nmiddleware = [\"static\"]\n[http.static]\nroot = \"/srv/pub\"\n",
         )
         .unwrap();
         let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
-        let MiddlewareSettings::Static(st) = &s.http.middleware[0];
+        let MiddlewareSettings::Static(st) = &s.http.as_ref().unwrap().middleware[0];
         assert_eq!(st.root, std::path::absolute("/srv/pub").unwrap());
     }
 
@@ -570,7 +610,7 @@ mod tests {
         )
         .unwrap();
         let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
-        let MiddlewareSettings::Static(st) = &s.http.middleware[0];
+        let MiddlewareSettings::Static(st) = &s.http.as_ref().unwrap().middleware[0];
         assert_eq!(st.forbid, vec![".PHP".to_owned(), ".Phtml".to_owned()]);
 
         let file = toml::from_str::<FileConfig>(
@@ -578,7 +618,7 @@ mod tests {
         )
         .unwrap();
         let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
-        let MiddlewareSettings::Static(st) = &s.http.middleware[0];
+        let MiddlewareSettings::Static(st) = &s.http.as_ref().unwrap().middleware[0];
         assert!(st.forbid.is_empty());
 
         for entry in ["php", "", ".", ".php ", "./php"] {

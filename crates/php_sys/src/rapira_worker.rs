@@ -65,7 +65,7 @@ fn set_worker_recycle() {
 
 /// Logs PG(last_error_message) before php_request_shutdown releases it (main/main.c:2024).
 fn run_cycle(script: &Path) -> Cycle {
-    crate::exchange::cycle_reset();
+    crate::work::cycle_reset();
     let started = unsafe { php_request_startup() } == SUCCESS;
     if started {
         unsafe { run_script(script) };
@@ -80,20 +80,22 @@ fn run_cycle(script: &Path) -> Cycle {
         })
     });
 
-    if crate::exchange::served_any() {
+    if crate::work::served_any() {
         sb_update(scoreboard::Event::Healthy);
     }
 
     log_and_clear_last_error();
-    if Outcome::from_c(unsafe { rapira_request_shutdown() }) == Outcome::Bailout {
+    let shutdown = Outcome::from_c(unsafe { rapira_request_shutdown() });
+    crate::work::reclaim_current();
+    if shutdown == Outcome::Bailout {
         error!(target: "rapira", "php_request_shutdown() bailed; restarting the PHP thread");
         sb_update(scoreboard::Event::Restart);
         return Cycle::Restart;
     }
 
-    if crate::exchange::closed_seen() {
+    if crate::work::closed_seen() {
         Cycle::Stop
-    } else if recycle || crate::exchange::served_any() || crate::exchange::received_any() {
+    } else if recycle || crate::work::served_any() || crate::work::received_any() {
         Cycle::Recycle
     } else {
         Cycle::Failed
@@ -125,16 +127,12 @@ pub fn rapira_worker(script: PathBuf) -> WorkerExit {
                 }
                 match pull_job() {
                     None => break WorkerExit::Closed,
-                    Some(mut job) => {
-                        send_error_head(&mut job, 503);
-                        job.finish(false);
-                        sb_update(scoreboard::Event::Shed);
-                    }
+                    Some(job) => job.unavailable(),
                 }
             }
         }
     };
-    crate::exchange::reclaim_current();
+    crate::work::reclaim_current();
     log_and_clear_last_error();
     exit
 }
@@ -193,7 +191,7 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
         set_worker_recycle();
     }
     job.finish(truncated);
-    crate::exchange::note_served();
+    crate::work::note_served();
     if recycle {
         HandleAction::Recycle
     } else {
@@ -220,15 +218,16 @@ fn next_job() -> Option<Context> {
         loop {
             match pull_job() {
                 Some(job) => {
+                    let crate::work::Work::Http(job) = job else { job.unavailable(); continue; };
                     if job.sender.as_ref().is_some_and(|s| s.is_closed()) {
                         sb_update(scoreboard::Event::Handled(true));
                         continue;
                     }
-                    crate::exchange::note_received();
-                    return Some(job);
+                    crate::work::note_received();
+                    return Some(*job);
                 }
                 None => {
-                    crate::exchange::note_closed();
+                    crate::work::note_closed();
                     return None;
                 }
             }

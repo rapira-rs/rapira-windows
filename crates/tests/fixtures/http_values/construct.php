@@ -3,7 +3,7 @@
 use Rapira\Http\FormField;
 use Rapira\Http\Multipart;
 use Rapira\Http\Request;
-use Rapira\Http\Tls;
+use Rapira\Tls;
 use Rapira\Http\UploadedFile;
 use Rapira\InetAddress;
 

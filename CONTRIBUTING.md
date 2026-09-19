@@ -1,6 +1,6 @@
 # Contributing to Rapira for Windows
 
-This repository contains the Windows server: the PHP SAPI in `crates/php_sys`, the extension runtime, the HTTP front, the fixed interpreter thread pool, and the `rapira` binary. General product documentation lives in [rapira-rs/rapira-rs.github.io](https://github.com/rapira-rs/rapira-rs.github.io). Keep Windows-specific documentation in this repository.
+This repository contains the Windows server: the PHP SAPI in `crates/php_sys`, the extension runtime, the HTTP and gRPC servers, the fixed interpreter thread pool, and the `rapira` binary. General product documentation lives in [rapira-rs/rapira-rs.github.io](https://github.com/rapira-rs/rapira-rs.github.io). Keep Windows-specific documentation in this repository.
 
 ## Prerequisites
 
@@ -39,7 +39,7 @@ Run the in-process suite and the end-to-end suite as separate tasks:
 ```
 
 - `test` runs `cargo test --locked --workspace`.
-- `test_e2e` builds `rapira.exe` and runs the end-to-end suite with one Rust test thread.
+- `test_e2e` prepares native protobuf test tools, builds `rapira.exe`, and runs the end-to-end suite with one Rust test thread. The helper `ci/setup-grpc-tests.ps1` builds native `protoc` from verified source and supplies the official PHP protobuf library. These tools are test dependencies. The server parses schemas in Rust. Set `RAPIRA_PROTOC` and `RAPIRA_PROTOBUF_PHP` to use existing native tools and a PHP library source directory.
 - `coverage` runs `cargo llvm-cov` and writes `lcov.info`. Install `cargo-llvm-cov` and the `llvm-tools-preview` Rust component first.
 - `stubs` regenerates every `*_arginfo.h` file from its `.stub.php` source. Pass `-Runtime` and `-PhpSrc` with a matching php-src checkout. Do not edit a generated header directly.
 
@@ -76,6 +76,7 @@ clangd reads the generated commands from the ignored `target/clangd` directory. 
 | `crates/runtime` | Extension runtime and Windows console control handling |
 | `crates/config` | `rapira.toml` and CLI configuration |
 | `crates/api` | Native extension contract |
+| `crates/plugins/grpc` | Unary gRPC transport, schema discovery, and reflection |
 | `crates/scoreboard` | Per-thread counters |
 | `crates/plugins/http` | HTTP front |
 | `crates/middleware` | Built-in HTTP middleware |

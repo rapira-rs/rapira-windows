@@ -68,12 +68,21 @@ pub(crate) fn resolve_pool(
     cli: &Overrides,
     config_dir: Option<&Path>,
 ) -> anyhow::Result<PoolSettings> {
+    resolve_named_pool(section, cli, config_dir, "pool")
+}
+
+pub(crate) fn resolve_named_pool(
+    section: PoolSection,
+    cli: &Overrides,
+    config_dir: Option<&Path>,
+    key: &str,
+) -> anyhow::Result<PoolSettings> {
     let processes = cli
         .processes
         .or(section.processes)
         .unwrap_or_else(default_processes);
     if processes == 0 {
-        bail!("pool.processes must be at least 1");
+        bail!("{key}.processes must be at least 1");
     }
 
     let mode = cli.mode.or(section.mode).unwrap_or_default();
@@ -83,7 +92,7 @@ pub(crate) fn resolve_pool(
     } else if let Some(ep) = section.entrypoint.as_deref().filter(|s| !s.is_empty()) {
         config_relative(config_dir, ep)?
     } else {
-        bail!("no entrypoint: pass a SCRIPT argument or set pool.entrypoint in the config file");
+        bail!("no entrypoint: pass a SCRIPT argument or set {key}.entrypoint in the config file");
     };
 
     Ok(PoolSettings {

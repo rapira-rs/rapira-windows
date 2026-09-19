@@ -459,6 +459,31 @@ fn spawn_attempt(
     (child, addr)
 }
 
+/// Starts a protocol configuration without an HTTP readiness request.
+pub fn spawn_staged_config(
+    dir: PathBuf,
+    addr: SocketAddr,
+    config: &str,
+    env: &[(&str, &str)],
+) -> Server {
+    assert_console_delivery();
+    std::fs::write(dir.join("rapira.toml"), config).expect("write config");
+    let log = File::create(dir.join("server.log")).expect("create server log");
+    let child = Command::new(rapira_bin())
+        .args(["serve", "--config"])
+        .arg(dir.join("rapira.toml"))
+        .envs(env.iter().copied())
+        .env_remove("PHPRC")
+        .env("PHP_INI_SCAN_DIR", "")
+        .env("RUST_LOG", "info")
+        .creation_flags(CREATE_NEW_PROCESS_GROUP)
+        .stdout(Stdio::from(log.try_clone().expect("clone log file")))
+        .stderr(Stdio::from(log))
+        .spawn()
+        .expect("spawn Rapira");
+    Server { child, addr, dir }
+}
+
 /// Starts a process that must fail during startup. Waits for exit and returns the status and complete log. With `RUST_BACKTRACE` set, the backtrace after the error can exceed the log tail size.
 pub fn spawn_boot_failure(fixture: &str, http_extra: &str) -> (ExitStatus, String) {
     let (dir, entrypoint) = stage_fixture(fixture);

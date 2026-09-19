@@ -1,5 +1,6 @@
 mod concurrency;
 mod examples;
+mod grpc;
 mod harness;
 mod ini;
 mod lifecycle;

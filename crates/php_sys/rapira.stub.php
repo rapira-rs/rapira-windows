@@ -3,7 +3,7 @@
 /** @generate-class-entries */
 
 namespace {
-    /** Flushes the response early in classic and worker modes. The script can continue after the call. This function throws in dispatcher mode because the Exchange methods finalize the response. */
+    /** Flushes the response early in classic and worker modes. The script can continue after the call. This function throws in dispatcher mode. Use the protocol methods to finalize dispatcher work. */
     function rapira_finish_request(): bool {}
 }
 
@@ -17,7 +17,7 @@ namespace Rapira {
         case Trace;
     }
 
-    /** The process mode from `[pool].mode` in rapira.toml. */
+    /** The mode of the current interpreter pool. */
     enum Mode
     {
         case Classic;
@@ -93,11 +93,38 @@ namespace Rapira {
         public function __construct(?string $path) {}
     }
 
-    /** Returns the process mode. The value does not change during the process. */
+    /**
+     * TLS handshake information. Certificate fields are null when the client supplies no certificate.
+     *
+     * @strict-properties
+     * @not-serializable
+     */
+    final readonly class Tls
+    {
+        public string $version;
+        public string $cipher;
+        public ?string $negotiatedProtocol;
+        public ?string $requestedServerName;
+        public ?string $certSerial;
+        public ?string $certOrganization;
+        public ?string $certFingerprint;
+
+        public function __construct(
+            string $version,
+            string $cipher,
+            ?string $negotiatedProtocol,
+            ?string $requestedServerName,
+            ?string $certSerial,
+            ?string $certOrganization,
+            ?string $certFingerprint,
+        ) {}
+    }
+
+    /** Returns the mode of the current interpreter pool. The value does not change during execution. */
     function get_mode(): Mode {}
 
     /**
-     * Returns the same instance during the process.
+     * Returns the same instance during the current interpreter cycle.
      *
      * @throws Exception\NoDispatcherError Called outside dispatcher mode.
      */

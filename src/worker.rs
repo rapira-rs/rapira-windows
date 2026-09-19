@@ -32,45 +32,61 @@ fn remove_spool_dir(dir: Option<&Path>) {
     }
 }
 
-/// Runs the thread pool on its boot thread and reports whether PHP teardown completed.
-pub fn worker_body(
-    host: ExtensionRuntime,
-    mode: Mode,
-    script: PathBuf,
-    processes: usize,
-    max_requests: u64,
-    mut uploads: rapira_runtime::multipart::Limits,
-    grace: Duration,
-) -> anyhow::Result<WorkerOutcome> {
+pub struct PoolArgs {
+    pub host: ExtensionRuntime,
+    pub mode: Mode,
+    pub script: PathBuf,
+    pub processes: usize,
+    pub max_requests: u64,
+    pub uploads: Option<rapira_runtime::multipart::Limits>,
+}
+
+/// Starts the protocol thread groups under one PHP module and one stop signal.
+pub fn worker_body(mut pools: Vec<PoolArgs>, grace: Duration) -> anyhow::Result<WorkerOutcome> {
     let shutdown = ShutdownWatcher::install().context("installing console control handler")?;
-    let spool_dir = if matches!(mode, Mode::Dispatcher(_)) {
-        uploads.dir = uploads
-            .dir
-            .join(format!("rapira-spool-{}", std::process::id()));
-        std::fs::create_dir(&uploads.dir)
-            .with_context(|| format!("creating spool dir {}", uploads.dir.display()))?;
-        Some(uploads.dir.clone())
-    } else {
-        None
+    let mut options = rapira_runtime::RuntimeOptions {
+        grace,
+        ..Default::default()
     };
+    let mut spool_dir = None;
+    for pool in &mut pools {
+        if let Some(mut uploads) = pool.uploads.take() {
+            if matches!(pool.mode, Mode::Dispatcher(_)) {
+                uploads.dir = uploads
+                    .dir
+                    .join(format!("rapira-spool-{}", std::process::id()));
+                std::fs::create_dir(&uploads.dir)
+                    .with_context(|| format!("creating spool dir {}", uploads.dir.display()))?;
+                spool_dir = Some(uploads.dir.clone());
+            }
+            options.uploads = Arc::new(uploads);
+        }
+    }
 
     let boot_failed = Arc::new(AtomicBool::new(false));
     let stopper: Arc<OnceLock<Stopper>> = Arc::new(OnceLock::new());
-    let hooks = PoolHooks {
-        max_requests,
-        on_boot_failure: Arc::new({
-            let boot_failed = boot_failed.clone();
-            let stopper = stopper.clone();
-            move || {
-                boot_failed.store(true, SeqCst);
-                if let Some(stopper) = stopper.get() {
-                    stopper.stop();
-                }
-            }
-        }),
-    };
+    let configs = pools
+        .iter()
+        .map(|pool| php_sys::PoolConfig {
+            mode: pool.mode.clone(),
+            processes: pool.processes,
+            hooks: PoolHooks {
+                max_requests: pool.max_requests,
+                on_boot_failure: Arc::new({
+                    let boot_failed = boot_failed.clone();
+                    let stopper = stopper.clone();
+                    move || {
+                        boot_failed.store(true, SeqCst);
+                        if let Some(stopper) = stopper.get() {
+                            stopper.stop();
+                        }
+                    }
+                }),
+            },
+        })
+        .collect();
 
-    let rapira = match Rapira::start_pool(mode, processes, hooks) {
+    let rapira = match Rapira::start_pools(configs) {
         Ok(r) => r,
         Err(e) => {
             tracing::error!(target: "rapira", "PHP pool boot failed: {e:#}");
@@ -82,17 +98,13 @@ pub fn worker_body(
             });
         }
     };
-    let handle = rapira.handle();
-
     let outcomes = catch_unwind(AssertUnwindSafe(|| {
-        let running = host.run_with_options(
-            handle,
-            script,
-            rapira_runtime::RuntimeOptions {
-                uploads: Arc::new(uploads),
-                grace,
-            },
-        );
+        let hosts = pools
+            .into_iter()
+            .enumerate()
+            .map(|(index, pool)| (pool.host, rapira.pool_handle(index), pool.script))
+            .collect();
+        let running = ExtensionRuntime::run_pools(hosts, options);
         let _ = stopper.set(running.stopper());
         // PHP can fail before the stopper is registered.
         if boot_failed.load(SeqCst) {

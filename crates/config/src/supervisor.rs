@@ -12,7 +12,7 @@ pub struct SupervisorSettings {
 }
 
 impl SupervisorSettings {
-    /// The margin lets HTTP draining complete before `process_control_timeout` expires.
+    /// The margin lets protocol draining complete before `process_control_timeout` expires.
     pub fn drain_grace(&self) -> Duration {
         const MARGIN: Duration = Duration::from_secs(5);
         let margin = MARGIN.min(self.process_control_timeout / 2);
@@ -58,7 +58,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn drain_grace_margin_keeps_http_inside_runtime_timeout_budget() {
+    fn drain_grace_margin_keeps_protocols_inside_runtime_timeout_budget() {
         let grace = |secs| {
             SupervisorSettings {
                 process_control_timeout: Duration::from_secs(secs),

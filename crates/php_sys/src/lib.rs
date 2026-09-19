@@ -9,6 +9,7 @@ pub mod dispatcher;
 pub mod exchange;
 pub mod executor;
 pub(crate) mod fold;
+pub mod grpc;
 pub mod handler;
 pub mod module;
 pub mod quota;
@@ -17,6 +18,7 @@ pub mod scoreboard;
 pub mod start;
 pub mod types;
 pub mod values;
+pub(crate) mod work;
 pub(crate) mod zend;
 
 use std::ffi::c_int;
@@ -25,7 +27,7 @@ pub use bindings::*;
 pub use exchange::set_sendfile_root;
 pub use handler::{HandleError, RapiraHandle};
 pub use quota::PoolHooks;
-pub use start::Rapira;
+pub use start::{PoolConfig, Rapira};
 pub use types::{Frame, Mode, Request, ResponseHead};
 
 // Zend SUCCESS and FAILURE values differ between php-src versions, so these constants do not come from the headers.
