@@ -1045,6 +1045,7 @@ dependencies = [
  "mimalloc",
  "php_sys",
  "rapira_config",
+ "rapira_grpc",
  "rapira_http",
  "rapira_runtime",
  "rapira_static_files",

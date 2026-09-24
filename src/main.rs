@@ -1,7 +1,11 @@
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use extension_api::{ListenAddr, Middleware, PrepareCtx};
-use php_sys::Mode;
-use rapira_config::{Listen, MiddlewareSettings, RunMode, Settings, UnsafeFieldNames};
+use php_sys::{GrpcMethod, GrpcService, Mode};
+use rapira_config::{
+    GrpcSettings, HttpSettings, Listen, MiddlewareSettings, PoolSettings, RunMode, Settings,
+    SupervisorSettings, UnsafeFieldNames,
+};
+use rapira_grpc::{Config as GrpcConfig, Schema as GrpcSchema, Server as GrpcServer};
 use rapira_http::{
     Config as HttpConfig, Server as HttpServer, UnsafeFieldNames as HttpUnsafeFieldNames,
 };
@@ -12,6 +16,7 @@ use std::{
     path::{Path, PathBuf},
     process::ExitCode,
     sync::Arc,
+    time::Duration,
 };
 use tracing::info;
 use windows_sys::Win32::Foundation::{ERROR_INVALID_PARAMETER, GetLastError, STILL_ACTIVE};
@@ -19,6 +24,7 @@ use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     TerminateProcess,
 };
+use worker::{PoolArgs, PoolRun};
 
 mod logging;
 mod pidfile;
@@ -164,40 +170,43 @@ fn force_exit(code: u8) -> ! {
     std::process::abort();
 }
 
-fn serve(args: ServeArgs) -> anyhow::Result<ExitCode> {
-    let settings: Settings = rapira_config::resolve(&args.config)?;
-
-    logging::init(&settings.log);
-    info!(target: "rapira", "rapira_windows v{} starting", env!("CARGO_PKG_VERSION"));
-    let _pidfile = settings
-        .supervisor
-        .pidfile
-        .as_deref()
-        .map(pidfile::PidFile::write)
-        .transpose()?;
-
-    let http = settings
-        .http
-        .ok_or_else(|| anyhow::anyhow!("no [http] table configured"))?;
-    let entrypoint: PathBuf = http.pool.entrypoint;
+/// `table` is the pool table that names the entrypoint, for the error text.
+fn check_entrypoint(table: &str, entrypoint: &Path) -> anyhow::Result<()> {
     // The entrypoint is fixed for the lifetime of the pool, so one open at boot covers every request. The open proves read permission. The metadata check rejects a directory.
-    let meta = File::open(&entrypoint)
+    let meta = File::open(entrypoint)
         .and_then(|f| f.metadata())
         .map_err(|e| {
             anyhow::anyhow!(
-                "http.pool.entrypoint {} is not readable: {e}",
+                "{table}.entrypoint {} is not readable: {e}",
                 entrypoint.display()
             )
         })?;
     anyhow::ensure!(
         meta.is_file(),
-        "http.pool.entrypoint {} is not a regular file",
+        "{table}.entrypoint {} is not a regular file",
         entrypoint.display()
     );
+    Ok(())
+}
+
+fn listen_addr(listen: Listen) -> ListenAddr {
+    match listen {
+        Listen::Tcp(addr) => ListenAddr::Tcp(addr),
+    }
+}
+
+/// Builds the http pool: its extension host with the bound listener, and its pool settings.
+fn http_pool(
+    http: HttpSettings,
+    supervisor: &SupervisorSettings,
+    prepare: &mut PrepareCtx,
+) -> anyhow::Result<PoolRun> {
+    let entrypoint: PathBuf = http.pool.entrypoint.clone();
+    check_entrypoint("http.pool", &entrypoint)?;
     let mode: Mode = match http.pool.mode {
         RunMode::Classic => Mode::Classic,
         RunMode::Worker => Mode::Worker(entrypoint.clone()),
-        RunMode::Dispatcher => Mode::Dispatcher(entrypoint.clone()),
+        RunMode::Dispatcher => Mode::Dispatcher(entrypoint),
     };
     let dispatcher: bool = matches!(mode, Mode::Dispatcher(_));
 
@@ -233,14 +242,12 @@ fn serve(args: ServeArgs) -> anyhow::Result<ExitCode> {
         }
     }
     let http_cfg: HttpConfig = HttpConfig {
-        listen: match http.listen {
-            Listen::Tcp(addr) => ListenAddr::Tcp(addr),
-        },
+        listen: listen_addr(http.listen),
         server_name: http.server_name,
         server_port: http.server_port,
         max_body_size: http.max_body_size,
         write_timeout: http.write_timeout,
-        drain_grace: settings.supervisor.drain_grace(),
+        drain_grace: supervisor.drain_grace(),
         unsafe_field_names: match http.unsafe_field_names {
             UnsafeFieldNames::Drop => HttpUnsafeFieldNames::Drop,
             UnsafeFieldNames::Reject => HttpUnsafeFieldNames::Reject,
@@ -249,37 +256,132 @@ fn serve(args: ServeArgs) -> anyhow::Result<ExitCode> {
         keepalive_timeout: http.keepalive_timeout,
         middleware,
     };
-    if dispatcher {
+    let uploads = if dispatcher {
         prepare_uploads_dir(&http.uploads.dir)?;
-    }
-    let uploads = rapira_runtime::multipart::Limits {
-        dir: http.uploads.dir,
-        max_file_size: http.uploads.max_file_size,
-        max_field_size: http.uploads.max_field_size,
-        max_files: http.uploads.max_files,
-        max_parts: http.uploads.max_parts,
-        max_part_headers: http.uploads.max_part_headers,
+        Some(rapira_runtime::multipart::Limits {
+            dir: http.uploads.dir,
+            max_file_size: http.uploads.max_file_size,
+            max_field_size: http.uploads.max_field_size,
+            max_files: http.uploads.max_files,
+            max_parts: http.uploads.max_parts,
+            max_part_headers: http.uploads.max_part_headers,
+        })
+    } else {
+        None
     };
 
     let mut host: ExtensionRuntime = ExtensionRuntime::new();
     host.register::<HttpServer>(http_cfg);
+    pool_run("http", &http.pool, mode, host, prepare, uploads)
+}
 
-    let mut prepare_ctx: PrepareCtx = PrepareCtx::new();
-    host.prepare_all(&mut prepare_ctx)?;
-    let outcome = worker::worker_body(
+/// Binds the listener of the pool before PHP boots, so a port conflict stops the boot.
+fn pool_run(
+    name: &'static str,
+    pool: &PoolSettings,
+    mode: Mode,
+    mut host: ExtensionRuntime,
+    prepare: &mut PrepareCtx,
+    uploads: Option<rapira_runtime::multipart::Limits>,
+) -> anyhow::Result<PoolRun> {
+    host.prepare_all(prepare)?;
+    Ok(PoolRun {
+        name,
         host,
-        mode,
-        entrypoint,
-        http.pool.processes,
-        http.pool.max_requests,
-        uploads,
-        settings.supervisor.process_control_timeout,
-    )?;
+        args: PoolArgs {
+            mode,
+            entrypoint: pool.entrypoint.clone(),
+            threads: pool.processes,
+            max_requests: pool.max_requests,
+            uploads,
+        },
+    })
+}
+
+/// Builds the grpc pool. The schema loads here, before PHP boots, so a bad descriptor set or service name stops the boot with exit code 1.
+fn grpc_pool(
+    grpc: GrpcSettings,
+    supervisor: &SupervisorSettings,
+    prepare: &mut PrepareCtx,
+) -> anyhow::Result<PoolRun> {
+    let entrypoint: PathBuf = grpc.pool.entrypoint.clone();
+    check_entrypoint("grpc.pool", &entrypoint)?;
+    let schema = Arc::new(GrpcSchema::load(&grpc.descriptor_set, &grpc.services)?);
+    let services: Vec<GrpcService> = schema
+        .services()
+        .iter()
+        .map(|s| GrpcService {
+            name: s.name.clone(),
+            methods: s
+                .methods
+                .iter()
+                .map(|m| GrpcMethod {
+                    name: m.name.clone(),
+                    input_type: m.input_type.clone(),
+                    output_type: m.output_type.clone(),
+                    client_streaming: m.client_streaming,
+                    server_streaming: m.server_streaming,
+                })
+                .collect(),
+        })
+        .collect();
+
+    let mut host: ExtensionRuntime = ExtensionRuntime::new();
+    host.register::<GrpcServer>(GrpcConfig {
+        listen: listen_addr(grpc.listen),
+        schema,
+        reflection: grpc.reflection,
+        default_timeout: grpc.default_timeout,
+        max_timeout: grpc.max_timeout,
+        drain_grace: supervisor.drain_grace(),
+        keepalive_interval: Duration::from_secs(10),
+        keepalive_timeout: Duration::from_secs(10),
+    });
+    pool_run(
+        "grpc",
+        &grpc.pool,
+        Mode::GrpcDispatcher {
+            script: entrypoint,
+            services,
+        },
+        host,
+        prepare,
+        None,
+    )
+}
+
+fn serve(args: ServeArgs) -> anyhow::Result<ExitCode> {
+    let settings: Settings = rapira_config::resolve(&args.config)?;
+
+    logging::init(&settings.log);
+    info!(target: "rapira", "rapira_windows v{} starting", env!("CARGO_PKG_VERSION"));
+    let _pidfile = settings
+        .supervisor
+        .pidfile
+        .as_deref()
+        .map(pidfile::PidFile::write)
+        .transpose()?;
+
+    // One context binds every listener, so it rejects an address that two pools share.
+    let mut prepare: PrepareCtx = PrepareCtx::new();
+    let http: Option<PoolRun> = settings
+        .http
+        .map(|http| http_pool(http, &settings.supervisor, &mut prepare))
+        .transpose()?;
+    let grpc: Option<PoolRun> = settings
+        .grpc
+        .map(|grpc| grpc_pool(grpc, &settings.supervisor, &mut prepare))
+        .transpose()?;
+    // The HTTP pool comes first: the process enters its entrypoint directory.
+    let pools: Vec<PoolRun> = http.into_iter().chain(grpc).collect();
+
+    let outcome = worker::worker_body(pools, settings.supervisor.process_control_timeout)?;
     if !outcome.joined {
         force_exit(outcome.code);
     }
     Ok(ExitCode::from(outcome.code))
 }
+
 #[cfg(test)]
 mod tests {
     use super::{ProcessStatus, spool_dir_reclaimable, spool_dir_reclaimable_with};

@@ -279,8 +279,8 @@ fn middleware_body_change_preserves_php_finalization() -> anyhow::Result<()> {
     let mut prepared = PrepareCtx::new();
     host.prepare_all(&mut prepared)?;
     let ListenAddr::Tcp(addr) = prepared.listener_addrs()[0];
-    let rapira = Rapira::start(Mode::Dispatcher(script.clone()))?;
-    let running = host.run(rapira.handle(), script);
+    let rapira = Rapira::start(Mode::Dispatcher(script))?;
+    let running = host.run(rapira.handle());
 
     let streamed = (|| -> anyhow::Result<()> {
         let mut client = Conn::open(addr, T)?;

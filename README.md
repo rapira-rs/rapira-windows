@@ -20,19 +20,30 @@ Download the archive for your PHP minor and architecture from [GitHub Releases](
 ## Process model and control
 
 - Start the server with `rapira.exe serve rapira.toml`. The configuration file is required, and the command has no override flags.
-- Rapira starts one server process with a static pool of PHP interpreter threads.
+- Rapira starts one server process with one static pool of PHP interpreter threads for each configured plugin table: `[http]` and `[grpc]`.
 - MINIT runs once before the interpreter threads start.
-- `http.pool.processes` sets the interpreter thread count.
-- The Windows build supports only a static pool. It rejects the main build's scaling settings. It does not support reload or status requests.
-- `http.pool.max_requests` rebuilds an interpreter on the same thread.
+- `http.pool.processes` and `grpc.pool.processes` set the interpreter thread count of each pool.
+- The Windows build supports only static pools. It rejects the main build's scaling settings. It does not support reload or status requests.
+- `http.pool.max_requests` and `grpc.pool.max_requests` rebuild an interpreter on the same thread.
 - `getmypid()` returns the same process ID in every interpreter.
-- Every request starts in the process working directory, which is the entrypoint directory. A `chdir()` call does not persist across requests because ZTS PHP resets the thread working directory at request startup.
+- Every request starts in the process working directory. That directory is the `http.pool.entrypoint` directory, or the `grpc.pool.entrypoint` directory when the configuration has no `[http]` table. A `chdir()` call does not persist across requests because ZTS PHP resets the thread working directory at request startup. A gRPC pool script that runs next to an HTTP pool uses `__DIR__` for its relative paths.
+- A PHP boot failure in either pool stops the server process with exit code 70.
 - A native crash in one interpreter thread stops the server process.
-- `http.listen` accepts a TCP address. It does not accept a Unix socket path.
+- `http.listen` and `grpc.listen` accept a TCP address. They do not accept a Unix socket path.
 - The first Ctrl+C or Ctrl+Break event drains active work. A second event forces exit code 130.
 - Closing the console window does not start a drain.
 - A forced exit can leave the pidfile. Remove a stale pidfile before the next start.
 - Rapira does not register with Windows Service Control Manager. Use [WinSW](https://github.com/winsw/winsw) when you need a Windows service.
+
+## gRPC
+
+- The `[grpc]` table adds a second listener that serves unary calls over gRPC, gRPC-Web and Connect from a dispatcher pool. [crates/plugins/grpc/README.md](crates/plugins/grpc/README.md) describes the descriptor set, the PHP side, deadlines, health, and reflection.
+- The gRPC front does not terminate TLS. Put a TLS proxy in front of `grpc.listen` when clients need TLS.
+- The host answers the health check without PHP. Send a Connect call with curl:
+
+```powershell
+curl.exe -H "Content-Type: application/json" -d "{}" http://127.0.0.1:50051/grpc.health.v1.Health/Check
+```
 
 ## Windows file and socket behavior
 

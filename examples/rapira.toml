@@ -38,6 +38,20 @@ mode = "dispatcher"                 # Use "classic", "worker", or "dispatcher". 
 processes = 8                       # Set the number of PHP interpreter threads in the server process. The default is the CPU count.
 # max_requests = 0                  # Recycle an interpreter after approximately N requests. A value of 0 disables this limit.
 
+# A second listener that serves unary gRPC, gRPC-Web, and Connect calls from its own interpreter thread pool. See crates\plugins\grpc\README.md.
+# [grpc]
+# listen = "127.0.0.1:50051"       # Use an IP address and port, or use ":port" for all interfaces.
+# descriptor_set = "api.binpb"     # Required. A FileDescriptorSet with its imports. Relative paths start from the directory of this file.
+# services = ["billing.v1.InvoiceService"] # Required. Fully qualified service names from the descriptor set.
+# reflection = false               # Serve grpc.reflection.v1 and v1alpha for the configured services.
+# default_timeout_secs = 30        # Deadline for a call without a client timeout. Unset: no deadline.
+# max_timeout_secs = 60            # Upper limit for a client timeout. Unset: no limit.
+
+# The gRPC pool takes the keys of [http.pool]. Its mode must be "dispatcher".
+# [grpc.pool]
+# entrypoint = "grpc-worker.php"
+# processes = 4
+
 # [supervisor]
 # pidfile = "rapira.pid"            # Relative paths start from the directory of this file.
 # process_control_timeout_secs = 30 # Allow this duration for threads to stop before a forced process exit.

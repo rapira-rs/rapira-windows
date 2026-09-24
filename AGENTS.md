@@ -19,10 +19,11 @@
 - Support Windows 10, Windows 11, and Windows Server on x64. Support Windows 11 on ARM64.
 - Build and test x64 and ARM64 on matching native CI runners. Use native architecture tools for local work.
 - Build release PHP from official PHP 8.4 and 8.5 source with `ci/build-php.ps1`. Bundle the matching project-built runtime with each release archive.
-- Run one process with a static pool of PHP interpreter threads.
+- Run one process with one static pool of PHP interpreter threads for each configured plugin table.
 - Run MINIT once before the interpreter threads start.
 - Run in the foreground. Keep pidfile support.
-- `http.pool.processes` sets the interpreter thread count.
+- `http.pool.processes` and `grpc.pool.processes` set the interpreter thread count of each pool.
+- The PHP contract in `rapira-rs/contract` decides everything that PHP code can see.
 - `rapira serve <CONFIG>` is the only command. The configuration file is required, and the command has no override flags.
 - Do not add reload, status, or dynamic pool scaling.
 - Use `TerminateProcess` for a forced exit while interpreter threads can be alive.
@@ -49,7 +50,8 @@
 
 ## Tests
 
-- Put unit tests in their crate under `#[cfg(test)]`.
+- Put unit tests in their crate under `#[cfg(test)]`. Put a unit test in its crate only when the test needs no fixture, no test double, and no socket.
+- Put harness code in `crates/tests/src` and fixtures in `crates/tests/fixtures`.
 - Put integration tests in `crates/tests`.
 - Put end-to-end tests in `crates/tests/tests/e2e/` behind the `e2e` feature so a workspace test run skips them.
 - Derive expected values from the applicable specification, php-src, or the decided requirement before reading the implementation. Do not backfill an assertion from observed output.
@@ -57,7 +59,7 @@
 - Use worker or dispatcher mode for new tests.
 - Check PHP behavior against php-src or a small PHP script.
 
-Use `dev.ps1` for the standard tasks: `build`, `test`, `test_e2e`, `coverage`, `stubs`, and `clangd`. The `clangd` task writes its compilation database below ignored `target/clangd`.
+Use `dev.ps1` for the standard tasks: `build`, `test`, `test_e2e`, `coverage`, `stubs`, `clangd`, and `grpc_fixtures`. The `clangd` task writes its compilation database below ignored `target/clangd`.
 
 ## Dependencies
 

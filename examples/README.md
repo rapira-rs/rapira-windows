@@ -19,6 +19,8 @@ Each interpreter thread boots its own resident script. `http.pool.processes` set
 
 Each interpreter thread handles one active exchange. Use more interpreter threads to handle concurrent requests.
 
+The commented `[grpc]` and `[grpc.pool]` tables in `examples\rapira.toml` add a second listener with its own interpreter thread pool for unary gRPC calls. [crates/plugins/grpc/README.md](../crates/plugins/grpc/README.md) describes the descriptor set and the PHP side.
+
 All examples listen on `127.0.0.1:8000` by default. The classic and worker examples answer every path. The dispatcher examples provide these routes:
 
 ```powershell

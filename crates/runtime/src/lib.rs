@@ -3,7 +3,6 @@ use http::header::CONTENT_TYPE;
 use php_sys::RapiraHandle;
 use std::future::Future;
 use std::io::Cursor;
-use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -71,19 +70,14 @@ impl ExtensionRuntime {
         Ok(())
     }
 
-    pub fn run(self, rapira: RapiraHandle, script: PathBuf) -> Running {
-        self.run_with_options(rapira, script, RuntimeOptions::default())
+    pub fn run(self, rapira: RapiraHandle) -> Running {
+        self.run_with_options(rapira, RuntimeOptions::default())
     }
 
-    /// One worker thread runs the `drive` future of each extension.
-    pub fn run_with_options(
-        self,
-        rapira: RapiraHandle,
-        script: PathBuf,
-        opts: RuntimeOptions,
-    ) -> Running {
+    /// One worker thread runs the `drive` future of each extension. The caller sets the script paths of the pool with `php_sys::set_script` because every pool of the process shares them.
+    pub fn run_with_options(self, rapira: RapiraHandle, opts: RuntimeOptions) -> Running {
         let grace = opts.grace;
-        let php = Php::new(Arc::new(RapiraBackend::new(rapira, &script, opts)));
+        let php = Php::new(Arc::new(RapiraBackend::new(rapira, opts)));
         let (stop_tx, stop_rx) = watch::channel(false);
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
@@ -173,8 +167,7 @@ fn parse_err(e: multipart::ParseError) -> anyhow::Error {
 }
 
 impl RapiraBackend {
-    fn new(rapira: RapiraHandle, filename: &Path, opts: RuntimeOptions) -> Self {
-        php_sys::set_script(filename);
+    fn new(rapira: RapiraHandle, opts: RuntimeOptions) -> Self {
         Self {
             rapira,
             uploads: opts.uploads,

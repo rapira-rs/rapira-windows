@@ -73,6 +73,7 @@ php_sys = { workspace = true }
 rapira_config = { workspace = true }
 rapira_static_files = { workspace = true }
 rapira_http = { workspace = true }
+rapira_grpc = { workspace = true }
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Threading"] }
 mimalloc = "0.1"
 tracing.workspace = true

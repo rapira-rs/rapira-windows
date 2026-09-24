@@ -1,6 +1,6 @@
 # Contributing to Rapira for Windows
 
-This repository contains the Windows server: the PHP SAPI in `crates/php_sys`, the extension runtime, the HTTP front, the fixed interpreter thread pool, and the `rapira` binary. General product documentation lives in [rapira-rs/rapira-rs.github.io](https://github.com/rapira-rs/rapira-rs.github.io). Keep Windows-specific documentation in this repository.
+This repository contains the Windows server: the PHP SAPI in `crates/php_sys`, the extension runtime, the HTTP and gRPC fronts, the fixed interpreter thread pools, and the `rapira` binary. General product documentation lives in [rapira-rs/rapira-rs.github.io](https://github.com/rapira-rs/rapira-rs.github.io). Keep Windows-specific documentation in this repository.
 
 ## Prerequisites
 
@@ -42,6 +42,9 @@ Run the in-process suite and the end-to-end suite as separate tasks:
 - `test_e2e` builds `rapira.exe` and runs the end-to-end suite with one Rust test thread.
 - `coverage` runs `cargo llvm-cov` and writes `lcov.info`. Install `cargo-llvm-cov` and the `llvm-tools-preview` Rust component first.
 - `stubs` regenerates every `*_arginfo.h` file from its `.stub.php` source. Pass `-Runtime` and `-PhpSrc` with a matching php-src checkout. Do not edit a generated header directly.
+- `grpc_fixtures` rebuilds the descriptor sets in `crates\tests\fixtures\grpc` with the pinned `buf` release through `go run`. Install Go first.
+
+Put a unit test in its crate only when the test needs no fixture, no test double, and no socket. Put harness code in `crates\tests\src` and fixtures in `crates\tests\fixtures`.
 
 Run every test task with PHP 8.4 and PHP 8.5 on your native architecture before release-sensitive changes. CI runs both PHP versions on native x64 and ARM64 hosts.
 
@@ -81,7 +84,7 @@ clangd reads the generated commands from the ignored `target/clangd` directory. 
 | `crates/plugins/http` | HTTP front |
 | `crates/plugins/grpc` | gRPC front |
 | `crates/middleware` | Built-in HTTP middleware |
-| `crates/tests` | Integration and end-to-end suites |
+| `crates/tests` | Test harness, fixtures, and the integration and end-to-end suites |
 
 ## Pull requests
 

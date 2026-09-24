@@ -178,7 +178,6 @@ fn rejected_bodies_never_reach_the_pool() -> anyhow::Result<()> {
     let outcomes = host
         .run_with_options(
             rapira.handle(),
-            fixture("dispatcher/echo-loop-worker.php"),
             rapira_runtime::RuntimeOptions {
                 uploads: std::sync::Arc::new(limits),
                 ..rapira_runtime::RuntimeOptions::default()
@@ -310,7 +309,7 @@ fn unary_calls_cross_the_extension_api() -> anyhow::Result<()> {
     })?;
     let mut host = ExtensionRuntime::new();
     host.register::<UnaryDriver>(());
-    let outcomes = host.run(rapira.handle(), script).join();
+    let outcomes = host.run(rapira.handle()).join();
     drop(rapira);
     assert_eq!(outcomes.len(), 1);
     assert!(outcomes[0].is_ok(), "{:?}", outcomes[0]);
@@ -321,14 +320,10 @@ fn unary_calls_cross_the_extension_api() -> anyhow::Result<()> {
 fn classic_mode_serves_exec() -> anyhow::Result<()> {
     let _guard = php_lock();
     let rapira = Rapira::start(Mode::Classic)?;
+    php_sys::set_script(&fixture("extension_tests/ext-driver-classic.php"));
     let mut host = ExtensionRuntime::new();
     host.register::<Driver>(());
-    let outcomes = host
-        .run(
-            rapira.handle(),
-            fixture("extension_tests/ext-driver-classic.php"),
-        )
-        .join();
+    let outcomes = host.run(rapira.handle()).join();
     drop(rapira);
     assert_eq!(outcomes.len(), 1);
     assert!(
@@ -367,17 +362,12 @@ impl Extension for ErrorPathDriver {
 #[test]
 fn exec_delivers_buffered_error_response_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let rapira = Rapira::start(Mode::Worker(fixture(
-        "shared/error-keeps-headers-worker.php",
-    )))?;
+    let script = fixture("shared/error-keeps-headers-worker.php");
+    let rapira = Rapira::start(Mode::Worker(script.clone()))?;
+    php_sys::set_script(&script);
     let mut host = ExtensionRuntime::new();
     host.register::<ErrorPathDriver>(());
-    let outcomes = host
-        .run(
-            rapira.handle(),
-            fixture("shared/error-keeps-headers-worker.php"),
-        )
-        .join();
+    let outcomes = host.run(rapira.handle()).join();
     drop(rapira);
     assert_eq!(outcomes.len(), 1);
     assert!(
@@ -422,15 +412,12 @@ impl Extension for TruncatedDriver {
 #[test]
 fn exec_rejects_truncated_response_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let rapira = Rapira::start(Mode::Worker(fixture("shared/output-then-throw-worker.php")))?;
+    let script = fixture("shared/output-then-throw-worker.php");
+    let rapira = Rapira::start(Mode::Worker(script.clone()))?;
+    php_sys::set_script(&script);
     let mut host = ExtensionRuntime::new();
     host.register::<TruncatedDriver>(());
-    let outcomes = host
-        .run(
-            rapira.handle(),
-            fixture("shared/output-then-throw-worker.php"),
-        )
-        .join();
+    let outcomes = host.run(rapira.handle()).join();
     drop(rapira);
     assert_eq!(outcomes.len(), 1);
     assert!(
@@ -445,11 +432,10 @@ fn exec_rejects_truncated_response_worker() -> anyhow::Result<()> {
 fn exec_delivers_buffered_error_response_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let rapira = Rapira::start(Mode::Classic)?;
+    php_sys::set_script(&fixture("shared/error-keeps-headers.php"));
     let mut host = ExtensionRuntime::new();
     host.register::<ErrorPathDriver>(());
-    let outcomes = host
-        .run(rapira.handle(), fixture("shared/error-keeps-headers.php"))
-        .join();
+    let outcomes = host.run(rapira.handle()).join();
     drop(rapira);
     assert_eq!(outcomes.len(), 1);
     assert!(
@@ -491,12 +477,10 @@ fn teardown_cancels_run_and_drives_shutdown() -> anyhow::Result<()> {
     let _guard = php_lock();
     RESIDENT_SHUTDOWN.store(false, Ordering::Relaxed);
     let rapira = Rapira::start(Mode::Classic)?;
+    php_sys::set_script(&fixture("extension_tests/ext-driver-classic.php"));
     let mut host = ExtensionRuntime::new();
     host.register::<Resident>(());
-    let running = host.run(
-        rapira.handle(),
-        fixture("extension_tests/ext-driver-classic.php"),
-    );
+    let running = host.run(rapira.handle());
 
     let start = Instant::now();
     drop(running);
@@ -519,16 +503,12 @@ fn many_extensions_run() -> anyhow::Result<()> {
     let rapira = Rapira::start(Mode::Worker(fixture(
         "extension_tests/ext-driver-worker.php",
     )))?;
+    php_sys::set_script(&fixture("extension_tests/ext-driver-worker.php"));
     let mut host = ExtensionRuntime::new();
     for _ in 0..N {
         host.register::<Driver>(());
     }
-    let outcomes = host
-        .run(
-            rapira.handle(),
-            fixture("extension_tests/ext-driver-worker.php"),
-        )
-        .join();
+    let outcomes = host.run(rapira.handle()).join();
     drop(rapira);
     assert_eq!(outcomes.len(), N);
     assert!(
@@ -541,14 +521,10 @@ fn many_extensions_run() -> anyhow::Result<()> {
 fn run_one<E: Extension<Config = ()>>() -> anyhow::Result<Vec<Result<(), String>>> {
     let _guard = php_lock();
     let rapira = Rapira::start(Mode::Classic)?;
+    php_sys::set_script(&fixture("extension_tests/ext-driver-classic.php"));
     let mut host = ExtensionRuntime::new();
     host.register::<E>(());
-    let outcomes = host
-        .run(
-            rapira.handle(),
-            fixture("extension_tests/ext-driver-classic.php"),
-        )
-        .join();
+    let outcomes = host.run(rapira.handle()).join();
     drop(rapira);
     Ok(outcomes)
 }
@@ -639,11 +615,11 @@ impl Extension for SlowShutdown {
 fn shutdown_timeout_is_reported() -> anyhow::Result<()> {
     let _guard = php_lock();
     let rapira = Rapira::start(Mode::Classic)?;
+    php_sys::set_script(&fixture("extension_tests/ext-driver-classic.php"));
     let mut host = ExtensionRuntime::new();
     host.register::<SlowShutdown>(());
     let running = host.run_with_options(
         rapira.handle(),
-        fixture("extension_tests/ext-driver-classic.php"),
         rapira_runtime::RuntimeOptions {
             grace: Duration::from_millis(100),
             ..rapira_runtime::RuntimeOptions::default()
