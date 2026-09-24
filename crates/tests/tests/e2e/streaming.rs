@@ -363,7 +363,6 @@ fn later_connection_error_does_not_cancel_completed_response() {
 #[test]
 fn reset_during_buffered_write_cancels_php() {
     use std::io::{Read, Write};
-    use std::net::TcpStream;
 
     // The debug log records when the connection ends, which the failure diagnostics show.
     let srv = spawn_without_rust_log(
@@ -373,14 +372,22 @@ fn reset_during_buffered_write_cancels_php() {
     );
     wait_workers(&srv, T, "1 worker", |p| p.len() == 1);
     let pid = srv.pid();
-    let client = TcpStream::connect_timeout(&srv.addr, T).expect("connect");
-    client.set_read_timeout(Some(T)).expect("read timeout");
-    client.set_write_timeout(Some(T)).expect("write timeout");
-    // A small receive buffer keeps most of the response in the server, so the reset arrives while the server still writes.
-    let mut client = socket2::Socket::from(client);
+    // A small receive window keeps most of the response in the server, so the reset arrives while the server still writes.
+    // The size is set before the handshake, because SO_RCVBUF on a connected Windows socket does not have to change the receive window, and an autotuned loopback window holds the whole body. https://learn.microsoft.com/en-us/windows/win32/winsock/sol-socket-socket-options
+    let mut client = socket2::Socket::new(
+        socket2::Domain::for_address(srv.addr),
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )
+    .expect("client socket");
     client
         .set_recv_buffer_size(4096)
         .expect("set the receive buffer size");
+    client
+        .connect_timeout(&srv.addr.into(), T)
+        .expect("connect");
+    client.set_read_timeout(Some(T)).expect("read timeout");
+    client.set_write_timeout(Some(T)).expect("write timeout");
     client
         .write_all(b"GET /download HTTP/1.1\r\nHost: e2e\r\n\r\n")
         .expect("send download request");
