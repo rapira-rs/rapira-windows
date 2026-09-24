@@ -10,7 +10,11 @@ fn busy_loop_exceeds_max_execution_time() {
         "max_execution_time=1\ndisplay_errors=0\nlog_errors=1\n",
         "mode = \"worker\"\n",
     );
-    assert!(wait_log_contains(&server, "worker thread 0 ready", BOOT));
+    assert!(wait_log_contains(
+        &server,
+        "worker thread http/0 ready",
+        BOOT
+    ));
     assert_eq!(
         http_get(server.addr, "/", BOOT).unwrap(),
         (200, b"ok".to_vec())
@@ -38,7 +42,11 @@ fn recycled_interpreter_has_a_fresh_timer_budget() {
         "max_execution_time=5\ndisplay_errors=0\nlog_errors=1\n",
         "mode = \"worker\"\nmax_requests = 1\n",
     );
-    assert!(wait_log_contains(&server, "worker thread 0 ready", BOOT));
+    assert!(wait_log_contains(
+        &server,
+        "worker thread http/0 ready",
+        BOOT
+    ));
     // Core quota jitter makes max_requests=1 a two-request generation.
     assert_eq!(
         http_get(server.addr, "/", BOOT).unwrap(),
@@ -50,7 +58,7 @@ fn recycled_interpreter_has_a_fresh_timer_budget() {
     );
     assert!(wait_log_contains(
         &server,
-        "worker thread 0 recycling",
+        "worker thread http/0 recycling",
         BOOT
     ));
     assert_eq!(

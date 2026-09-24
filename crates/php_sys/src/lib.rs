@@ -24,7 +24,7 @@ pub use context::set_script;
 pub use exchange::set_sendfile_root;
 pub use handler::{HandleError, RapiraHandle};
 pub use quota::PoolHooks;
-pub use start::Rapira;
+pub use start::{PoolSpec, Rapira};
 pub use types::{Frame, Mode, Request, ResponseHead};
 
 // bindgen names the Zend SUCCESS and FAILURE constants differently between php-src versions, so the values are hardcoded here.

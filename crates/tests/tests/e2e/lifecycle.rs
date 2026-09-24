@@ -844,7 +844,7 @@ fn an_occupied_port_fails_before_any_php_worker_starts() {
         "listener preparation must fail before a worker becomes ready\n{log}"
     );
     assert!(
-        !log.contains("booting with mode:") && !log.contains("lifecycle-php-bootstrap"),
+        !log.contains("booting PHP:") && !log.contains("lifecycle-php-bootstrap"),
         "the bind conflict must be resolved before PHP starts\n{log}"
     );
 }
@@ -920,7 +920,7 @@ fn four_threads_handle_requests_after_their_first_interpreter_recycle() {
     );
     for index in 0..4 {
         assert!(
-            log.contains(&format!("worker thread {index} recycling")),
+            log.contains(&format!("worker thread http/{index} recycling")),
             "{log}"
         );
     }

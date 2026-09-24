@@ -75,14 +75,31 @@ impl Drop for PhpModule {
     }
 }
 
-pub struct Rapira {
-    pub(crate) intake: Option<Intake>,
-    pub(crate) dispatcher: bool,
+/// One pool of interpreter threads that share a mode and an intake.
+pub struct PoolSpec {
+    /// The plugin name in thread names and log lines, such as `http`.
+    pub name: &'static str,
+    pub mode: Mode,
+    pub threads: usize,
+    pub hooks: PoolHooks,
+}
+
+struct Pool {
+    name: &'static str,
+    intake: Option<Intake>,
+    dispatcher: bool,
     workers: Vec<JoinHandle<()>>,
-    board: rapira_scoreboard::Scoreboard,
-    module: Option<PhpModule>,
     stopping: Arc<AtomicBool>,
     stop_tx: Option<Sender<()>>,
+}
+
+/// The PHP module and every pool of interpreter threads in this process. One scoreboard holds one slot per thread across the pools.
+pub struct Rapira {
+    pools: Vec<Pool>,
+    board: rapira_scoreboard::Scoreboard,
+    total_threads: usize,
+    next_slot: usize,
+    module: Option<PhpModule>,
     // PHP module teardown must run on the boot thread.
     _not_send: PhantomData<*const ()>,
 }
@@ -110,17 +127,31 @@ fn check_linked_php() -> anyhow::Result<()> {
 }
 
 impl Rapira {
+    /// Boots the module and one pool with one thread.
     pub fn start(mode: Mode) -> anyhow::Result<Self> {
         Self::start_pool(mode, 1, PoolHooks::default())
     }
 
+    /// Boots the module and one pool named after the mode.
     pub fn start_pool(mode: Mode, processes: usize, hooks: PoolHooks) -> anyhow::Result<Self> {
+        let mut rapira = Self::boot(processes)?;
+        rapira.add_pool(PoolSpec {
+            name: "http",
+            mode,
+            threads: processes,
+            hooks,
+        })?;
+        Ok(rapira)
+    }
+
+    /// Runs MINIT once for the process. `total_threads` is the sum of the pool sizes that `add_pool` receives.
+    pub fn boot(total_threads: usize) -> anyhow::Result<Self> {
         check_linked_php()?;
-        let board = rapira_scoreboard::Scoreboard::create(processes)?;
-        info!(target: "rapira", "booting with mode: {mode:?}, threads: {processes}");
+        let board = rapira_scoreboard::Scoreboard::create(total_threads)?;
+        info!(target: "rapira", "booting PHP: {total_threads} threads");
         let mut module: _sapi_module_struct = module::build_sapi_module();
         let started: bool = unsafe {
-            php_tsrm_startup_ex((processes + 1) as c_int);
+            php_tsrm_startup_ex((total_threads + 1) as c_int);
             rapira_tsrmls_cache_update();
             rapira_process_init();
             sapi_startup(&mut module);
@@ -132,7 +163,32 @@ impl Rapira {
             drop(module);
             return Err(anyhow::anyhow!("php_module_startup failed"));
         }
+        Ok(Self {
+            pools: Vec::new(),
+            board,
+            total_threads,
+            next_slot: 0,
+            module: Some(module),
+            _not_send: PhantomData,
+        })
+    }
 
+    /// Starts the interpreter threads of one pool. An earlier pool keeps running when this pool cannot start.
+    pub fn add_pool(&mut self, spec: PoolSpec) -> anyhow::Result<RapiraHandle> {
+        let PoolSpec {
+            name,
+            mode,
+            threads,
+            hooks,
+        } = spec;
+        let first = self.next_slot;
+        anyhow::ensure!(
+            threads >= 1 && first + threads <= self.total_threads,
+            "pool {name} needs {threads} threads, but {} of {} slots remain",
+            self.total_threads - first,
+            self.total_threads
+        );
+        info!(target: "rapira", "starting pool {name}: mode {mode:?}, threads {threads}");
         let dispatcher = matches!(mode, Mode::Dispatcher(_));
 
         let pending = Arc::new(AtomicUsize::new(0));
@@ -147,58 +203,88 @@ impl Rapira {
             handled: Arc::new(AtomicBool::new(false)),
         };
         let reported_boot_failure = Arc::new(AtomicBool::new(false));
-        let (start_tx, start_rx) = bounded(processes);
-        let mut rapira = Self {
+        let (start_tx, start_rx) = bounded(threads);
+        let mut pool = Pool {
+            name,
             intake: Some(Intake {
                 tx: intake_tx,
                 pending,
             }),
             dispatcher,
-            workers: Vec::with_capacity(processes),
-            board,
-            module: Some(module),
+            workers: Vec::with_capacity(threads),
             stopping,
             stop_tx: Some(stop_tx),
-            _not_send: PhantomData,
         };
 
-        for index in 0..processes {
-            let slot = board.slot(index);
-            board.set_starting(index);
+        for index in 0..threads {
+            let slot_index = first + index;
+            let slot = self.board.slot(slot_index);
+            self.board.set_starting(slot_index);
             let rx = job_rx.clone();
             let mode = mode.clone();
             let hooks = hooks.clone();
             let reported = reported_boot_failure.clone();
             let start = start_rx.clone();
-            trace!(target: "rapira", "spawning worker thread {index}");
+            trace!(target: "rapira", "spawning worker thread {name}/{index}");
             let worker = thread::Builder::new()
-                .name(format!("rapira-worker-{index}"))
+                .name(format!("rapira-{name}-{index}"))
                 .spawn(move || {
                     if start.recv().is_ok() {
-                        worker_main(mode, rx, slot, index, hooks, reported);
+                        worker_main(
+                            mode,
+                            rx,
+                            slot,
+                            WorkerId {
+                                pool: name,
+                                index,
+                                slot: slot_index,
+                            },
+                            hooks,
+                            reported,
+                        );
                     }
                 });
             match worker {
-                Ok(worker) => rapira.workers.push(worker),
+                Ok(worker) => pool.workers.push(worker),
                 Err(error) => {
-                    rapira.stopping.store(true, Ordering::Release);
+                    pool.stopping.store(true, Ordering::Release);
                     drop(start_tx);
-                    for worker in rapira.workers.drain(..) {
+                    for worker in pool.workers.drain(..) {
                         let _ = worker.join();
                     }
                     return Err(error.into());
                 }
             }
         }
-        for _ in 0..processes {
+        for _ in 0..threads {
             start_tx
                 .send(())
                 .expect("worker start gate remains connected");
         }
         drop(start_tx);
-        Ok(rapira)
+        self.next_slot = first + threads;
+        let handle = RapiraHandle::new(pool.intake.as_ref().expect("set above"), dispatcher);
+        self.pools.push(pool);
+        Ok(handle)
     }
 
+    /// The handle of the first pool.
+    pub fn handle(&self) -> RapiraHandle {
+        self.pool_handle_at(0).expect("the first pool exists")
+    }
+
+    pub fn pool_handle(&self, name: &str) -> Option<RapiraHandle> {
+        let index = self.pools.iter().position(|pool| pool.name == name)?;
+        self.pool_handle_at(index)
+    }
+
+    fn pool_handle_at(&self, index: usize) -> Option<RapiraHandle> {
+        let pool = self.pools.get(index)?;
+        let intake = pool.intake.as_ref().expect("intake lives until Drop");
+        Some(RapiraHandle::new(intake, pool.dispatcher))
+    }
+
+    /// Stops every pool and joins the threads. Returns false when a thread is still running after the grace period, in which case the module stays active.
     pub fn shutdown(mut self) -> bool {
         self.stop_and_join()
     }
@@ -212,10 +298,13 @@ impl Rapira {
             return true;
         }
         info!(target: "rapira", "stopping worker threads");
-        self.stopping.store(true, Ordering::Release);
-        self.stop_tx = None;
-        self.intake = None;
-        let workers = std::mem::take(&mut self.workers);
+        let mut workers = Vec::new();
+        for pool in &mut self.pools {
+            pool.stopping.store(true, Ordering::Release);
+            pool.stop_tx = None;
+            pool.intake = None;
+            workers.append(&mut pool.workers);
+        }
         let deadline = Instant::now() + JOIN_GRACE;
         while Instant::now() < deadline && workers.iter().any(|worker| !worker.is_finished()) {
             thread::sleep(Duration::from_millis(20));
@@ -270,18 +359,32 @@ fn effective_quota(max_requests: u64, thread_index: usize) -> u64 {
     max_requests.saturating_add(1 + (h.finish() % grace))
 }
 
+/// Names one interpreter thread: the pool, the index inside the pool, and the scoreboard slot.
+#[derive(Clone, Copy)]
+struct WorkerId {
+    pool: &'static str,
+    index: usize,
+    slot: usize,
+}
+
+impl std::fmt::Display for WorkerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.pool, self.index)
+    }
+}
+
 fn worker_main(
     mode: Mode,
     rx: JobRx,
     slot: &'static rapira_scoreboard::SharedSlot,
-    index: usize,
+    id: WorkerId,
     hooks: PoolHooks,
     reported_boot_failure: Arc<AtomicBool>,
 ) {
     let stop = rx.stop.clone();
     let stopping = rx.stopping.clone();
     let handled = rx.handled.clone();
-    slot.bind(index as u32);
+    slot.bind(id.slot as u32);
     let c_mode = match &mode {
         Mode::Classic => RAPIRA_MODE_CLASSIC,
         Mode::Worker(_) => RAPIRA_MODE_WORKER,
@@ -299,10 +402,10 @@ fn worker_main(
         crate::exchange::forget_dispatcher();
         crate::exchange::cycle_reset();
         sb_set(slot);
-        quota::install(effective_quota(hooks.max_requests, index));
+        quota::install(effective_quota(hooks.max_requests, id.slot));
         sb_update(Event::Healthy);
         sb_update(Event::Idle);
-        info!(target: "rapira", "worker thread {index} ready");
+        info!(target: "rapira", "worker thread {id} ready");
         let exit = catch_unwind(AssertUnwindSafe(|| match &mode {
             Mode::Classic => {
                 classic_worker();
@@ -311,7 +414,7 @@ fn worker_main(
             Mode::Worker(script) | Mode::Dispatcher(script) => rapira_worker(script.clone()),
         }));
         if exit.is_err() {
-            error!(target: "rapira", "worker thread {index} panicked");
+            error!(target: "rapira", "worker thread {id} panicked");
             crate::exchange::reclaim_current();
             // An interrupted classic job can leave borrowed request pointers in SG.
             crate::context::unbind_server_context();
@@ -334,7 +437,7 @@ fn worker_main(
             crash_streak = 0;
         }
         sb_update(Event::Recycled);
-        info!(target: "rapira", "worker thread {index} recycling");
+        info!(target: "rapira", "worker thread {id} recycling");
     }
 }
 
@@ -724,7 +827,7 @@ try {
     }
 
     fn test_intake() -> (
-        crossbeam_channel::Sender<Context>,
+        crossbeam_channel::Sender<Box<Context>>,
         crossbeam_channel::Sender<()>,
         JobRx,
     ) {

@@ -6,7 +6,7 @@ use crossbeam_channel::{Sender, TrySendError};
 use tokio::sync::mpsc;
 
 use crate::{
-    start::Rapira,
+    start::Intake,
     types::{Context, Frame, Request},
 };
 
@@ -39,13 +39,12 @@ pub struct RapiraHandle {
     dispatcher: bool,
 }
 
-impl Rapira {
-    pub fn handle(&self) -> RapiraHandle {
-        let intake = self.intake.as_ref().expect("intake lives until Drop");
-        RapiraHandle {
+impl RapiraHandle {
+    pub(crate) fn new(intake: &Intake, dispatcher: bool) -> Self {
+        Self {
             intake: intake.tx.clone(),
             pending: intake.pending.clone(),
-            dispatcher: self.dispatcher,
+            dispatcher,
         }
     }
 }

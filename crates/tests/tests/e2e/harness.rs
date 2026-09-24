@@ -648,26 +648,28 @@ fn parse_status_and_body(raw: &[u8]) -> io::Result<(u16, Vec<u8>)> {
     Ok((code, raw[head_end + 4..].to_vec()))
 }
 
-fn ready_threads(log: &str) -> BTreeSet<usize> {
+/// Parses `worker thread <pool>/<index> ready` lines into `(pool, index)` pairs.
+fn ready_threads(log: &str) -> BTreeSet<(String, usize)> {
     log.lines()
         .filter_map(|line| {
             let (_, rest) = line.split_once("worker thread ")?;
-            let (index, event) = rest.split_once(' ')?;
+            let (id, event) = rest.split_once(' ')?;
+            let (pool, index) = id.split_once('/')?;
             event
                 .starts_with("ready")
-                .then(|| index.parse().ok())
+                .then(|| Some((pool.to_owned(), index.parse().ok()?)))
                 .flatten()
         })
         .collect()
 }
 
-/// Counts distinct interpreter thread indices. Repeated generation-ready lines count once.
+/// Counts distinct interpreter threads across the pools. Repeated generation-ready lines count once.
 pub fn wait_workers(
     srv: &Server,
     deadline: Duration,
     what: &str,
-    pred: impl Fn(&BTreeSet<usize>) -> bool,
-) -> BTreeSet<usize> {
+    pred: impl Fn(&BTreeSet<(String, usize)>) -> bool,
+) -> BTreeSet<(String, usize)> {
     let end = Instant::now() + deadline;
     loop {
         let log = std::fs::read_to_string(srv.dir.join("server.log")).unwrap_or_default();
@@ -920,10 +922,17 @@ pub fn wait_log_contains(srv: &Server, needle: &str, deadline: Duration) -> bool
 
 #[test]
 fn readiness_counts_each_thread_once_across_interpreter_generations() {
-    let log = "INFO worker thread 0 ready\nINFO worker thread 1 ready\n\
-               INFO worker thread 0 recycling\nINFO worker thread 0 ready\n\
-               INFO worker thread 10 ready\nINFO worker thread 3 recycling\n";
-    assert_eq!(ready_threads(log), [0, 1, 10].into_iter().collect());
+    let log = "INFO worker thread http/0 ready\nINFO worker thread http/1 ready\n\
+               INFO worker thread http/0 recycling\nINFO worker thread http/0 ready\n\
+               INFO worker thread http/10 ready\nINFO worker thread http/3 recycling\n\
+               INFO worker thread grpc/0 ready\n";
+    assert_eq!(
+        ready_threads(log),
+        [("http", 0), ("http", 1), ("http", 10), ("grpc", 0)]
+            .into_iter()
+            .map(|(pool, index)| (pool.to_owned(), index))
+            .collect()
+    );
 }
 
 #[test]
