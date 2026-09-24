@@ -211,13 +211,14 @@ function Replace-RequiredText {
         [Parameter(Mandatory)] [string] $Path,
         [Parameter(Mandatory)] [string] $Before,
         [Parameter(Mandatory)] [string] $After,
-        [Parameter(Mandatory)] [string] $Description
+        [Parameter(Mandatory)] [string] $Description,
+        [int] $Count = 1
     )
 
     $text = [IO.File]::ReadAllText($Path)
     $matches = [regex]::Matches($text, [regex]::Escape($Before)).Count
-    if ($matches -ne 1) {
-        throw "Expected exactly one $Description site in '$Path', found $matches."
+    if ($matches -ne $Count) {
+        throw "Expected exactly $Count $Description site(s) in '$Path', found $matches."
     }
     [IO.File]::WriteAllText($Path, $text.Replace($Before, $After), [Text.UTF8Encoding]::new($false))
 }
@@ -605,8 +606,8 @@ try {
         $before = '#elif defined(__aarch64__) || defined(_M_ARM64)'
         $after = '#elif (defined(__aarch64__) || defined(_M_ARM64)) && !defined(_MSC_VER)'
         Replace-RequiredText -Path (Join-Path $sourceRoot 'Zend\zend_simd.h') -Before $before -After $after -Description 'PHP 8.5 MSVC ARM64 SIMD fallback'
-        # The bcmath NEON path uses GCC compound literals and inline assembly. Without XSSE2 the library uses its scalar code.
-        Replace-RequiredText -Path (Join-Path $sourceRoot 'ext\bcmath\libbcmath\src\xsse.h') -Before $before -After $after -Description 'PHP 8.5 MSVC ARM64 bcmath SIMD fallback'
+        # The five bcmath NEON branches (SSE2 to SSE4.2) use GCC compound literals and inline assembly. Without them the library uses its scalar code.
+        Replace-RequiredText -Path (Join-Path $sourceRoot 'ext\bcmath\libbcmath\src\xsse.h') -Before $before -After $after -Description 'PHP 8.5 MSVC ARM64 bcmath SIMD fallback' -Count 5
     }
 
     Invoke-Batch -NativeCmd $nativeCmd -WorkingDirectory $workRoot -Name 'tool-probe' -Lines @(
