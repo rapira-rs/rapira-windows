@@ -279,6 +279,7 @@ try {
             'module.c',
             'rapira_classes.c',
             'rapira_http.c',
+            'rapira_grpc.c',
             'rapira_dispatcher.c',
             'rapira_exchange.c'
         )

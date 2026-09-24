@@ -3,11 +3,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Sender, TrySendError};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     start::Intake,
-    types::{Context, Frame, Request},
+    types::{Context, Frame, GrpcJob, GrpcOutcome, GrpcRequest, Request, Unit},
 };
 
 // A capacity of four accepts a buffered Head, Chunk, and End group plus one interim head without blocking the PHP thread.
@@ -34,7 +34,7 @@ impl std::error::Error for HandleError {}
 
 #[derive(Clone)]
 pub struct RapiraHandle {
-    intake: Sender<Box<Context>>,
+    intake: Sender<Unit>,
     pending: Arc<AtomicUsize>,
     dispatcher: bool,
 }
@@ -81,20 +81,40 @@ impl RapiraHandle {
         self.dispatcher
     }
 
-    // Increment pending before the send. The consumer decrements it as soon as the consumer resumes, so the opposite order could wrap the counter below zero.
     pub async fn handle(&self, mut req: Request) -> Result<mpsc::Receiver<Frame>, HandleError> {
         req.received_at.get_or_insert_with(now_unix_f64);
         let (tx, rx) = mpsc::channel::<Frame>(FRAME_CAP);
-        let mut job = Box::new(Context::new(req, tx, !self.dispatcher));
+        let job = Box::new(Context::new(req, tx, !self.dispatcher));
+        self.enqueue(Unit::Http(job)).await?;
+        Ok(rx)
+    }
+
+    /// Queues one unary gRPC call. A dropped sender means that PHP lost the call. Dropping the receiver closes the call for PHP.
+    pub async fn call(
+        &self,
+        req: GrpcRequest,
+    ) -> Result<oneshot::Receiver<GrpcOutcome>, HandleError> {
+        let (reply, rx) = oneshot::channel();
+        let job = Box::new(GrpcJob {
+            req,
+            received_at: now_unix_f64(),
+            reply,
+        });
+        self.enqueue(Unit::Grpc(job)).await?;
+        Ok(rx)
+    }
+
+    // Increment pending before the send. The consumer decrements it as soon as the consumer resumes, so the opposite order could wrap the counter below zero.
+    async fn enqueue(&self, mut unit: Unit) -> Result<(), HandleError> {
         let pending = PendingGuard::arm(&self.pending);
         let deadline = Instant::now() + INTAKE_WAIT;
         loop {
-            match self.intake.try_send(job) {
+            match self.intake.try_send(unit) {
                 Ok(()) => {
                     pending.disarm();
-                    return Ok(rx);
+                    return Ok(());
                 }
-                Err(TrySendError::Full(j)) => {
+                Err(TrySendError::Full(u)) => {
                     if Instant::now() > deadline {
                         tracing::warn!(
                             target: "rapira",
@@ -103,7 +123,7 @@ impl RapiraHandle {
                         );
                         return Err(HandleError::Saturated);
                     }
-                    job = j;
+                    unit = u;
                     tokio::time::sleep(Duration::from_millis(1)).await;
                 }
                 Err(TrySendError::Disconnected(_)) => return Err(HandleError::Stopped),

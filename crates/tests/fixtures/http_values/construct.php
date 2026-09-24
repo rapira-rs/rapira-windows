@@ -3,7 +3,7 @@
 use Rapira\Http\FormField;
 use Rapira\Http\Multipart;
 use Rapira\Http\Request;
-use Rapira\Http\Tls;
+use Rapira\Tls;
 use Rapira\Http\UploadedFile;
 use Rapira\InetAddress;
 
@@ -34,6 +34,7 @@ echo 'server=', $req->server->ip, ':', $req->server->port, "\n";
 echo $req->body->fields[0]->name, '=', $req->body->fields[0]->value, "\n";
 echo $req->body->files[0]->clientFilename, ' ', $req->body->files[0]->size, "\n";
 echo $req->tls->negotiatedProtocol, ' ', var_export($req->tls->certSerial, true), "\n";
+echo 'tls-class: ', $tls::class, "\n";
 echo $req->authority, ' ', $req->receivedAt, "\n";
 
 // A null tls value is valid for a Request from a plain HTTP listener. Construction must succeed.

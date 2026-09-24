@@ -19,6 +19,7 @@ fn value_objects_construct_and_refuse() -> anyhow::Result<()> {
         "note=hello",
         "me.png 512",
         "h2 NULL",
+        "tls-class: Rapira\\Tls",
         "example.test:8443 1722700000.25",
         "tls-null: NULL",
         "readonly: enforced",

@@ -17,7 +17,7 @@ namespace Rapira {
         case Trace;
     }
 
-    /** The process mode from `[http.pool].mode` in rapira.toml. */
+    /** The process mode from the `mode` key of the pool table of the plugin in rapira.toml. */
     enum Mode
     {
         case Classic;
@@ -88,6 +88,33 @@ namespace Rapira {
         public ?string $path;
 
         public function __construct(?string $path) {}
+    }
+
+    /**
+     * Contains the result of the TLS handshake. The certificate fields describe the client certificate. They are null when the client does not provide a certificate.
+     *
+     * @strict-properties
+     * @not-serializable
+     */
+    final readonly class Tls
+    {
+        public string $version;
+        public string $cipher;
+        public ?string $negotiatedProtocol;
+        public ?string $requestedServerName;
+        public ?string $certSerial;
+        public ?string $certOrganization;
+        public ?string $certFingerprint;
+
+        public function __construct(
+            string $version,
+            string $cipher,
+            ?string $negotiatedProtocol,
+            ?string $requestedServerName,
+            ?string $certSerial,
+            ?string $certOrganization,
+            ?string $certFingerprint,
+        ) {}
     }
 
     /** Returns the process mode. The value does not change during the process. */

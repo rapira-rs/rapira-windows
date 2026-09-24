@@ -71,6 +71,7 @@ fn main() -> anyhow::Result<()> {
         .file("module.c")
         .file("rapira_classes.c")
         .file("rapira_http.c")
+        .file("rapira_grpc.c")
         .file("rapira_dispatcher.c")
         .file("rapira_exchange.c");
     c.define("ZTS", None); // Builds only for ZTS.
@@ -124,6 +125,9 @@ fn main() -> anyhow::Result<()> {
         "rapira_classes.c",
         "rapira_classes.h",
         "rapira_http.c",
+        "rapira_grpc.c",
+        "rapira_grpc_arginfo.h",
+        "rapira_grpc.stub.php",
         "rapira_dispatcher.c",
         "rapira_exchange.c",
         "rapira.stub.php",

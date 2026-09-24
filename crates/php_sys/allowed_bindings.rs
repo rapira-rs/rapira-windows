@@ -11,15 +11,21 @@ bind! {
     // Both parts of the linked libphp version check.
     PHP_VERSION_ID, php_version_id,
     // Embedded object layouts. wrapper.h contains the authoritative definitions.
-    rapira_exchange_obj, rapira_dispatcher_info_obj,
+    rapira_exchange_obj, rapira_dispatcher_info_obj, rapira_grpc_call_obj,
+    rapira_grpc_metadata_obj,
     // Class entry globals that MINIT writes and the Rust builder reads.
     rapira_ce_http_request, rapira_ce_http_multipart, rapira_ce_http_form_field,
-    rapira_ce_http_uploaded_file, rapira_ce_http_tls, rapira_ce_inet_address,
+    rapira_ce_http_uploaded_file, rapira_ce_tls, rapira_ce_inet_address,
     rapira_ce_unix_address, rapira_ce_already_finalized_error,
     rapira_ce_http_head_already_written_error, rapira_ce_internal_http_exchange,
     rapira_ce_internal_http_dispatcher, rapira_ce_internal_http_dispatcher_info,
     rapira_ce_timeout_exception, rapira_ce_closed_exception,
-    rapira_ce_no_dispatcher_error,
+    rapira_ce_no_dispatcher_error, rapira_ce_grpc_status, rapira_ce_grpc_exception,
+    rapira_ce_grpc_method_kind, rapira_ce_grpc_method_info, rapira_ce_grpc_service_info,
+    rapira_ce_internal_grpc_dispatcher, rapira_ce_internal_grpc_dispatcher_info,
+    rapira_ce_internal_grpc_unary_call, rapira_ce_internal_grpc_response_metadata,
+    rapira_ce_grpc_context, rapira_ce_grpc_metadata, rapira_ce_grpc_protocol,
+    rapira_ce_grpc_error_detail,
     zend_argument_value_error, zend_argument_type_error,
     rapira_ce_work_discarded_exception, rapira_ce_http_content_length_exceeded_error,
     rapira_ce_http_head_not_written_error, rapira_ce_http_file_not_sendable_exception,
@@ -40,6 +46,10 @@ bind! {
     zend_update_property_long, zend_update_property_double, zend_update_property_null,
     // The rapira_array_init shim in wrapper.c provides the array_init_size macro operation.
     rapira_array_init,
+    // zend_symtable_str_find is inline. The rapira_symtable_str_find shim in wrapper.c exports it.
+    rapira_symtable_str_find,
+    // ZVAL_OBJ_COPY is a macro. The rapira_zval_enum_case shim in wrapper.c exports it.
+    rapira_zval_enum_case,
     // zend_symtable_str_update is inline. add_assoc_zval_ex is its exported caller in zend_API.c.
     add_assoc_zval_ex, add_next_index_stringl, add_next_index_object,
     zval_add_ref,

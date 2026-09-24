@@ -51,6 +51,14 @@ void rapira_smart_str_free(smart_str *s) {
     smart_str_free(s);
 }
 
+zval *rapira_symtable_str_find(HashTable *ht, const char *str, size_t len) {
+    return zend_symtable_str_find(ht, str, len);
+}
+
+void rapira_zval_enum_case(zval *dst, zend_class_entry *ce, const char *name) {
+    ZVAL_OBJ_COPY(dst, zend_enum_get_case_cstr(ce, name));
+}
+
 // These C functions preserve the PHP __vectorcall ABI. https://learn.microsoft.com/en-us/cpp/cpp/vectorcall?view=msvc-170
 #if PHP_VERSION_ID >= 80500
 void rapira_zend_hash_internal_pointer_reset_ex(const HashTable *ht, HashPosition *pos) {

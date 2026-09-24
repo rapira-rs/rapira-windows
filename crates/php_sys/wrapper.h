@@ -58,9 +58,12 @@ void rapira_thread_init(void);
 void rapira_thread_disarm(void);
 void rapira_timer_rearm(zend_long timeout);
 void rapira_dispatcher_thread_init(void);
-// Provide Rust shims because only macros or inline functions define array_init_size and smart_str_free.
+// Provide Rust shims because only macros or inline functions define array_init_size, smart_str_free, and zend_symtable_str_find.
 void rapira_array_init(zval *zv, uint32_t size);
 void rapira_smart_str_free(smart_str *s);
+zval *rapira_symtable_str_find(HashTable *ht, const char *str, size_t len);
+// ZVAL_OBJ_COPY is a macro. The shim writes the case `name` of the enum `ce` into `dst` with a new reference.
+void rapira_zval_enum_case(zval *dst, zend_class_entry *ce, const char *name);
 
 #if PHP_VERSION_ID >= 80500
 void rapira_zend_hash_internal_pointer_reset_ex(const HashTable *ht, HashPosition *pos);
@@ -109,6 +112,19 @@ typedef struct {
     zend_object std;
 } rapira_dispatcher_info_obj;
 
+typedef struct {
+    void *state; // Rust owns this Box<GrpcState>. It is NULL until receive() adopts a unit.
+    zval message; // This field caches the request message and contains IS_UNDEF before getMessage().
+    zval context; // This field caches Rapira\Grpc\Call\Context and contains IS_UNDEF before getContext().
+    zval metadata; // This field caches Rapira\Internal\Grpc\ResponseMetadata and contains IS_UNDEF before getResponseMetadata().
+    zend_object std;
+} rapira_grpc_call_obj;
+
+typedef struct {
+    void *state; // Borrowed from the call. The free_obj of the call sets it to NULL.
+    zend_object std;
+} rapira_grpc_metadata_obj;
+
 // Rust accesses these class entries. rapira_register_classes sets them in MINIT before PHP creates an object.
 extern zend_class_entry *rapira_ce_log_level;
 extern zend_class_entry *rapira_ce_mode;
@@ -118,7 +134,7 @@ extern zend_class_entry *rapira_ce_work_discarded_exception;
 extern zend_class_entry *rapira_ce_no_dispatcher_error;
 extern zend_class_entry *rapira_ce_not_in_worker_mode_error;
 extern zend_class_entry *rapira_ce_already_finalized_error;
-extern zend_class_entry *rapira_ce_http_tls;
+extern zend_class_entry *rapira_ce_tls;
 extern zend_class_entry *rapira_ce_http_multipart;
 extern zend_class_entry *rapira_ce_internal_http_dispatcher;
 extern zend_class_entry *rapira_ce_inet_address;
@@ -132,5 +148,19 @@ extern zend_class_entry *rapira_ce_http_file_not_sendable_exception;
 extern zend_class_entry *rapira_ce_http_form_field;
 extern zend_class_entry *rapira_ce_http_uploaded_file;
 extern zend_class_entry *rapira_ce_http_request;
+extern zend_class_entry *rapira_ce_grpc_status_code;
+extern zend_class_entry *rapira_ce_grpc_method_kind;
+extern zend_class_entry *rapira_ce_grpc_protocol;
+extern zend_class_entry *rapira_ce_grpc_status;
+extern zend_class_entry *rapira_ce_grpc_metadata;
+extern zend_class_entry *rapira_ce_grpc_error_detail;
+extern zend_class_entry *rapira_ce_grpc_method_info;
+extern zend_class_entry *rapira_ce_grpc_service_info;
+extern zend_class_entry *rapira_ce_grpc_context;
+extern zend_class_entry *rapira_ce_grpc_exception;
+extern zend_class_entry *rapira_ce_internal_grpc_dispatcher;
+extern zend_class_entry *rapira_ce_internal_grpc_dispatcher_info;
+extern zend_class_entry *rapira_ce_internal_grpc_unary_call;
+extern zend_class_entry *rapira_ce_internal_grpc_response_metadata;
 
 #endif

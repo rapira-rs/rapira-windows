@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError, bounded};
 use tracing::{error, info, trace};
-use types::Context;
+use types::Unit;
 
 use crate::quota::{self, PoolHooks};
 use crate::rapira_worker::{WorkerExit, rapira_worker};
@@ -26,13 +26,13 @@ thread_local! {
 }
 
 pub(crate) struct Intake {
-    pub(crate) tx: Sender<Box<Context>>,
+    pub(crate) tx: Sender<Unit>,
     pub(crate) pending: Arc<AtomicUsize>,
 }
 
 #[derive(Clone)]
 struct JobRx {
-    rx: Receiver<Box<Context>>,
+    rx: Receiver<Unit>,
     pending: Arc<AtomicUsize>,
     stop: Receiver<()>,
     stopping: Arc<AtomicBool>,
@@ -135,8 +135,12 @@ impl Rapira {
     /// Boots the module and one pool named after the mode.
     pub fn start_pool(mode: Mode, processes: usize, hooks: PoolHooks) -> anyhow::Result<Self> {
         let mut rapira = Self::boot(processes)?;
+        let name = match mode {
+            Mode::GrpcDispatcher { .. } => "grpc",
+            _ => "http",
+        };
         rapira.add_pool(PoolSpec {
-            name: "http",
+            name,
             mode,
             threads: processes,
             hooks,
@@ -189,10 +193,10 @@ impl Rapira {
             self.total_threads
         );
         info!(target: "rapira", "starting pool {name}: mode {mode:?}, threads {threads}");
-        let dispatcher = matches!(mode, Mode::Dispatcher(_));
+        let dispatcher = matches!(mode, Mode::Dispatcher(_) | Mode::GrpcDispatcher { .. });
 
         let pending = Arc::new(AtomicUsize::new(0));
-        let (intake_tx, intake_rx) = bounded::<Box<Context>>(1024);
+        let (intake_tx, intake_rx) = bounded::<Unit>(1024);
         let (stop_tx, stop_rx) = bounded(0);
         let stopping = Arc::new(AtomicBool::new(false));
         let job_rx = JobRx {
@@ -388,11 +392,15 @@ fn worker_main(
     let c_mode = match &mode {
         Mode::Classic => RAPIRA_MODE_CLASSIC,
         Mode::Worker(_) => RAPIRA_MODE_WORKER,
-        Mode::Dispatcher(_) => RAPIRA_MODE_DISPATCHER,
+        Mode::Dispatcher(_) | Mode::GrpcDispatcher { .. } => RAPIRA_MODE_DISPATCHER,
     } as c_int;
     // SAFETY: safe, trust me, I'm a developer
     unsafe { crate::rapira_mode_set(c_mode) };
     JOB_RX.with_borrow_mut(|slot| *slot = Some(rx));
+    // The front and the services are thread-locals of the OS thread. An interpreter generation does not reset them.
+    if let Mode::GrpcDispatcher { services, .. } = &mode {
+        crate::exchange::serve_grpc(services.clone());
+    }
     let mut crash_streak = 0;
     let mut first_generation = true;
     while first_generation || !stopping.load(Ordering::Acquire) {
@@ -411,7 +419,9 @@ fn worker_main(
                 classic_worker();
                 WorkerExit::Closed
             }
-            Mode::Worker(script) | Mode::Dispatcher(script) => rapira_worker(script.clone()),
+            Mode::Worker(script)
+            | Mode::Dispatcher(script)
+            | Mode::GrpcDispatcher { script, .. } => rapira_worker(script.clone()),
         }));
         if exit.is_err() {
             error!(target: "rapira", "worker thread {id} panicked");
@@ -449,7 +459,7 @@ pub(crate) fn note_handled() {
     });
 }
 
-pub(crate) fn pull_job() -> Option<Box<Context>> {
+pub(crate) fn pull_job() -> Option<Unit> {
     match pull_job_wait(None) {
         Pulled::Job(job) => Some(job),
         _ => None,
@@ -457,7 +467,7 @@ pub(crate) fn pull_job() -> Option<Box<Context>> {
 }
 
 pub(crate) enum Pulled {
-    Job(Box<Context>),
+    Job(Unit),
     Timeout,
     Empty,
     Closed,
@@ -827,7 +837,7 @@ try {
     }
 
     fn test_intake() -> (
-        crossbeam_channel::Sender<Box<Context>>,
+        crossbeam_channel::Sender<Unit>,
         crossbeam_channel::Sender<()>,
         JobRx,
     ) {

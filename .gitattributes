@@ -1,0 +1,4 @@
+# gen_stub hashes the raw stub bytes, so a CRLF checkout must not change them.
+*.stub.php text eol=lf
+*.proto text eol=lf
+*.binpb binary
