@@ -339,8 +339,8 @@ impl Drop for ShutdownWatcher {
 
 mod win_ctrl {
     use std::io;
-    use std::sync::OnceLock;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Mutex, MutexGuard, PoisonError};
 
     use tokio::sync::watch;
     use windows_sys::Win32::System::Console::{
@@ -349,20 +349,25 @@ mod win_ctrl {
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
     use windows_sys::core::BOOL;
 
-    static STOP_TX: OnceLock<watch::Sender<bool>> = OnceLock::new();
+    /// One sender per running extension runtime. A control event reaches every runtime.
+    static STOP_TXS: Mutex<Vec<watch::Sender<bool>>> = Mutex::new(Vec::new());
     static ASKED: AtomicBool = AtomicBool::new(false);
 
+    fn senders(list: &Mutex<Vec<watch::Sender<bool>>>) -> MutexGuard<'_, Vec<watch::Sender<bool>>> {
+        list.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Adds `stop_tx` and replays an event that arrived before the registration.
     fn register_stop(
         asked: &AtomicBool,
-        slot: &OnceLock<watch::Sender<bool>>,
+        list: &Mutex<Vec<watch::Sender<bool>>>,
         stop_tx: watch::Sender<bool>,
     ) {
-        let _ = slot.set(stop_tx);
-        if asked.load(Ordering::SeqCst)
-            && let Some(tx) = slot.get()
-        {
-            let _ = tx.send(true);
+        let mut list = senders(list);
+        if asked.load(Ordering::SeqCst) {
+            let _ = stop_tx.send(true);
         }
+        list.push(stop_tx);
     }
 
     // Windows calls this function on a new thread, so watch and logger locks are valid.
@@ -378,7 +383,7 @@ mod win_ctrl {
                     unsafe { TerminateProcess(GetCurrentProcess(), 130) };
                 }
                 tracing::info!(target: "rapira", "shutdown event received; draining extensions");
-                if let Some(tx) = STOP_TX.get() {
+                for tx in senders(&STOP_TXS).iter() {
                     let _ = tx.send(true);
                 }
                 1
@@ -389,6 +394,7 @@ mod win_ctrl {
 
     pub(super) fn install() -> io::Result<()> {
         ASKED.store(false, Ordering::SeqCst);
+        senders(&STOP_TXS).clear();
         // SAFETY: handler has the required ABI and remains valid for the process lifetime.
         // https://learn.microsoft.com/en-us/windows/console/setconsolectrlhandler
         if unsafe { SetConsoleCtrlHandler(Some(handler), 1) } == 0 {
@@ -399,29 +405,38 @@ mod win_ctrl {
     }
 
     pub(super) fn register(stop_tx: watch::Sender<bool>) {
-        register_stop(&ASKED, &STOP_TX, stop_tx);
+        register_stop(&ASKED, &STOP_TXS, stop_tx);
     }
 
     pub(super) fn uninstall() {
         // SAFETY: removes the handler installed above.
         unsafe { SetConsoleCtrlHandler(Some(handler), 0) };
+        senders(&STOP_TXS).clear();
     }
 
     #[cfg(test)]
     mod tests {
         use super::*;
 
+        /// Both runtimes see the event: one registered before it, one after it.
         #[test]
-        fn registration_replays_an_early_request() {
+        fn registration_replays_an_early_request_to_every_runtime() {
             let asked = AtomicBool::new(false);
-            let slot = OnceLock::new();
+            let list = Mutex::new(Vec::new());
+            let (first_tx, first_rx) = watch::channel(false);
+            register_stop(&asked, &list, first_tx);
+            assert!(!*first_rx.borrow());
+
             assert!(!asked.swap(true, Ordering::SeqCst));
+            for tx in senders(&list).iter() {
+                let _ = tx.send(true);
+            }
+            let (second_tx, second_rx) = watch::channel(false);
+            register_stop(&asked, &list, second_tx);
 
-            let (stop_tx, stop_rx) = watch::channel(false);
-            register_stop(&asked, &slot, stop_tx);
-
-            assert!(*stop_rx.borrow());
-            assert!(asked.swap(true, Ordering::SeqCst));
+            assert!(*first_rx.borrow());
+            assert!(*second_rx.borrow());
+            assert_eq!(senders(&list).len(), 2);
         }
     }
 }
