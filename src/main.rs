@@ -176,7 +176,9 @@ fn serve(args: ServeArgs) -> anyhow::Result<ExitCode> {
         .map(pidfile::PidFile::write)
         .transpose()?;
 
-    let http = settings.http;
+    let http = settings
+        .http
+        .ok_or_else(|| anyhow::anyhow!("no [http] table configured"))?;
     let entrypoint: PathBuf = http.pool.entrypoint;
     // The entrypoint is fixed for the lifetime of the pool, so one open at boot covers every request. The open proves read permission. The metadata check rejects a directory.
     let meta = File::open(&entrypoint)
