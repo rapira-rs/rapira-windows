@@ -80,6 +80,25 @@ fn retained_spl_tempfile_survives_next_request() {
     }
 }
 
+/// A top-level `[pool]` table is a parse error. The pool belongs under `[http.pool]`.
+#[test]
+fn a_top_level_pool_table_refuses_to_boot() {
+    let (status, log) = spawn_boot_failure("shared/echo-worker.php", "[pool]\nprocesses = 1\n");
+    assert_eq!(status.code(), Some(1), "\n{log}");
+    assert!(log.contains("parsing config file"), "\n{log}");
+    assert!(log.contains("unknown field `pool`"), "\n{log}");
+}
+
+/// The entrypoint is fixed for the lifetime of the pool, so the server proves at boot that it can read the file.
+#[test]
+fn a_missing_entrypoint_refuses_to_boot() {
+    let (status, log) = spawn_boot_failure_with_entrypoint("no-such-entrypoint.php");
+    assert_eq!(status.code(), Some(1), "\n{log}");
+    assert!(log.contains("http.pool.entrypoint"), "\n{log}");
+    assert!(log.contains("no-such-entrypoint.php"), "\n{log}");
+    assert!(log.contains("is not readable"), "\n{log}");
+}
+
 /// Worker mode startup that does not call handle_request() must fail server startup. The server must not wait indefinitely or continue to return 503.
 #[test]
 fn worker_bootstrap_that_never_serves_failboots() {

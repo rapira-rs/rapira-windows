@@ -259,7 +259,7 @@ fn rapira_bin() -> PathBuf {
     bin
 }
 
-/// Appends `extra_toml` inside `[pool]`. Another section requires its own header after all pool keys.
+/// Appends `extra_toml` inside `[http.pool]`, bare keys first. A `[log]` or `[supervisor]` header can follow. It must not open `[http]` or `[http.*]`.
 pub fn spawn_with_config(fixture: &str, processes: usize, extra_toml: &str) -> Server {
     spawn_with_extras(fixture, processes, "", extra_toml, Some("info"), None)
 }
@@ -272,7 +272,7 @@ pub fn spawn_example(name: &str, processes: usize) -> Server {
     spawn_with_source(&source, name, processes, "", "", Some("info"), None)
 }
 
-/// Calls [`spawn_with_config`] with keys in `[http]`, where the final `extra_toml` cannot add values.
+/// Calls [`spawn_with_config`] with keys in `[http]`. `http_extra` follows `listen` and can open `[http.static]` or `[http.uploads]`.
 pub fn spawn_with_http_extra(fixture: &str, processes: usize, http_extra: &str) -> Server {
     spawn_with_extras(fixture, processes, http_extra, "", Some("info"), None)
 }
@@ -299,7 +299,7 @@ pub fn spawn_in_cwd(fixture: &str, processes: usize, php_ini: &str) -> Server {
     spawn_with_extras(fixture, processes, "", "", Some("info"), Some(ini))
 }
 
-/// Calls [`spawn_in_cwd`] with PHPRC set to the same directory. It appends `extra_toml` inside `[pool]`, so another section requires its own header and must occur last.
+/// Calls [`spawn_in_cwd`] with PHPRC set to the same directory. It appends `extra_toml` inside `[http.pool]`, bare keys first. A `[log]` or `[supervisor]` header can follow. It must not open `[http]` or `[http.*]`.
 pub fn spawn_with_phprc_and_config(
     fixture: &str,
     processes: usize,
@@ -434,7 +434,7 @@ fn spawn_attempt(
     .expect("write config");
     let log = File::create(dir.join("server.log")).expect("create server.log");
     let mut cmd = Command::new(rapira_bin());
-    cmd.args(["serve", "--config"]).arg(dir.join("rapira.toml"));
+    cmd.arg("serve").arg(dir.join("rapira.toml"));
     cmd.env_remove("PHPRC");
     cmd.env("PHP_INI_SCAN_DIR", "");
     if let Some(ini) = options.cwd_ini {
@@ -462,10 +462,19 @@ fn spawn_attempt(
 /// Starts a process that must fail during startup. Waits for exit and returns the status and complete log. With `RUST_BACKTRACE` set, the backtrace after the error can exceed the log tail size.
 pub fn spawn_boot_failure(fixture: &str, http_extra: &str) -> (ExitStatus, String) {
     let (dir, entrypoint) = stage_fixture(fixture);
+    boot_failure(dir, &entrypoint, http_extra)
+}
+
+/// Calls [`spawn_boot_failure`] with the entrypoint written into the configuration as given, so a path that no fixture can stage reaches the boot check.
+pub fn spawn_boot_failure_with_entrypoint(entrypoint: &str) -> (ExitStatus, String) {
+    boot_failure(scratch_dir(), entrypoint, "")
+}
+
+fn boot_failure(dir: PathBuf, entrypoint: &str, http_extra: &str) -> (ExitStatus, String) {
     let (child, addr) = spawn_attempt(
         &dir,
         1,
-        &entrypoint,
+        entrypoint,
         http_extra,
         "",
         Some("info"),
@@ -502,6 +511,7 @@ pub fn spawn_on_addr_unchecked(
     Server { child, addr, dir }
 }
 
+/// Renders `[http.pool]` before `[http]`. TOML accepts an explicit super-table header after its sub-table. `http_extra` renders last, so a header it opens ends the file.
 fn render_config(
     addr: SocketAddr,
     processes: usize,
@@ -510,9 +520,7 @@ fn render_config(
     extra: &str,
 ) -> String {
     format!(
-        "[http]\nlisten = \"{addr}\"\n{http_extra}\n\
-         [pool]\nprocesses = {processes}\nentrypoint = \"{fixture}\"\n\n\
-         {extra}"
+        "[http.pool]\nprocesses = {processes}\nentrypoint = \"{fixture}\"\n{extra}\n[http]\nlisten = \"{addr}\"\n{http_extra}"
     )
 }
 
@@ -592,14 +600,7 @@ pub fn http_raw_bytes(addr: SocketAddr, request: &[u8], timeout: Duration) -> io
 
 /// Sends a request supplied by the caller without an implicit Host or Connection field.
 pub fn http_raw(addr: SocketAddr, request: &[u8], timeout: Duration) -> io::Result<(u16, Vec<u8>)> {
-    let mut s = TcpStream::connect_timeout(&addr, timeout)?;
-    s.set_read_timeout(Some(timeout))?;
-    s.set_write_timeout(Some(timeout))?;
-    s.write_all(request)?;
-    s.flush()?;
-    let mut raw = Vec::new();
-    s.read_to_end(&mut raw)?;
-    parse_status_and_body(&raw)
+    parse_status_and_body(&http_raw_bytes(addr, request, timeout)?)
 }
 
 /// Sends a request body like [`http_get`]. `content_type` uses bytes because a multipart boundary is opaque data and a field value can contain obs-text.
@@ -610,9 +611,6 @@ pub fn http_post(
     body: &[u8],
     timeout: Duration,
 ) -> io::Result<(u16, Vec<u8>)> {
-    let mut s = TcpStream::connect_timeout(&addr, timeout)?;
-    s.set_read_timeout(Some(timeout))?;
-    s.set_write_timeout(Some(timeout))?;
     let mut req = Vec::new();
     write!(
         req,
@@ -622,11 +620,7 @@ pub fn http_post(
     req.extend_from_slice(content_type);
     write!(req, "\r\nContent-Length: {}\r\n\r\n", body.len())?;
     req.extend_from_slice(body);
-    s.write_all(&req)?;
-    s.flush()?;
-    let mut raw = Vec::new();
-    s.read_to_end(&mut raw)?;
-    parse_status_and_body(&raw)
+    http_raw(addr, &req, timeout)
 }
 
 fn parse_status_and_body(raw: &[u8]) -> io::Result<(u16, Vec<u8>)> {

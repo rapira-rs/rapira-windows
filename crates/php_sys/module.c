@@ -455,9 +455,11 @@ void rapira_release_temporary_streams(void) {
 // Run shutdown functions from initial PHP code only at the end of the cycle.
 ZEND_TLS HashTable *rapira_boot_shutdown_functions = NULL;
 
+// SG(options) is per thread under ZTS. php_execute_script keeps the current directory over a script run. https://github.com/php/php-src/blob/PHP-8.5/main/main.c
 void rapira_thread_init(void) {
     rapira_job_timeout = -1;
     rapira_boot_shutdown_functions = NULL;
+    SG(options) |= SAPI_OPTION_NO_CHDIR;
     rapira_dispatcher_thread_init();
 }
 

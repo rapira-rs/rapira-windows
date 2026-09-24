@@ -43,6 +43,16 @@ pub fn worker_body(
     grace: Duration,
 ) -> anyhow::Result<WorkerOutcome> {
     let shutdown = ShutdownWatcher::install().context("installing console control handler")?;
+    // Every request starts in the process working directory because ZTS PHP resets the thread cwd at request startup. The boot check accepted a regular file, so the parent exists.
+    let entrypoint_dir: &Path = script
+        .parent()
+        .context("the entrypoint has no parent directory")?;
+    std::env::set_current_dir(entrypoint_dir).with_context(|| {
+        format!(
+            "entering the entrypoint directory {}",
+            entrypoint_dir.display()
+        )
+    })?;
     let spool_dir = if matches!(mode, Mode::Dispatcher(_)) {
         uploads.dir = uploads
             .dir

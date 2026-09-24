@@ -248,7 +248,7 @@ jobs:
                   @"
                   [http]
                   listen = "127.0.0.1:$port"
-                  [pool]
+                  [http.pool]
                   processes = 1
                   mode = "worker"
                   entrypoint = "smoke-worker.php"
@@ -260,7 +260,7 @@ jobs:
                   $stdout = Join-Path $smoke 'stdout.log'
                   $stderr = Join-Path $smoke 'stderr.log'
                   $process = Start-Process -FilePath (Join-Path $bundle 'rapira.exe') `
-                    -ArgumentList @('serve','--config',(Join-Path $smoke 'rapira.toml')) `
+                    -ArgumentList @('serve',(Join-Path $smoke 'rapira.toml')) `
                     -WorkingDirectory $bundle -RedirectStandardOutput $stdout `
                     -RedirectStandardError $stderr -WindowStyle Hidden -PassThru
                   try {

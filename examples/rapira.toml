@@ -1,4 +1,4 @@
-# This file is an example rapira.toml configuration. Command-line options override file values. All keys except pool.entrypoint are optional. Commented keys show default values.
+# This file is an example rapira.toml configuration. All keys except http.pool.entrypoint are optional. Commented keys show default values or example values. Start it with: .\rapira.exe serve examples\rapira.toml
 
 [http]
 listen = "127.0.0.1:8000"     # Use an IP address and port, or use ":port" for all interfaces.
@@ -31,7 +31,8 @@ listen = "127.0.0.1:8000"     # Use an IP address and port, or use ":port" for a
 # root = "public"             # Required. Relative paths start from the directory of this file.
 # forbid = [".php"]           # Match file name suffixes without case sensitivity. An explicit list replaces the default list.
 
-[pool]
+# The interpreter thread pool behind the http listener. Each plugin owns its pool under [<plugin>.pool].
+[http.pool]
 entrypoint = "dispatcher-sync.php" # Relative paths start from the directory of this file.
 mode = "dispatcher"                 # Use "classic", "worker", or "dispatcher". The default is "dispatcher".
 processes = 8                       # Set the number of PHP interpreter threads in the server process. The default is the CPU count.
@@ -42,7 +43,7 @@ processes = 8                       # Set the number of PHP interpreter threads 
 # process_control_timeout_secs = 30 # Allow this duration for threads to stop before a forced process exit.
 
 [log]
-level = "trace"                    # Use error, warn, info, debug, or trace. The default is error.
+# level = "error"                  # Use error, warn, info, debug, or trace.
 # format = "plain"                 # Use "plain" or "json".
 # [log.targets]                     # Set a level for each target. RUST_LOG replaces the complete filter.
 # php = "warn"

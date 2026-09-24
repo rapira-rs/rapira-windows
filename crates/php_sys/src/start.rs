@@ -266,7 +266,7 @@ fn report_boot_failure(
     }
 }
 
-/// Combines the worker thread index with time so interpreters do not recycle at the same request count.
+/// Combines the worker thread index with a random hasher seed so interpreters do not recycle at the same request count.
 fn effective_quota(max_requests: u64, thread_index: usize) -> u64 {
     if max_requests == 0 {
         return 0;
@@ -275,12 +275,6 @@ fn effective_quota(max_requests: u64, thread_index: usize) -> u64 {
     use std::hash::{BuildHasher, Hasher};
     let mut h = std::collections::hash_map::RandomState::new().build_hasher();
     h.write_usize(thread_index);
-    h.write_u128(
-        std::time::UNIX_EPOCH
-            .elapsed()
-            .map(|d| d.as_nanos())
-            .unwrap_or(0),
-    );
     max_requests.saturating_add(1 + (h.finish() % grace))
 }
 

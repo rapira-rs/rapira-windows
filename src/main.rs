@@ -1,15 +1,15 @@
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use extension_api::{ListenAddr, Middleware, PrepareCtx};
 use php_sys::Mode;
-use rapira_config::{Listen, MiddlewareSettings, Overrides, RunMode, Settings, UnsafeFieldNames};
+use rapira_config::{Listen, MiddlewareSettings, RunMode, Settings, UnsafeFieldNames};
 use rapira_http::{
     Config as HttpConfig, Server as HttpServer, UnsafeFieldNames as HttpUnsafeFieldNames,
 };
 use rapira_runtime::ExtensionRuntime;
 use std::{
-    fs::{OpenOptions, read_dir, remove_file},
+    fs::{File, OpenOptions, read_dir, remove_file},
     os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::ExitCode,
     sync::Arc,
 };
@@ -45,25 +45,9 @@ enum Commands {
 
 #[derive(Args)]
 struct ServeArgs {
-    /// Load settings from a rapira.toml. The flags below override values it sets.
-    #[arg(long, value_name = "PATH")]
-    config: Option<PathBuf>,
-
-    /// PHP interpreter threads in the single server process. Defaults to the CPU count.
-    #[arg(long)]
-    processes: Option<usize>,
-
-    /// Run mode: classic, worker, or dispatcher. Overrides `pool.mode`.
-    #[arg(long, value_name = "MODE")]
-    mode: Option<RunMode>,
-
-    /// Listen on an IP address and port. Use `:port` for all interfaces.
-    #[arg(long, value_name = "ADDR")]
-    listen: Option<Listen>,
-
-    /// PHP entry script. Overrides `pool.entrypoint` from the configuration file.
-    #[arg(value_name = "SCRIPT")]
-    script: Option<PathBuf>,
+    /// Path to rapira.toml. Relative paths inside the file resolve against its directory.
+    #[arg(value_name = "CONFIG")]
+    config: PathBuf,
 }
 
 fn main() -> ExitCode {
@@ -142,6 +126,37 @@ fn spool_dir_reclaimable_with(
     }
 }
 
+/// Dispatcher mode only. The host spools file parts here, so the directory must exist and accept a new file. The sweep reclaims the spool directories of servers that are gone.
+fn prepare_uploads_dir(dir: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dir)
+        .map_err(|e| anyhow::anyhow!("creating http.uploads.dir {}: {e}", dir.display()))?;
+    let probe = dir.join(format!(".rapira-probe-{}", std::process::id()));
+    let _ = remove_file(&probe);
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .map_err(|e| anyhow::anyhow!("http.uploads.dir {} is not writable: {e}", dir.display()))?;
+    let _ = remove_file(&probe);
+    match read_dir(dir) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                if !spool_dir_reclaimable(&entry.file_name().to_string_lossy()) {
+                    continue;
+                }
+                let path = entry.path();
+                if let Err(e) = std::fs::remove_dir_all(&path) {
+                    tracing::warn!(target: "rapira", "sweeping spool dir {}: {e}", path.display());
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(target: "rapira", "listing {} for the spool sweep: {e}", dir.display());
+        }
+    }
+    Ok(())
+}
+
 fn force_exit(code: u8) -> ! {
     // SAFETY: This process can terminate itself. PHP threads may still hold DLL locks.
     // https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-terminateprocess
@@ -150,17 +165,9 @@ fn force_exit(code: u8) -> ! {
 }
 
 fn serve(args: ServeArgs) -> anyhow::Result<ExitCode> {
-    let settings: Settings = rapira_config::resolve(
-        args.config.as_deref(),
-        Overrides {
-            listen: args.listen,
-            processes: args.processes,
-            mode: args.mode,
-            entrypoint: args.script,
-        },
-    )?;
+    let settings: Settings = rapira_config::resolve(&args.config)?;
 
-    logging::init(&settings.log)?;
+    logging::init(&settings.log);
     info!(target: "rapira", "rapira_windows v{} starting", env!("CARGO_PKG_VERSION"));
     let _pidfile = settings
         .supervisor
@@ -169,34 +176,39 @@ fn serve(args: ServeArgs) -> anyhow::Result<ExitCode> {
         .map(pidfile::PidFile::write)
         .transpose()?;
 
-    let mode: Mode = match settings.pool.mode {
+    let http = settings.http;
+    let entrypoint: PathBuf = http.pool.entrypoint;
+    // The entrypoint is fixed for the lifetime of the pool, so one open at boot covers every request. The open proves read permission. The metadata check rejects a directory.
+    let meta = File::open(&entrypoint)
+        .and_then(|f| f.metadata())
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "http.pool.entrypoint {} is not readable: {e}",
+                entrypoint.display()
+            )
+        })?;
+    anyhow::ensure!(
+        meta.is_file(),
+        "http.pool.entrypoint {} is not a regular file",
+        entrypoint.display()
+    );
+    let mode: Mode = match http.pool.mode {
         RunMode::Classic => Mode::Classic,
-        RunMode::Worker => Mode::Worker(settings.pool.entrypoint.clone()),
-        RunMode::Dispatcher => Mode::Dispatcher(settings.pool.entrypoint.clone()),
+        RunMode::Worker => Mode::Worker(entrypoint.clone()),
+        RunMode::Dispatcher => Mode::Dispatcher(entrypoint.clone()),
     };
+    let dispatcher: bool = matches!(mode, Mode::Dispatcher(_));
 
-    let sendfile_root = settings
-        .http
-        .sendfile_root
-        .clone()
-        .or_else(|| {
-            settings
-                .pool
-                .entrypoint
-                .parent()
-                .map(std::path::Path::to_path_buf)
-        })
-        .ok_or_else(|| anyhow::anyhow!("pool.entrypoint has no parent directory"))?;
-    let sendfile_root = std::fs::canonicalize(&sendfile_root).map_err(|error| {
+    let sendfile_root = std::fs::canonicalize(&http.sendfile_root).map_err(|error| {
         anyhow::anyhow!(
             "sendfile root {} is not accessible: {error}",
-            sendfile_root.display()
+            http.sendfile_root.display()
         )
     })?;
     php_sys::set_sendfile_root(sendfile_root);
 
     let mut middleware: Vec<Arc<dyn Middleware>> = Vec::new();
-    for mw in &settings.http.middleware {
+    for mw in http.middleware {
         match mw {
             MiddlewareSettings::Static(st) => {
                 // is_dir() converts every metadata error to false. `metadata` preserves the error code.
@@ -213,77 +225,38 @@ fn serve(args: ServeArgs) -> anyhow::Result<ExitCode> {
                 );
                 info!(target: "rapira", "static files from {}, forbid {:?}", st.root.display(), st.forbid);
                 middleware.push(Arc::new(rapira_static_files::StaticFiles::new(
-                    st.root.clone(),
-                    st.forbid.clone(),
+                    st.root, st.forbid,
                 )));
             }
         }
     }
     let http_cfg: HttpConfig = HttpConfig {
-        listen: match settings.http.listen {
+        listen: match http.listen {
             Listen::Tcp(addr) => ListenAddr::Tcp(addr),
         },
-        server_name: settings.http.server_name,
-        server_port: settings.http.server_port,
-        max_body_size: settings.http.max_body_size,
-        write_timeout: settings.http.write_timeout,
+        server_name: http.server_name,
+        server_port: http.server_port,
+        max_body_size: http.max_body_size,
+        write_timeout: http.write_timeout,
         drain_grace: settings.supervisor.drain_grace(),
-        unsafe_field_names: match settings.http.unsafe_field_names {
+        unsafe_field_names: match http.unsafe_field_names {
             UnsafeFieldNames::Drop => HttpUnsafeFieldNames::Drop,
             UnsafeFieldNames::Reject => HttpUnsafeFieldNames::Reject,
         },
-        superglobals: !matches!(mode, Mode::Dispatcher(_)),
-        keepalive_timeout: settings.http.keepalive_timeout,
+        superglobals: !dispatcher,
+        keepalive_timeout: http.keepalive_timeout,
         middleware,
     };
-    if matches!(mode, Mode::Dispatcher(_)) {
-        std::fs::create_dir_all(&settings.http.uploads.dir).map_err(|e| {
-            anyhow::anyhow!(
-                "creating http.uploads.dir {}: {e}",
-                settings.http.uploads.dir.display()
-            )
-        })?;
-        let probe = settings
-            .http
-            .uploads
-            .dir
-            .join(format!(".rapira-probe-{}", std::process::id()));
-        let _ = remove_file(&probe);
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&probe)
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "http.uploads.dir {} is not writable: {e}",
-                    settings.http.uploads.dir.display()
-                )
-            })?;
-        let _ = remove_file(&probe);
-        match read_dir(&settings.http.uploads.dir) {
-            Ok(entries) => {
-                for entry in entries.flatten() {
-                    if !spool_dir_reclaimable(&entry.file_name().to_string_lossy()) {
-                        continue;
-                    }
-                    let path = entry.path();
-                    if let Err(e) = std::fs::remove_dir_all(&path) {
-                        tracing::warn!(target: "rapira", "sweeping spool dir {}: {e}", path.display());
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!(target: "rapira", "listing {} for the spool sweep: {e}", settings.http.uploads.dir.display());
-            }
-        }
+    if dispatcher {
+        prepare_uploads_dir(&http.uploads.dir)?;
     }
-    let upload_limits = rapira_runtime::multipart::Limits {
-        dir: settings.http.uploads.dir.clone(),
-        max_file_size: settings.http.uploads.max_file_size,
-        max_field_size: settings.http.uploads.max_field_size,
-        max_files: settings.http.uploads.max_files,
-        max_parts: settings.http.uploads.max_parts,
-        max_part_headers: settings.http.uploads.max_part_headers,
+    let uploads = rapira_runtime::multipart::Limits {
+        dir: http.uploads.dir,
+        max_file_size: http.uploads.max_file_size,
+        max_field_size: http.uploads.max_field_size,
+        max_files: http.uploads.max_files,
+        max_parts: http.uploads.max_parts,
+        max_part_headers: http.uploads.max_part_headers,
     };
 
     let mut host: ExtensionRuntime = ExtensionRuntime::new();
@@ -294,10 +267,10 @@ fn serve(args: ServeArgs) -> anyhow::Result<ExitCode> {
     let outcome = worker::worker_body(
         host,
         mode,
-        settings.pool.entrypoint,
-        settings.pool.processes,
-        settings.pool.max_requests,
-        upload_limits,
+        entrypoint,
+        http.pool.processes,
+        http.pool.max_requests,
+        uploads,
         settings.supervisor.process_control_timeout,
     )?;
     if !outcome.joined {

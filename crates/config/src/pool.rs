@@ -2,7 +2,7 @@ use anyhow::bail;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-use crate::{Overrides, config_relative};
+use crate::config_relative;
 
 #[derive(Debug)]
 pub struct PoolSettings {
@@ -33,21 +33,7 @@ impl RunMode {
     }
 }
 
-impl std::str::FromStr for RunMode {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "classic" => Ok(RunMode::Classic),
-            "worker" => Ok(RunMode::Worker),
-            "dispatcher" => Ok(RunMode::Dispatcher),
-            other => Err(format!(
-                "unknown mode `{other}` (expected classic, worker, or dispatcher)"
-            )),
-        }
-    }
-}
-
+/// Embedded by name because serde does not support `#[serde(flatten)]` together with `deny_unknown_fields`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PoolSection {
@@ -63,28 +49,23 @@ fn default_processes() -> usize {
         .unwrap_or(1)
 }
 
+/// `table` is the qualified table of the calling plugin, such as `http.pool`. Every message contains it.
 pub(crate) fn resolve_pool(
     section: PoolSection,
-    cli: &Overrides,
+    table: &str,
     config_dir: Option<&Path>,
 ) -> anyhow::Result<PoolSettings> {
-    let processes = cli
-        .processes
-        .or(section.processes)
-        .unwrap_or_else(default_processes);
+    let processes = section.processes.unwrap_or_else(default_processes);
     if processes == 0 {
-        bail!("pool.processes must be at least 1");
+        bail!("{table}.processes must be at least 1");
     }
 
-    let mode = cli.mode.or(section.mode).unwrap_or_default();
+    let mode = section.mode.unwrap_or_default();
 
-    let entrypoint = if let Some(script) = &cli.entrypoint {
-        std::path::absolute(script)?
-    } else if let Some(ep) = section.entrypoint.as_deref().filter(|s| !s.is_empty()) {
-        config_relative(config_dir, ep)?
-    } else {
-        bail!("no entrypoint: pass a SCRIPT argument or set pool.entrypoint in the config file");
+    let Some(ep) = section.entrypoint.as_deref().filter(|s| !s.is_empty()) else {
+        bail!("{table}.entrypoint is required");
     };
+    let entrypoint = config_relative(config_dir, ep)?;
 
     Ok(PoolSettings {
         entrypoint,
@@ -92,4 +73,18 @@ pub(crate) fn resolve_pool(
         mode,
         max_requests: section.max_requests.unwrap_or(0),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every message contains the table of the caller, so a second pool reports its own keys.
+    #[test]
+    fn resolve_pool_prefixes_errors_with_the_table() {
+        let err = resolve_pool(PoolSection::default(), "grpc.pool", None)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, "grpc.pool.entrypoint is required");
+    }
 }
