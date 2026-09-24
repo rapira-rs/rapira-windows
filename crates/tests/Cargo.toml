@@ -8,18 +8,24 @@ publish = false
 workspace = true
 
 [dependencies]
-anyhow = "1"
-php_sys = { path = "../php_sys" }
-tokio = { version = "1", features = ["sync", "time"] }
-tracing = "0.1"
-# The capture layer uses init_log_capture. tracing-log normalizes bridged records.
+anyhow = { workspace = true }
+extension_api = { workspace = true }
+http = { workspace = true }
+php_sys = { workspace = true }
+tokio = { workspace = true, features = ["rt", "time"] }
+tracing = { workspace = true }
+# The capture layer in init_log_capture.
 tracing-subscriber = "0.3"
-tracing-log = "0.2"
 
 [dev-dependencies]
-extension_api = { workspace = true }
-rapira_runtime = { path = "../runtime" }
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+http-body-util = { workspace = true }
+rapira_http = { workspace = true }
+rapira_runtime = { workspace = true }
+# The streaming end-to-end tests set socket options on a client socket.
+socket2 = "0.6"
+# The read_slice tests write a temporary file.
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 # The end-to-end test harness controls the Rapira process.
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading"] }
 # The end-to-end tests check the log format with serde_json.

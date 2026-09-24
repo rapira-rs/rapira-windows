@@ -264,7 +264,6 @@ dependencies = [
  "http",
  "http-body-util",
  "socket2",
- "tempfile",
  "tokio",
 ]
 
@@ -645,6 +644,7 @@ dependencies = [
  "bytes",
  "cc",
  "crossbeam-channel",
+ "http",
  "rapira_scoreboard",
  "tokio",
  "tracing",
@@ -722,6 +722,7 @@ version = "0.8.0"
 dependencies = [
  "anyhow",
  "extension_api",
+ "http",
  "httparse",
  "memchr",
  "php_sys",
@@ -962,12 +963,16 @@ version = "0.8.0"
 dependencies = [
  "anyhow",
  "extension_api",
+ "http",
+ "http-body-util",
  "php_sys",
+ "rapira_http",
  "rapira_runtime",
  "serde_json",
+ "socket2",
+ "tempfile",
  "tokio",
  "tracing",
- "tracing-log",
  "tracing-subscriber",
  "windows-sys",
 ]

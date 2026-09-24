@@ -20,8 +20,7 @@ int rapira_mode = RAPIRA_MODE_CLASSIC;
 
 ZEND_FUNCTION(Rapira_get_version) {
     ZEND_PARSE_PARAMETERS_NONE();
-
-    RETURN_STRING(RAPIRA_VERSION);
+    RETURN_STRINGL(RAPIRA_VERSION, sizeof(RAPIRA_VERSION) - 1);
 }
 
 // start.rs sets rapira_mode before the PHP thread starts. The value stays constant for the process.

@@ -7,12 +7,11 @@ mod middleware;
 mod prepare;
 pub use middleware::{
     Body, BoxError, BoxFuture, Handler, HttpRequest, HttpResponse, Middleware, Next, Peer,
-    empty_body,
+    Protocol, empty_body,
 };
-pub use prepare::{LISTEN_BACKLOG, ListenAddr, PrepareCtx, PreparedListener};
+pub use prepare::{ListenAddr, PrepareCtx, PreparedListener};
 
 pub type Result<T = (), E = anyhow::Error> = std::result::Result<T, E>;
-pub type FieldLines = Vec<(String, Vec<u8>)>;
 
 /// Lifecycle: `init`, `prepare`, `run`, `shutdown`. The host drops the active `run` future before it calls `shutdown`.
 pub trait Extension: Send + 'static {
@@ -40,14 +39,13 @@ pub trait Backend: Send + Sync + 'static {
 pub enum ReplyEvent {
     Interim {
         status: u16,
-        headers: FieldLines,
+        headers: http::HeaderMap,
     },
     Head {
         status: u16,
-        headers: FieldLines,
+        headers: http::HeaderMap,
         content_length: Option<u64>,
         bodiless: bool,
-        body_coded: bool,
     },
     Chunk(bytes::Bytes),
     File {
@@ -57,7 +55,7 @@ pub enum ReplyEvent {
         len: u64,
     },
     End {
-        trailers: FieldLines,
+        trailers: http::HeaderMap,
         truncated: bool,
     },
 }
@@ -83,66 +81,6 @@ impl Reply {
     pub async fn next(&mut self) -> Option<ReplyEvent> {
         std::future::poll_fn(|cx| self.0.poll_next(cx)).await
     }
-
-    pub async fn collect(mut self) -> Result<Response> {
-        let mut response: Option<Response> = None;
-        let mut end: Option<bool> = None;
-        while let Some(ev) = self.next().await {
-            match ev {
-                ReplyEvent::Interim { .. } => {}
-                ReplyEvent::Head {
-                    status, headers, ..
-                } => {
-                    response = Some(Response {
-                        status,
-                        headers,
-                        body: Vec::new(),
-                    });
-                }
-                ReplyEvent::Chunk(b) => {
-                    if let Some(r) = response.as_mut() {
-                        r.body.extend_from_slice(&b);
-                    }
-                }
-                ReplyEvent::File { file, offset, len } => {
-                    if let Some(r) = response.as_mut() {
-                        r.body.extend_from_slice(&read_slice(&file, offset, len)?);
-                    }
-                }
-                ReplyEvent::End { truncated, .. } => {
-                    end = Some(truncated);
-                    break;
-                }
-            }
-        }
-        match (response, end) {
-            (None, None) => Err(anyhow::anyhow!(
-                "php worker died mid-response (channel closed without a response)"
-            )),
-            (Some(_), None) | (_, Some(true)) => {
-                Err(anyhow::anyhow!("php crashed mid-response; body truncated"))
-            }
-            (None, Some(false)) => Err(anyhow::anyhow!("php produced no response head")),
-            (Some(r), Some(false)) => Ok(r),
-        }
-    }
-}
-
-fn read_slice(file: &std::fs::File, offset: u64, len: u64) -> std::io::Result<Vec<u8>> {
-    use std::os::windows::fs::FileExt;
-    let mut out = vec![0u8; usize::try_from(len).unwrap_or(usize::MAX)];
-    let mut done = 0usize;
-    while done < out.len() {
-        let n = file.seek_read(&mut out[done..], offset + done as u64)?;
-        if n == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "file ended before the reply slice was complete",
-            ));
-        }
-        done += n;
-    }
-    Ok(out)
 }
 
 /// All clones share the host's backend handle. Drop all clones before `run` or `shutdown` completes.
@@ -157,7 +95,7 @@ impl Php {
         Self { backend }
     }
 
-    /// A refusal before dispatch returns a downcastable [`Rejected`]. [`Reply::next`] or [`Reply::collect`] returns response format errors.
+    /// A refusal before dispatch returns a downcastable [`Rejected`]. [`Reply::next`] returns response format errors.
     pub async fn exec(&self, req: Request) -> Result<Reply> {
         self.backend.exec(req).await
     }
@@ -181,9 +119,9 @@ pub struct ClientCert {
 pub struct Tls {
     pub version: String,
     pub cipher: String,
-    /// Tls::$negotiatedProtocol`
+    /// PHP `Tls::$negotiatedProtocol`.
     pub alpn: Option<String>,
-    /// Tls::$requestedServerName`
+    /// PHP `Tls::$requestedServerName`.
     pub server_name: Option<String>,
     pub cert: Option<ClientCert>,
 }
@@ -202,7 +140,7 @@ impl std::fmt::Display for Rejected {
 
 impl std::error::Error for Rejected {}
 
-/// An extension passes `None` when its protocol cannot represent a request property.
+/// An extension passes `None` for a field that its protocol does not carry.
 pub struct Request {
     pub method: String,
     pub uri: String,
@@ -216,146 +154,6 @@ pub struct Request {
     pub server_port: u16,
     pub tls: Option<Tls>,
     pub received_at: Option<f64>,
-    pub headers: FieldLines,
+    pub headers: http::HeaderMap,
     pub body: Vec<u8>,
-}
-
-#[derive(Debug)]
-pub struct Response {
-    pub status: u16,
-    pub headers: FieldLines,
-    pub body: Vec<u8>,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::VecDeque;
-    use std::io::Write;
-    use std::task::{Context, Poll};
-
-    struct Events(VecDeque<ReplyEvent>);
-
-    impl ReplySource for Events {
-        fn poll_next(&mut self, _cx: &mut Context<'_>) -> Poll<Option<ReplyEvent>> {
-            Poll::Ready(self.0.pop_front())
-        }
-    }
-
-    #[test]
-    fn read_slice_uses_each_requested_offset() {
-        let mut file = tempfile::tempfile().unwrap();
-        file.write_all(b"0123456789").unwrap();
-
-        assert_eq!(read_slice(&file, 4, 3).unwrap(), b"456");
-        assert_eq!(read_slice(&file, 0, 2).unwrap(), b"01");
-        assert_eq!(read_slice(&file, 7, 3).unwrap(), b"789");
-    }
-
-    #[test]
-    fn read_slice_rejects_early_eof() {
-        let mut file = tempfile::tempfile().unwrap();
-        file.write_all(b"0123456789").unwrap();
-
-        for (offset, len) in [(8, 5), (10, 1), (12, 1)] {
-            assert_eq!(
-                read_slice(&file, offset, len).unwrap_err().kind(),
-                std::io::ErrorKind::UnexpectedEof
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn collect_rejects_a_file_slice_that_ends_early() {
-        let mut file = tempfile::tempfile().unwrap();
-        file.write_all(b"ab").unwrap();
-        let events = VecDeque::from([
-            ReplyEvent::Head {
-                status: 200,
-                headers: Vec::new(),
-                content_length: Some(5),
-                bodiless: false,
-                body_coded: false,
-            },
-            ReplyEvent::File {
-                file,
-                offset: 0,
-                len: 5,
-            },
-            ReplyEvent::End {
-                trailers: Vec::new(),
-                truncated: false,
-            },
-        ]);
-
-        let error = Reply::new(Box::new(Events(events)))
-            .collect()
-            .await
-            .err()
-            .unwrap();
-        assert_eq!(
-            error.downcast_ref::<std::io::Error>().unwrap().kind(),
-            std::io::ErrorKind::UnexpectedEof
-        );
-    }
-    fn reply(events: Vec<ReplyEvent>) -> Reply {
-        Reply::new(Box::new(Events(events.into())))
-    }
-
-    fn head() -> ReplyEvent {
-        ReplyEvent::Head {
-            status: 200,
-            headers: vec![("x-a".into(), b"1".to_vec())],
-            content_length: None,
-            bodiless: false,
-            body_coded: false,
-        }
-    }
-
-    fn end(truncated: bool) -> ReplyEvent {
-        ReplyEvent::End {
-            trailers: Vec::new(),
-            truncated,
-        }
-    }
-
-    /// Maps the four stream results to the three documented errors and `Ok`.
-    #[tokio::test]
-    async fn collect_maps_stream_outcomes() {
-        let died = reply(Vec::new()).collect().await.unwrap_err();
-        assert!(died.to_string().contains("died mid-response"), "{died:#}");
-
-        let cut = reply(vec![head()]).collect().await.unwrap_err();
-        assert!(cut.to_string().contains("truncated"), "{cut:#}");
-
-        let cut = reply(vec![head(), end(true)]).collect().await.unwrap_err();
-        assert!(cut.to_string().contains("truncated"), "{cut:#}");
-
-        let headless = reply(vec![end(false)]).collect().await.unwrap_err();
-        assert!(
-            headless.to_string().contains("no response head"),
-            "{headless:#}"
-        );
-    }
-
-    /// Concatenates chunks in order and discards interim heads.
-    #[tokio::test]
-    async fn collect_concatenates_the_stream() {
-        let r = reply(vec![
-            ReplyEvent::Interim {
-                status: 103,
-                headers: Vec::new(),
-            },
-            head(),
-            ReplyEvent::Chunk(bytes::Bytes::from_static(b"one,")),
-            ReplyEvent::Chunk(bytes::Bytes::from_static(b"two")),
-            end(false),
-        ])
-        .collect()
-        .await
-        .unwrap();
-        assert_eq!(r.status, 200);
-        assert_eq!(r.headers, vec![("x-a".to_string(), b"1".to_vec())]);
-        assert_eq!(r.body, b"one,two");
-    }
 }

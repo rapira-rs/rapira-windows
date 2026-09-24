@@ -9,12 +9,6 @@ try {
         $req = $ex->getRequest();
         // Repeated calls return the same cached instance.
         $again = $ex->getRequest();
-        $caseKeys = [];
-        foreach ($req->headers as $k => $v) {
-            if (strcasecmp((string)$k, 'x-case') === 0) {
-                $caseKeys[] = $k;
-            }
-        }
         $lines = [
             'method=' . $req->method,
             'uri=' . $req->uri,
@@ -23,9 +17,7 @@ try {
             'protocol=' . $req->protocol,
             // Repeated values remain separate list entries in transmission order.
             'x-probe=' . implode('|', $req->headers['x-probe'] ?? []),
-            // The same name with two different cases produces two keys. Grouping compares the exact bytes.
-            'x-case-keys=' . implode('|', $caseKeys),
-            // The symbol table converts an all-digit field name to an integer key.
+            // an all-digit field name must land as an integer key (symtable)
             'h123=' . implode(',', $req->headers[123] ?? []),
             // A single-letter name remains a string key.
             'h-single=' . implode(',', $req->headers['a'] ?? []),

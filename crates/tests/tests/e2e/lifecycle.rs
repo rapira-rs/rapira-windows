@@ -37,6 +37,49 @@ fn http_round_trip() {
     }
 }
 
+#[test]
+fn retained_spl_tempfile_survives_next_request() {
+    let srv = spawn_with_config(
+        "lifecycle/retained-temp-worker.php",
+        1,
+        "mode = \"worker\"\n",
+    );
+    let timeout = Duration::from_secs(10);
+    wait_workers(&srv, timeout, "1 worker", |p| p.len() == 1);
+    let pid = srv.pid();
+
+    for (index, contents) in ["first export\n", "replacement export\n"]
+        .into_iter()
+        .enumerate()
+    {
+        let (code, body) = http_post(
+            srv.addr,
+            "/export",
+            b"text/plain",
+            contents.as_bytes(),
+            timeout,
+        )
+        .unwrap_or_else(|e| panic!("POST /export: {e}\n{}", diagnostics(&srv)));
+        assert_eq!(code, 200, "\n{}", diagnostics(&srv));
+        assert_eq!(
+            body,
+            format!("{pid}:{}:stored", index * 2 + 1).into_bytes(),
+            "\n{}",
+            diagnostics(&srv)
+        );
+
+        let (code, body) = http_get(srv.addr, "/export", timeout)
+            .unwrap_or_else(|e| panic!("GET /export: {e}\n{}", diagnostics(&srv)));
+        assert_eq!(code, 200, "\n{}", diagnostics(&srv));
+        assert_eq!(
+            body,
+            format!("{pid}:{}:{contents}", index * 2 + 2).into_bytes(),
+            "\n{}",
+            diagnostics(&srv)
+        );
+    }
+}
+
 /// Worker mode startup that does not call handle_request() must fail server startup. The server must not wait indefinitely or continue to return 503.
 #[test]
 fn worker_bootstrap_that_never_serves_failboots() {
@@ -73,6 +116,53 @@ fn worker_survives_client_abandon() {
     let (code, body) = http_get(srv.addr, "/?probe=1", Duration::from_secs(10)).expect("GET");
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
     assert_eq!(body, b"ok", "\n{}", diagnostics(&srv));
+}
+
+/// The next `receive()` discards an unfinalized exchange whose client left. The host logs the discard.
+#[test]
+fn abandoned_exchange_is_discarded_by_next_receive() {
+    let srv = spawn_without_rust_log(
+        "lifecycle/cancelled-receive-worker.php",
+        1,
+        "mode = \"dispatcher\"\n[log]\nlevel = \"debug\"\n",
+    );
+    wait_workers(&srv, BOOT, "1 dispatcher worker", |p| p.len() == 1);
+    let pid = srv.pid();
+    let mut client = Conn::open(srv.addr, BOOT).expect("connect");
+    client
+        .send(b"GET /events HTTP/1.1\r\nHost: e2e\r\n\r\n")
+        .expect("send /events");
+    let (status, fields) = client
+        .read_head(BOOT)
+        .unwrap_or_else(|e| panic!("/events head: {e}\n{}", diagnostics(&srv)));
+    assert_eq!(status, 200, "\n{}", diagnostics(&srv));
+    assert!(
+        fields
+            .iter()
+            .any(|(k, v)| k == "transfer-encoding" && v == "chunked")
+            && !fields.iter().any(|(k, _)| k == "content-length"),
+        "the response must remain chunked: {fields:?}\n{}",
+        diagnostics(&srv)
+    );
+    client
+        .read_body_until(b"data: connected\n\n", BOOT)
+        .unwrap_or_else(|e| panic!("/events body: {e}\n{}", diagnostics(&srv)));
+    client.abandon();
+
+    let (status, body) = http_get(srv.addr, "/next", BOOT)
+        .unwrap_or_else(|e| panic!("GET /next: {e}\n{}", diagnostics(&srv)));
+    assert_eq!(status, 200, "\n{}", diagnostics(&srv));
+    assert_eq!(
+        body,
+        format!("{pid}:2:cancelled").into_bytes(),
+        "the next request must preserve the worker and script cycle\n{}",
+        diagnostics(&srv)
+    );
+    assert!(
+        wait_log_contains(&srv, "discarded an unfinalized exchange", BOOT),
+        "the discard must be logged\n{}",
+        diagnostics(&srv)
+    );
 }
 
 /// An HTTP field that php-src permits but the HTTP server cannot represent must remove only that field from the response.
@@ -860,9 +950,9 @@ fn pool_probe_child() {
 }
 
 fn pool_request(script: &std::path::Path) -> php_sys::Request {
-    let mut request = tests::req("/", "unused.php");
-    request.script_filename = script.to_path_buf();
-    request.document_root = script.parent().unwrap().to_string_lossy().into_owned();
+    let request = tests::req("/", "unused.php");
+    // `req` points the script paths at a crate fixture. The pool runs the end-to-end fixture.
+    php_sys::set_script(script);
     request
 }
 
@@ -882,7 +972,7 @@ fn prove_per_thread_recycle() {
     let deadline = Instant::now() + Duration::from_secs(40);
     loop {
         let responses: Vec<_> = (0..16)
-            .map(|_| handle.handle_blocking(pool_request(&script)).unwrap())
+            .map(|_| tests::submit(&handle, pool_request(&script)).unwrap())
             .collect();
         for response in responses {
             let response = tests::drain_resp(response);
@@ -942,7 +1032,7 @@ fn prove_memory_bound() {
     let mut samples = Vec::new();
     let mut completed = false;
     for _ in 0..104 {
-        let response = tests::drain_resp(handle.handle_blocking(pool_request(&script)).unwrap());
+        let response = tests::drain_resp(tests::submit(&handle, pool_request(&script)).unwrap());
         assert_eq!(response.status(), 200);
         assert!(response.ended && !response.truncated);
         let values: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
@@ -990,7 +1080,7 @@ fn prove_interruptible_backoff() {
     let handle = pool.handle();
     // Four rejected jobs let each interpreter reach its fifth failed start.
     let responses: Vec<_> = (0..64)
-        .map(|_| handle.handle_blocking(pool_request(&script)).unwrap())
+        .map(|_| tests::submit(&handle, pool_request(&script)).unwrap())
         .collect();
     let deadline = Instant::now() + Duration::from_secs(25);
     loop {

@@ -25,15 +25,12 @@ namespace Rapira {
         case Dispatcher;
     }
 
-    /** Represents one unit of work from a dispatcher. The host creates it. The concrete type provides the finalization methods. */
+    /** Represents one unit of work from a dispatcher. The host creates it. The concrete type provides the finalization methods. When code drops the last reference to an unfinalized unit, the host fails the unit. */
     interface Work
     {
         public function isFinalized(): bool;
 
         public function isCancelled(): bool;
-
-        /** Reports an unfinalized unit to the host when code drops the last reference. The host then fails the unit. A finalized, discarded, or referenced unit is not changed. */
-        public function __destruct();
     }
 
     /** Provides an immutable counter snapshot for monitoring. */

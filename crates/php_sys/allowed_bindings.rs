@@ -3,13 +3,13 @@ bind! {
     sapi_globals_struct, zend_executor_globals, php_core_globals, zend_compiler_globals,
     zend_file_handle, zend_module_entry, zend_string, zval, HashTable, zend_long,
     zend_fcall_info, zend_fcall_info_cache,
-    sapi_startup, sapi_shutdown, sapi_activate, php_module_startup, php_module_shutdown, php_request_startup, php_request_shutdown,
+    sapi_startup, sapi_shutdown, php_module_startup, php_module_shutdown, php_request_startup,
     php_tsrm_startup_ex, tsrm_shutdown, ts_resource_ex, ts_free_thread,
     php_execute_script, zend_error, zend_stream_init_filename, zend_destroy_file_handle,
-    php_register_variable_safe, php_output_deactivate, rapira_mode, RAPIRA_MODE_CLASSIC, RAPIRA_MODE_WORKER,
+    php_register_variable_safe, rapira_mode, RAPIRA_MODE_CLASSIC, RAPIRA_MODE_WORKER,
     RAPIRA_MODE_DISPATCHER,
     // Both parts of the linked libphp version check.
-    rapira_headers_php_version_id, php_version_id,
+    PHP_VERSION_ID, php_version_id,
     // Embedded object layouts. wrapper.h contains the authoritative definitions.
     rapira_exchange_obj, rapira_dispatcher_info_obj,
     // Class entry globals that MINIT writes and the Rust builder reads.
@@ -31,10 +31,10 @@ bind! {
     zend_throw_error, zend_value_error, zend_throw_exception,
     // instanceof_function is inline, and PHP exports only its slow path.
     zend_update_property_str, instanceof_function_slow, zend_zval_value_name, IS_OBJECT,
-    // add_assoc_str, add_index_zval, and smart_str_free are inline. These functions and the shim provide the exported operations.
     zend_read_property, zend_get_exception_base, zend_ce_throwable, php_json_encode,
-    smart_str, PHP_JSON_PARTIAL_OUTPUT_ON_ERROR, add_assoc_stringl_ex,
-    zend_hash_index_update, rapira_smart_str_free,
+    smart_str, PHP_JSON_PARTIAL_OUTPUT_ON_ERROR,
+    // add_assoc_str, add_index_zval, and smart_str_free are inline. These functions and the shim provide the exported operations.
+    add_assoc_stringl_ex, zend_hash_index_update, rapira_smart_str_free,
     // zend_update_property functions change EG(fake_scope) to initialize readonly properties.
     object_init_ex, zend_update_property, zend_update_property_stringl,
     zend_update_property_long, zend_update_property_double, zend_update_property_null,
@@ -47,9 +47,9 @@ bind! {
     // zend_string_init is inline. The exported interner function pointer supports strings created during startup.
     zend_hash_str_update, rapira_zend_string_init_interned,
     php_default_post_reader, php_default_treat_data, php_default_input_filter,
-    php_call_shutdown_functions, zend_observer_fcall_end_all, php_handle_auth_data, php_handle_aborted_connection,
-    SAPI_HEADER_SENT_SUCCESSFULLY, SAPI_HEADER_SEND_FAILED, TRACK_VARS_FILES, IS_UNDEF, IS_STRING, // php-src defines the E_CORE and E_FATAL_ERRORS groups.
+    php_handle_auth_data,
+    SAPI_HEADER_SENT_SUCCESSFULLY, SAPI_HEADER_SEND_FAILED, IS_UNDEF, IS_STRING, // php-src defines the E_CORE and E_FATAL_ERRORS groups.
     E_WARNING, E_CORE_WARNING, E_COMPILE_WARNING, E_USER_WARNING,
     E_NOTICE, E_USER_NOTICE, E_DEPRECATED, E_USER_DEPRECATED,
-    E_CORE, E_FATAL_ERRORS,
+    E_CORE, E_FATAL_ERRORS, // php-src's own groupings
 }

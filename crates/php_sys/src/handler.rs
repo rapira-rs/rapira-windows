@@ -34,9 +34,8 @@ impl std::error::Error for HandleError {}
 
 #[derive(Clone)]
 pub struct RapiraHandle {
-    intake: Sender<Context>,
+    intake: Sender<Box<Context>>,
     pending: Arc<AtomicUsize>,
-    superglobals: bool,
     dispatcher: bool,
 }
 
@@ -46,7 +45,6 @@ impl Rapira {
         RapiraHandle {
             intake: intake.tx.clone(),
             pending: intake.pending.clone(),
-            superglobals: self.superglobals,
             dispatcher: self.dispatcher,
         }
     }
@@ -59,19 +57,19 @@ fn now_unix_f64() -> f64 {
         .unwrap_or(0.0)
 }
 
-struct PendingGuard(Option<Arc<AtomicUsize>>);
+struct PendingGuard<'a>(Option<&'a AtomicUsize>);
 
-impl PendingGuard {
-    fn arm(pending: &Arc<AtomicUsize>) -> Self {
+impl<'a> PendingGuard<'a> {
+    fn arm(pending: &'a AtomicUsize) -> Self {
         pending.fetch_add(1, Ordering::Relaxed);
-        Self(Some(pending.clone()))
+        Self(Some(pending))
     }
     fn disarm(mut self) {
         self.0 = None;
     }
 }
 
-impl Drop for PendingGuard {
+impl Drop for PendingGuard<'_> {
     fn drop(&mut self) {
         if let Some(pending) = self.0.take() {
             pending.fetch_sub(1, Ordering::Relaxed);
@@ -88,7 +86,7 @@ impl RapiraHandle {
     pub async fn handle(&self, mut req: Request) -> Result<mpsc::Receiver<Frame>, HandleError> {
         req.received_at.get_or_insert_with(now_unix_f64);
         let (tx, rx) = mpsc::channel::<Frame>(FRAME_CAP);
-        let mut job = Context::new(req, tx, self.superglobals);
+        let mut job = Box::new(Context::new(req, tx, !self.dispatcher));
         let pending = PendingGuard::arm(&self.pending);
         let deadline = Instant::now() + INTAKE_WAIT;
         loop {
@@ -112,20 +110,5 @@ impl RapiraHandle {
                 Err(TrySendError::Disconnected(_)) => return Err(HandleError::Stopped),
             }
         }
-    }
-
-    pub fn handle_blocking(&self, mut req: Request) -> Result<mpsc::Receiver<Frame>, HandleError> {
-        req.received_at.get_or_insert_with(now_unix_f64);
-        let (tx, rx) = mpsc::channel::<Frame>(FRAME_CAP);
-        let pending = PendingGuard::arm(&self.pending);
-        if self
-            .intake
-            .send(Context::new(req, tx, self.superglobals))
-            .is_err()
-        {
-            return Err(HandleError::Stopped);
-        }
-        pending.disarm();
-        Ok(rx)
     }
 }

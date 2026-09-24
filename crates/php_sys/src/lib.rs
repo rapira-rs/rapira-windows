@@ -1,4 +1,3 @@
-#[allow(clippy::all)]
 pub mod bindings;
 
 pub mod callbacks;
@@ -8,7 +7,6 @@ pub mod diagnostics;
 pub mod dispatcher;
 pub mod exchange;
 pub mod executor;
-pub(crate) mod fold;
 pub mod handler;
 pub mod module;
 pub mod quota;
@@ -22,13 +20,14 @@ pub(crate) mod zend;
 use std::ffi::c_int;
 
 pub use bindings::*;
+pub use context::set_script;
 pub use exchange::set_sendfile_root;
 pub use handler::{HandleError, RapiraHandle};
 pub use quota::PoolHooks;
 pub use start::Rapira;
 pub use types::{Frame, Mode, Request, ResponseHead};
 
-// Zend SUCCESS and FAILURE values differ between php-src versions, so these constants do not come from the headers.
+// bindgen names the Zend SUCCESS and FAILURE constants differently between php-src versions, so the values are hardcoded here.
 pub const SUCCESS: c_int = 0;
 pub const FAILURE: c_int = -1;
 

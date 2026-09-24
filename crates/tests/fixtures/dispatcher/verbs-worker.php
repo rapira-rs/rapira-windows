@@ -163,11 +163,6 @@ try {
             @trigger_error('bail with unit out', E_USER_ERROR); // The bailout ends the unit with the cycle.
             continue;
         }
-        if ($probe === 'destruct-explicit') {
-            $ex->__destruct(); // An explicit call does not change a referenced unit.
-            $ex->writeBody('explicit-destruct-ok');
-            continue;
-        }
         if ($probe === 'head204') {
             $ex->writeHead(204);
             $ex->writeBody('dropped-at-seal');

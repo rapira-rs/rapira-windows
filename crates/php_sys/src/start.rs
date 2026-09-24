@@ -14,7 +14,7 @@ use types::Context;
 
 use crate::quota::{self, PoolHooks};
 use crate::rapira_worker::{WorkerExit, rapira_worker};
-use crate::scoreboard::{Event, ScoreboardSnapshot, sb_set, sb_update};
+use crate::scoreboard::{Event, sb_set, sb_update};
 use crate::{classic_worker::classic_worker, types::Mode, *};
 
 const QUICK_CRASH: Duration = Duration::from_secs(10);
@@ -26,13 +26,13 @@ thread_local! {
 }
 
 pub(crate) struct Intake {
-    pub(crate) tx: Sender<Context>,
+    pub(crate) tx: Sender<Box<Context>>,
     pub(crate) pending: Arc<AtomicUsize>,
 }
 
 #[derive(Clone)]
 struct JobRx {
-    rx: Receiver<Context>,
+    rx: Receiver<Box<Context>>,
     pending: Arc<AtomicUsize>,
     stop: Receiver<()>,
     stopping: Arc<AtomicBool>,
@@ -77,7 +77,6 @@ impl Drop for PhpModule {
 
 pub struct Rapira {
     pub(crate) intake: Option<Intake>,
-    pub(crate) superglobals: bool,
     pub(crate) dispatcher: bool,
     workers: Vec<JoinHandle<()>>,
     board: rapira_scoreboard::Scoreboard,
@@ -95,9 +94,9 @@ fn php_series(id: u32) -> (u32, u32) {
 
 /// bindgen binds Zend structures at build time. A libphp from another PHP minor has a different ABI because `sapi_startup` receives a structure with a different layout.
 fn check_linked_php() -> anyhow::Result<()> {
-    // SAFETY: Both accessors read a compile-time constant and do not access engine state, so they are valid before startup.
-    let (headers, linked) = unsafe { (rapira_headers_php_version_id(), php_version_id()) };
-    let (want, got) = (php_series(headers), php_series(linked));
+    // SAFETY: php_version_id() returns a compile-time constant and does not access engine state, so it is valid before startup.
+    let linked = unsafe { php_version_id() };
+    let (want, got) = (php_series(PHP_VERSION_ID), php_series(linked));
     anyhow::ensure!(
         want == got,
         "linked libphp is PHP {}.{}, but this rapira was built against PHP {}.{}. \
@@ -125,9 +124,7 @@ impl Rapira {
             rapira_tsrmls_cache_update();
             rapira_process_init();
             sapi_startup(&mut module);
-            module
-                .startup
-                .is_some_and(|start| start(&mut module) == SUCCESS)
+            php_module_startup(&mut module, &raw mut rapira_module_entry) == SUCCESS
         };
         let module = PhpModule;
         if !started {
@@ -136,7 +133,6 @@ impl Rapira {
             return Err(anyhow::anyhow!("php_module_startup failed"));
         }
 
-        let superglobals = !matches!(mode, Mode::Dispatcher(_));
         let dispatcher = matches!(mode, Mode::Dispatcher(_));
         // SAFETY: safe, trust me, I'm a developer
         unsafe {
@@ -148,7 +144,7 @@ impl Rapira {
         }
 
         let pending = Arc::new(AtomicUsize::new(0));
-        let (intake_tx, intake_rx) = bounded::<Context>(1024);
+        let (intake_tx, intake_rx) = bounded::<Box<Context>>(1024);
         let (stop_tx, stop_rx) = bounded(0);
         let stopping = Arc::new(AtomicBool::new(false));
         let job_rx = JobRx {
@@ -165,7 +161,6 @@ impl Rapira {
                 tx: intake_tx,
                 pending,
             }),
-            superglobals,
             dispatcher,
             workers: Vec::with_capacity(processes),
             board,
@@ -358,15 +353,14 @@ pub(crate) fn note_handled() {
     });
 }
 
-pub(crate) fn pull_job() -> Option<Context> {
+pub(crate) fn pull_job() -> Option<Box<Context>> {
     match pull_job_wait(None) {
-        Pulled::Job(job) => Some(*job),
+        Pulled::Job(job) => Some(job),
         _ => None,
     }
 }
 
 pub(crate) enum Pulled {
-    // Use a `Box` because a `Context` is approximately 600 bytes and the other variants are empty.
     Job(Box<Context>),
     Timeout,
     Empty,
@@ -401,7 +395,7 @@ pub(crate) fn pull_job_wait(timeout: Option<Duration>) -> Pulled {
         match got {
             Ok(job) => {
                 job_r.pending.fetch_sub(1, Ordering::Relaxed);
-                Pulled::Job(Box::new(job))
+                Pulled::Job(job)
             }
             Err(RecvTimeoutError::Timeout) => Pulled::Timeout,
             Err(RecvTimeoutError::Disconnected) => Pulled::Closed,
@@ -429,7 +423,7 @@ pub(crate) fn pull_job_try() -> Pulled {
         match got {
             Ok(job) => {
                 job_r.pending.fetch_sub(1, Ordering::Relaxed);
-                Pulled::Job(Box::new(job))
+                Pulled::Job(job)
             }
             Err(TryRecvError::Empty) => Pulled::Empty,
             Err(TryRecvError::Disconnected) => Pulled::Closed,
@@ -542,27 +536,34 @@ mod tests {
         );
     }
 
-    fn timer_probe_request(script: &std::path::Path) -> types::Request {
+    /// Submits through the production intake from a synchronous test.
+    fn submit(
+        handle: &RapiraHandle,
+        req: types::Request,
+    ) -> Result<tokio::sync::mpsc::Receiver<types::Frame>, HandleError> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(handle.handle(req))
+    }
+
+    fn timer_probe_request() -> types::Request {
         types::Request {
             method: "GET".into(),
             uri: "/".into(),
             target: None,
             authority: None,
             https: false,
-            query: String::new(),
             protocol: "HTTP/1.1".into(),
             remote: types::Addr::Inet("127.0.0.1:12345".parse().unwrap()),
             server: types::Addr::Inet("127.0.0.1:8080".parse().unwrap()),
             server_name: "localhost".into(),
             server_port: 8080,
-            script_name: "/worker.php".into(),
-            document_root: script.parent().unwrap().to_string_lossy().into_owned(),
-            script_filename: script.into(),
-            headers: Vec::new(),
-            server_vars: Vec::new(),
+            headers: http::HeaderMap::new(),
             content_type: None,
             content_length: 0,
-            body: types::Body::Raw(Box::new(std::io::empty())),
+            body: types::Body::Raw(std::io::Cursor::new(Vec::new())),
             received_at: None,
             tls: None,
         }
@@ -597,9 +598,7 @@ mod tests {
         .unwrap();
         let handle = rapira.handle();
         for _ in 0..3 {
-            let mut frames = handle
-                .handle_blocking(timer_probe_request(&script))
-                .unwrap();
+            let mut frames = submit(&handle, timer_probe_request()).unwrap();
             let mut body = Vec::new();
             let mut complete = false;
             while let Some(frame) = frames.blocking_recv() {
@@ -620,7 +619,7 @@ mod tests {
         assert_eq!(TIMER_PROBE.load(Ordering::Acquire), TIMER_CANCELLED);
         assert!(rapira.shutdown());
         assert!(matches!(
-            handle.handle_blocking(timer_probe_request(&script)),
+            submit(&handle, timer_probe_request()),
             Err(HandleError::Stopped)
         ));
 
@@ -675,9 +674,7 @@ try {
         let survived = script.with_extension("php.survived");
         let rapira = Rapira::start(Mode::Dispatcher(script.clone())).unwrap();
         let handle = rapira.handle();
-        let mut frames = handle
-            .handle_blocking(timer_probe_request(&script))
-            .unwrap();
+        let mut frames = submit(&handle, timer_probe_request()).unwrap();
 
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while (!blocking.exists() || frames.len() < RESPONSE_FRAME_CAP)

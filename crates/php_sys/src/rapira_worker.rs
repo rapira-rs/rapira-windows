@@ -92,7 +92,7 @@ fn run_cycle(script: &Path) -> Cycle {
 
     if crate::exchange::closed_seen() {
         Cycle::Stop
-    } else if recycle || crate::exchange::served_any() || crate::exchange::received_any() {
+    } else if recycle || crate::exchange::received_any() {
         Cycle::Recycle
     } else {
         Cycle::Failed
@@ -201,7 +201,7 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
 }
 
 /// The first call ends the startup request that php_request_startup() created before the worker processes a job.
-fn next_job() -> Option<Context> {
+fn next_job() -> Option<Box<Context>> {
     WORKER.with_borrow_mut(|w| {
         let wc = w.as_mut()?;
         if std::mem::take(&mut wc.first_call) {

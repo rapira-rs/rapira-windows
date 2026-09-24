@@ -10,10 +10,14 @@ workspace = true
 [dependencies]
 anyhow = { workspace = true }
 tracing = { workspace = true }
-tokio = { workspace = true, features = ["sync", "rt", "time"] }
+tokio = { workspace = true, features = ["time"] }
 rapira_scoreboard = { workspace = true }
 bytes = { workspace = true }
 crossbeam-channel = "0.5"
+http = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt"] }
 
 [build-dependencies]
 anyhow = { workspace = true }

@@ -4,7 +4,7 @@ use anyhow::Context;
 use socket2::{Domain, Protocol, Socket, Type};
 
 /// The socket provider clamps this requested backlog to a supported value. https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-listen
-pub const LISTEN_BACKLOG: i32 = 65535;
+const LISTEN_BACKLOG: i32 = 65535;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ListenAddr {
@@ -29,17 +29,19 @@ impl PreparedListener {
 }
 
 /// Prepares listener sockets before PHP starts.
-pub struct PrepareCtx;
-
-impl Default for PrepareCtx {
-    fn default() -> Self {
-        Self::new()
-    }
+#[derive(Default)]
+pub struct PrepareCtx {
+    addrs: Vec<ListenAddr>,
 }
 
 impl PrepareCtx {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// The resolved address of each bound listener, in bind order. A test reads the port of a listener that was bound to port 0.
+    pub fn listener_addrs(&self) -> Vec<ListenAddr> {
+        self.addrs.clone()
     }
 
     /// Sets nonblocking mode before the extension creates a Tokio listener. https://docs.rs/tokio/latest/tokio/net/struct.TcpListener.html#method.from_std
@@ -58,6 +60,7 @@ impl PrepareCtx {
             .as_socket()
             .expect("inet socket has an inet local addr");
         let addr = ListenAddr::Tcp(resolved);
+        self.addrs.push(addr.clone());
         Ok(PreparedListener {
             listener: socket.into(),
             addr,

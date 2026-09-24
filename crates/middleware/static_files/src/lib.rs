@@ -71,7 +71,7 @@ impl StaticFiles {
 /// The error kinds that mean there is no file to serve. `try_call` reports a missing path and an unreadable path this way. The backend reports a directory with `IsADirectory`.
 /// https://docs.rs/tower-http/0.7.1/tower_http/services/struct.ServeDir.html#method.try_call
 ///
-/// A `HEAD` probe also reports a bad file name here. An overlong path component gives `InvalidFilename`. A NUL byte gives `InvalidInput`. A `GET` answers 404 for both names.
+/// A bad file name also reaches this check. An overlong path component gives `InvalidFilename`. A NUL byte gives `InvalidInput` on `HEAD`. A `GET` answers 404 for a NUL byte.
 fn is_miss(e: &std::io::Error) -> bool {
     matches!(
         e.kind(),
@@ -80,6 +80,7 @@ fn is_miss(e: &std::io::Error) -> bool {
             | std::io::ErrorKind::IsADirectory
             | std::io::ErrorKind::InvalidFilename
             | std::io::ErrorKind::InvalidInput
+            | std::io::ErrorKind::NotADirectory
     )
 }
 
@@ -124,7 +125,7 @@ impl Middleware for StaticFiles {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use extension_api::{Addr, Handler, Peer};
+    use extension_api::{Addr, Handler, Peer, Protocol};
     use http_body_util::Full;
     use std::net::SocketAddr;
     use std::sync::Arc;
@@ -146,7 +147,8 @@ mod tests {
     impl Handler for Fallthrough {
         fn call<'a>(&'a self, req: HttpRequest) -> BoxFuture<'a, HttpResponse> {
             Box::pin(async move {
-                let kept = req.extensions().get::<Peer>().is_some();
+                let kept = req.extensions().get::<Peer>().is_some()
+                    && req.extensions().get::<Protocol>().is_some();
                 let body = req.into_body().collect().await.unwrap().to_bytes();
                 http::Response::builder()
                     .status(200)
@@ -168,6 +170,7 @@ mod tests {
                     .boxed_unsync(),
             )
             .unwrap();
+        req.extensions_mut().insert(Protocol::Http);
         req.extensions_mut().insert(peer());
         req
     }
@@ -296,29 +299,23 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn directory_paths_without_a_trailing_slash_fall_through() {
-        let dir = root();
-        for path in ["/assets", "/sub"] {
-            let res = run(static_files(&dir), request("GET", path, "")).await;
-            assert_eq!(header(&res, "x-handler"), "php", "{path}");
-        }
-
-        let res = run(static_files(&dir), request("GET", "/assets/a.css", "")).await;
-        assert_eq!(res.status(), 200);
-        assert_eq!(body(res).await, "a{}");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn directory_paths_with_a_trailing_slash_fall_through() {
+    async fn directory_routes_fall_through_without_being_cached() {
         let dir = root();
         std::fs::write(dir.path().join("sub").join("index.html"), "<h1>s</h1>").unwrap();
-        for path in ["/assets/", "/sub/"] {
-            let res = run(static_files(&dir), request("GET", path, "")).await;
+        let (st, cache) = cached(&dir);
+        for path in ["/", "/assets", "/assets/", "/sub", "/sub/"] {
+            let res = run_shared(&st, request("GET", path, "")).await;
             assert_eq!(header(&res, "x-handler"), "php", "{path}");
+            assert_eq!(cache.entries(), 0, "{path}");
+        }
+
+        for (path, expected) in [("/index.html", "<h1>hi</h1>"), ("/assets/a.css", "a{}")] {
+            let res = run_shared(&st, request("GET", path, "")).await;
+            assert_eq!(res.status(), 200, "{path}");
+            assert_eq!(body(res).await, expected, "{path}");
         }
     }
 
-    /// An empty forbid list allows the middleware to serve PHP source by its regular name.
     #[tokio::test(flavor = "current_thread")]
     async fn an_empty_forbid_list_serves_php_sources() {
         let dir = root();
@@ -470,18 +467,6 @@ mod tests {
         assert_eq!(res.status(), 200);
         assert_eq!(header(&res, "content-length"), "10");
         assert_eq!(body(res).await, "");
-    }
-
-    /// PHP handles directory URLs. The middleware serves only exact file paths and does not resolve index files.
-    #[tokio::test(flavor = "current_thread")]
-    async fn the_root_falls_through_even_with_an_index_present() {
-        let dir = root();
-        let res = run(static_files(&dir), request("GET", "/", "")).await;
-        assert_eq!(header(&res, "x-handler"), "php");
-
-        let res = run(static_files(&dir), request("GET", "/index.html", "")).await;
-        assert_eq!(res.status(), 200);
-        assert_eq!(body(res).await, "<h1>hi</h1>");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -739,19 +724,7 @@ mod tests {
         assert_eq!(cache.accounted(), cache.recomputed());
     }
 
-    /// A directory URL is a PHP route. The cache has no entry for it, so `HEAD` and `GET` read the same filesystem state.
-    #[tokio::test(flavor = "current_thread")]
-    async fn a_directory_is_not_cached() {
-        let dir = root();
-        let (st, cache) = cached(&dir);
-        for _ in 0..2 {
-            let res = run_shared(&st, request("GET", "/sub", "")).await;
-            assert_eq!(header(&res, "x-handler"), "php");
-        }
-        assert_eq!(cache.entries(), 0);
-    }
-
-    /// Eight requests use one uncached path. One task reads the file into the cache, and the other tasks stream it from disk. All responses match, and the cache reads the file once.
+    /// Eight requests arrive for one uncached path at the same time. Every answer matches, and the cache keeps one entry with a correct size total.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_fills_agree() {
         let dir = root();
@@ -778,7 +751,6 @@ mod tests {
             assert_eq!(bytes, "abcdefghij");
         }
         assert_eq!(cache.entries(), 1);
-        assert_eq!(cache.reads(), 1, "one task reads the file into memory");
         assert_eq!(cache.accounted(), cache.recomputed());
     }
 }

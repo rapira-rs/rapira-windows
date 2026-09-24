@@ -10,7 +10,7 @@ Connections are served by hyper's http1 builder. Each request runs through admis
 
 ## Middleware
 
-`Config.middleware` holds an `extension_api::Middleware` chain in call order. Each middleware receives `http::Request<Body>` and returns `http::Response<Body>`. It calls `next.run(req)` or returns its own response. Request extensions contain `Peer` and private request count state. Keep the extensions when you rebuild a request. Do not keep them after the call. Admission checks run before the chain.
+`Config.middleware` holds an `extension_api::Middleware` chain in call order. Each middleware receives `http::Request<Body>` and returns `http::Response<Body>`. The request extensions contain `Protocol`, `Peer`, and private request count state. A middleware calls `next.run(req)` or returns its own response. Keep the extensions when you rebuild a request. Do not keep them after the call. Admission checks run before the chain. A request that fails them does not reach the middleware.
 
 Built-in middleware lives under `crates/middleware`, one crate per middleware. The `middleware` list in `[http]` selects the built-in middleware and sets the chain order. `rapira_static_files::StaticFiles` serves files from `[http.static].root`. A miss falls through the chain to PHP. A permission error or a bad file name is also a miss. Any other read failure answers 500. That request does not reach PHP.
 
@@ -42,7 +42,7 @@ On the stop signal the accept loop ends immediately, idle keepalive connections 
 
 ## Configuration
 
-`Extension::init(config)` receives everything; `rapira serve` resolves CLI flags, `rapira.toml` and defaults into this struct and registers the extension.
+`Extension::init(config)` receives everything; `rapira serve` resolves `rapira.toml` and defaults into this struct. It then registers the extension.
 
 | Field                | Meaning                                                                    |
 | -------------------- | -------------------------------------------------------------------------- |

@@ -31,7 +31,7 @@ impl Default for Limits {
 }
 
 #[derive(Debug)]
-pub enum ParseError {
+pub(super) enum ParseError {
     Rejected(Rejected),
     Io(std::io::Error),
 }
@@ -66,13 +66,13 @@ fn trim_ows(mut b: &[u8]) -> &[u8] {
     b
 }
 
-pub fn is_multipart(content_type: &[u8]) -> bool {
+pub(super) fn is_multipart(content_type: &[u8]) -> bool {
     let media = content_type.split(|&b| b == b';').next().unwrap_or(b"");
     trim_ows(media).eq_ignore_ascii_case(b"multipart/form-data")
 }
 
 /// Parses without case sensitivity. It removes quotes from a quoted value and ends an unquoted value at `,` as specified in php-src rfc1867.c:707-751. RFC 2046 section 5.1.1 limits the result to 70 characters. https://www.rfc-editor.org/rfc/rfc2046#section-5.1.1
-pub fn boundary(content_type: &[u8]) -> Result<Vec<u8>, ParseError> {
+pub(super) fn boundary(content_type: &[u8]) -> Result<Vec<u8>, ParseError> {
     for seg in content_type.split(|&b| b == b';').skip(1) {
         let Some(eq) = memchr::memchr(b'=', seg) else {
             continue;
@@ -163,7 +163,11 @@ fn next_delimiter(
 
 /// Parses a nonempty body. The API represents an empty body as a string where `$body === ''`.
 /// https://www.rfc-editor.org/rfc/rfc7578
-pub fn parse(body: &[u8], boundary: &[u8], limits: &Limits) -> Result<MultipartBody, ParseError> {
+pub(super) fn parse(
+    body: &[u8],
+    boundary: &[u8],
+    limits: &Limits,
+) -> Result<MultipartBody, ParseError> {
     let delim: Vec<u8> = [b"--".as_slice(), boundary].concat();
     let finder = memmem::Finder::new(&delim);
 
@@ -219,20 +223,6 @@ fn split_head(part: &[u8]) -> Result<(&[u8], &[u8]), ParseError> {
         }
     }
     Err(bad("part without a header/body separator"))
-}
-
-/// httparse parses CRLF line endings only.
-fn normalize_crlf(head: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(head.len() + 8);
-    let mut prev = 0u8;
-    for &b in head {
-        if b == b'\n' && prev != b'\r' {
-            out.push(b'\r');
-        }
-        out.push(b);
-        prev = b;
-    }
-    out
 }
 
 /// Gets the name and filename from a Content-Disposition value.
@@ -317,10 +307,9 @@ fn parse_part(
     files: &mut Vec<UploadedFile>,
 ) -> Result<(), ParseError> {
     let (head, body) = split_head(part)?;
-    let head = normalize_crlf(head);
 
     let mut hbuf = vec![httparse::EMPTY_HEADER; limits.max_part_headers];
-    let parsed = match httparse::parse_headers(&head, &mut hbuf) {
+    let parsed = match httparse::parse_headers(head, &mut hbuf) {
         Ok(httparse::Status::Complete((_, headers))) => headers,
         Ok(httparse::Status::Partial) => return Err(bad("truncated part header section")),
         Err(httparse::Error::TooManyHeaders) => {
@@ -343,7 +332,10 @@ fn parse_part(
         }
         headers.push((h.name.to_owned(), h.value.to_vec()));
     }
-    let disposition = disposition.ok_or_else(|| bad("part without content-disposition"))?;
+    let Some(disposition) = disposition else {
+        return Err(bad("part without content-disposition"));
+    };
+
     let (name, filename) = disposition_params(disposition)?;
     let Some(name) = name.filter(|n| !n.is_empty()) else {
         return Err(bad(

@@ -1,8 +1,9 @@
 use extension_api::{Extension, Php, PrepareCtx};
+use http::header::CONTENT_TYPE;
 use php_sys::RapiraHandle;
 use std::future::Future;
 use std::io::Cursor;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -52,17 +53,12 @@ impl ExtensionRuntime {
         Self::default()
     }
 
-    pub fn register<E: Extension>(&mut self, config: E::Config) -> anyhow::Result<()> {
+    pub fn register<E: Extension>(&mut self, config: E::Config) {
         let ext = E::init(config);
-        let name = ext.name().to_string();
-        if self.exts.iter().any(|e| e.name == name) {
-            anyhow::bail!("duplicate extension {name:?}");
-        }
         self.exts.push(Registered {
-            name,
+            name: ext.name().to_string(),
             ext: Box::new(ext),
         });
-        Ok(())
     }
 
     /// Runs every extension's `prepare` in registration order before PHP boots.
@@ -79,7 +75,7 @@ impl ExtensionRuntime {
         self.run_with_options(rapira, script, RuntimeOptions::default())
     }
 
-    /// One runtime thread runs the extension tasks and their shutdown timeouts.
+    /// One worker thread runs the `drive` future of each extension.
     pub fn run_with_options(
         self,
         rapira: RapiraHandle,
@@ -87,7 +83,7 @@ impl ExtensionRuntime {
         opts: RuntimeOptions,
     ) -> Running {
         let grace = opts.grace;
-        let php = Php::new(Arc::new(RapiraBackend::new(rapira, script, opts)));
+        let php = Php::new(Arc::new(RapiraBackend::new(rapira, &script, opts)));
         let (stop_tx, stop_rx) = watch::channel(false);
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
@@ -134,10 +130,6 @@ impl Default for RuntimeOptions {
 
 struct RapiraBackend {
     rapira: RapiraHandle,
-    filename: PathBuf,
-    document_root: String,
-    script_name: String,
-    dispatcher: bool,
     uploads: Arc<multipart::Limits>,
 }
 
@@ -170,21 +162,10 @@ fn parse_err(e: multipart::ParseError) -> anyhow::Error {
 }
 
 impl RapiraBackend {
-    fn new(rapira: RapiraHandle, filename: PathBuf, opts: RuntimeOptions) -> Self {
-        let document_root = filename
-            .parent()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let script_name = filename
-            .file_name()
-            .map_or_else(|| "/".to_string(), |f| format!("/{}", f.to_string_lossy()));
-        let dispatcher = rapira.dispatcher();
+    fn new(rapira: RapiraHandle, filename: &Path, opts: RuntimeOptions) -> Self {
+        php_sys::set_script(filename);
         Self {
             rapira,
-            filename,
-            document_root,
-            script_name,
-            dispatcher,
             uploads: opts.uploads,
         }
     }
@@ -194,26 +175,16 @@ impl RapiraBackend {
         &self,
         mut req: extension_api::Request,
     ) -> anyhow::Result<php_sys::Request> {
-        let query = req.uri.split_once('?').map_or("", |(_, q)| q).to_string();
-        let content_type = req
-            .headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
-            .map(|(_, v)| v.clone());
+        let content_type = req.headers.get(CONTENT_TYPE).map(|v| v.as_bytes().to_vec());
         let content_length = req.body.len() as i64;
 
         // Content-Type is a singleton field under RFC 9110 section 8.3. Repeated lines can cause the host and PHP to use different boundaries.
         // https://www.rfc-editor.org/rfc/rfc9110#section-8.3
-        if self.dispatcher && !req.body.is_empty() {
-            let mut ct_lines = 0usize;
-            let mut any_multipart = false;
-            for (k, v) in &req.headers {
-                if k.eq_ignore_ascii_case("content-type") {
-                    ct_lines += 1;
-                    any_multipart = any_multipart || multipart::is_multipart(v);
-                }
-            }
-            if ct_lines > 1 && any_multipart {
+        if self.rapira.dispatcher() && !req.body.is_empty() {
+            let lines = req.headers.get_all(CONTENT_TYPE);
+            if lines.iter().nth(1).is_some()
+                && lines.iter().any(|v| multipart::is_multipart(v.as_bytes()))
+            {
                 return Err(anyhow::Error::new(extension_api::Rejected {
                     status: 400,
                     reason: "repeated content-type field lines with a multipart body".into(),
@@ -221,7 +192,7 @@ impl RapiraBackend {
             }
         }
 
-        let body = if self.dispatcher
+        let body = if self.rapira.dispatcher()
             && !req.body.is_empty()
             && let Some(ct) = content_type.as_deref()
             && multipart::is_multipart(ct)
@@ -235,28 +206,23 @@ impl RapiraBackend {
                     .map_err(|e| anyhow::anyhow!("multipart parse task failed: {e}"))?;
             php_sys::types::Body::Multipart(parsed.map_err(parse_err)?)
         } else {
-            php_sys::types::Body::Raw(Box::new(Cursor::new(std::mem::take(&mut req.body))))
+            php_sys::types::Body::Raw(Cursor::new(std::mem::take(&mut req.body)))
         };
 
         Ok(php_sys::Request {
             method: req.method,
             https: req.https,
-            query,
             protocol: req.protocol,
-            target: req.target.filter(|t| !t.is_empty()),
-            authority: req.authority.filter(|a| !a.is_empty()),
+            target: req.target,
+            authority: req.authority,
             remote: map_addr(req.remote),
             server: map_addr(req.server),
             server_name: req.server_name,
             server_port: req.server_port,
-            script_name: self.script_name.clone(),
-            document_root: self.document_root.clone(),
-            script_filename: self.filename.clone(),
             content_type,
             content_length,
             body,
             headers: req.headers,
-            server_vars: Vec::new(),
             uri: req.uri,
             received_at: req.received_at,
             tls: req.tls.map(map_tls),
@@ -304,13 +270,11 @@ impl extension_api::ReplySource for FrameSource {
                     head,
                     content_length,
                     bodiless,
-                    body_coded,
                 } => extension_api::ReplyEvent::Head {
                     status: head.status,
                     headers: head.headers,
                     content_length,
                     bodiless,
-                    body_coded,
                 },
                 php_sys::Frame::Chunk(b) => extension_api::ReplyEvent::Chunk(b),
                 php_sys::Frame::File { file, offset, len } => {

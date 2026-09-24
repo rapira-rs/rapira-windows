@@ -5,7 +5,7 @@ use crate::{
 };
 
 /// # Safety
-/// Requires a valid `ts_resource` during an active request. The caller must establish a `zend_try` boundary because the function can call `zend_bailout`.
+/// Requires an active request. `php_execute_script` catches a bailout itself.
 pub unsafe fn run_script(script: &Path) -> bool {
     unsafe {
         let c_script: CString =

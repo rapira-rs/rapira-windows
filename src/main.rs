@@ -287,7 +287,7 @@ fn serve(args: ServeArgs) -> anyhow::Result<ExitCode> {
     };
 
     let mut host: ExtensionRuntime = ExtensionRuntime::new();
-    host.register::<HttpServer>(http_cfg)?;
+    host.register::<HttpServer>(http_cfg);
 
     let mut prepare_ctx: PrepareCtx = PrepareCtx::new();
     host.prepare_all(&mut prepare_ctx)?;

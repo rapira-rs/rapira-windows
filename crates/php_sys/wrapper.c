@@ -26,10 +26,6 @@ void rapira_sapi_startup(sapi_module_struct *sf) {
     sapi_startup(sf);
 }
 
-unsigned int rapira_headers_php_version_id(void) {
-    return PHP_VERSION_ID;
-}
-
 // ts_resource_ex must initialize this thread before it accesses PHP globals. https://github.com/php/php-src/blob/PHP-8.5/TSRM/TSRM.h
 sapi_globals_struct *rapira_sg(void) {
     return TSRMG_FAST_BULK(sapi_globals_offset, sapi_globals_struct *);

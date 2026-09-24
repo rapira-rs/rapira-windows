@@ -1,9 +1,11 @@
-use php_sys::{Frame, Mode, Rapira, Request};
+use extension_api::{Reply, ReplyEvent};
+use http::HeaderMap;
+use php_sys::{Frame, HandleError, Mode, Rapira, RapiraHandle, Request};
 use std::env::set_var;
 use std::ffi::{CString, OsStr};
 use std::os::raw::{c_char, c_int};
 use std::path::{Path, PathBuf};
-use std::sync::{self, Mutex, Once, PoisonError};
+use std::sync::{self, Mutex, Once, OnceLock, PoisonError};
 use tokio::sync::mpsc;
 
 static PHP_LOCK: Mutex<()> = Mutex::new(());
@@ -62,11 +64,23 @@ pub fn run_worker(name: &str, uris: &[&str]) -> anyhow::Result<Vec<(u16, String)
     let h = r.handle();
     let mut out = Vec::with_capacity(uris.len());
     for uri in uris {
-        out.push(drain(h.handle_blocking(req(uri, name))?));
+        out.push(drain(submit(&h, req(uri, name))?));
     }
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(out)
+}
+
+/// Submits `req` through the async intake of `h` and blocks until the job is queued.
+pub fn submit(h: &RapiraHandle, req: Request) -> Result<mpsc::Receiver<Frame>, HandleError> {
+    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("tokio runtime")
+    })
+    .block_on(h.handle(req))
 }
 
 /// Panics when RAPIRA_REQUIRE_EXTS names an extension that this fixture covers. If CI installs the extension, a skipped test indicates an installation failure.
@@ -82,29 +96,24 @@ pub fn assert_skip_allowed(fixture: &str) {
     }
 }
 
-/// Builds a minimal `GET` request for `uri` with `$_SERVER` metadata that identifies `fixture_name`.
+/// Builds a minimal `GET` request for `uri` and points the worker script paths at `fixture_name`.
 pub fn req(uri: &str, fixture_name: &str) -> Request {
-    let query = uri.split_once('?').map(|x: (&str, &str)| x.1);
+    php_sys::set_script(&fixture(fixture_name));
     Request {
-        document_root: String::new(),
         https: false,
         method: "GET".into(),
         uri: uri.into(),
         target: None,
         authority: None,
-        query: query.unwrap_or("").into(),
         protocol: "HTTP/1.1".into(),
         remote: php_sys::types::Addr::Inet(([127, 0, 0, 1], 8080).into()),
         server: php_sys::types::Addr::Inet(([127, 0, 0, 1], 8080).into()),
         server_name: "localhost".into(),
         server_port: 8080,
-        script_filename: fixture(fixture_name),
-        script_name: "/index.php".into(),
-        headers: vec![],
-        server_vars: vec![],
+        headers: HeaderMap::new(),
         content_type: None,
         content_length: 0,
-        body: php_sys::types::Body::Raw(Box::new(std::io::empty())),
+        body: php_sys::types::Body::Raw(std::io::Cursor::new(Vec::new())),
         received_at: None,
         tls: None,
     }
@@ -118,7 +127,7 @@ pub struct Resp {
     pub content_length: Option<u64>,
     pub bodiless: bool,
     pub body: Vec<u8>,
-    pub trailers: Vec<(String, Vec<u8>)>,
+    pub trailers: HeaderMap,
     pub truncated: bool,
     /// Indicates that an `End` frame arrived. False means that the producer stopped first.
     pub ended: bool,
@@ -133,12 +142,8 @@ impl Resp {
     }
 
     pub fn header(&self, name: &str) -> Option<String> {
-        self.head
-            .as_ref()?
-            .headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(name))
-            .map(|(_, v)| String::from_utf8_lossy(v).into_owned())
+        let value = self.head.as_ref()?.headers.get(name)?;
+        Some(String::from_utf8_lossy(value.as_bytes()).into_owned())
     }
 
     pub fn body_string(&self) -> String {
@@ -186,12 +191,66 @@ fn read_slice(file: &std::fs::File, offset: u64, len: u64) -> std::io::Result<Ve
     while done < out.len() {
         let n = file.seek_read(&mut out[done..], offset + done as u64)?;
         if n == 0 {
-            break;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "file ended before the reply slice was complete",
+            ));
         }
         done += n;
     }
-    out.truncate(done);
     Ok(out)
+}
+
+/// A reply stream collected to its `End`.
+#[derive(Debug)]
+pub struct Response {
+    pub status: u16,
+    pub headers: HeaderMap,
+    pub body: Vec<u8>,
+}
+
+/// Drains `reply` to its `End`. A missing head, a missing `End`, or a truncated `End` is an error.
+pub async fn collect(mut reply: Reply) -> anyhow::Result<Response> {
+    let mut response: Option<Response> = None;
+    let mut end: Option<bool> = None;
+    while let Some(ev) = reply.next().await {
+        match ev {
+            ReplyEvent::Interim { .. } => {}
+            ReplyEvent::Head {
+                status, headers, ..
+            } => {
+                response = Some(Response {
+                    status,
+                    headers,
+                    body: Vec::new(),
+                });
+            }
+            ReplyEvent::Chunk(b) => {
+                if let Some(r) = response.as_mut() {
+                    r.body.extend_from_slice(&b);
+                }
+            }
+            ReplyEvent::File { file, offset, len } => {
+                if let Some(r) = response.as_mut() {
+                    r.body.extend_from_slice(&read_slice(&file, offset, len)?);
+                }
+            }
+            ReplyEvent::End { truncated, .. } => {
+                end = Some(truncated);
+                break;
+            }
+        }
+    }
+    match (response, end) {
+        (None, None) => Err(anyhow::anyhow!(
+            "php worker died mid-response (channel closed without a response)"
+        )),
+        (Some(_), None) | (_, Some(true)) => {
+            Err(anyhow::anyhow!("php crashed mid-response; body truncated"))
+        }
+        (None, Some(false)) => Err(anyhow::anyhow!("php produced no response head")),
+        (Some(r), Some(false)) => Ok(r),
+    }
 }
 
 /// Polls for the first frame until `deadline`. `None` means that no frame arrived before the deadline. If the producer stops without frames, the function returns `Resp::default()`.
@@ -372,7 +431,7 @@ pub fn captured() -> sync::MutexGuard<'static, Vec<Captured>> {
     LOG_CAPTURE.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Collects the `message` and `context` fields. It ignores `log.*` metadata fields from records that use the bridge.
+/// Collects the `message` and `context` fields. It ignores other fields.
 #[derive(Default)]
 struct Msg {
     message: String,
@@ -407,8 +466,7 @@ struct CaptureLayer;
 
 impl<S: tracing::Subscriber> tracing_subscriber::layer::Layer<S> for CaptureLayer {
     fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
-        let norm = tracing_log::NormalizeEvent::normalized_metadata(event);
-        let meta = norm.as_ref().unwrap_or_else(|| event.metadata());
+        let meta = event.metadata();
         let mut msg = Msg::default();
         event.record(&mut msg);
         captured().push(Captured {
@@ -423,31 +481,38 @@ impl<S: tracing::Subscriber> tracing_subscriber::layer::Layer<S> for CaptureLaye
 /// Returns one `app` target record from `\Rapira\log()` with its level, message, and context JSON.
 pub type AppRecord = (tracing::Level, String, String);
 
-/// Runs `script` in classic mode and returns its `app` target records. The fixture must print `logged` last so an incomplete script cannot appear as a script that logged no records.
-pub fn app_records(script: &str) -> Vec<AppRecord> {
+/// Runs `script` in classic mode and returns its `app` target records and its `php` target messages. The function reads both under the PHP lock. The fixture must print `logged` last so an incomplete script cannot appear as a script that logged no records.
+pub fn app_records(script: &str) -> (Vec<AppRecord>, Vec<String>) {
     let _guard = php_lock();
     init_log_capture();
     captured().clear();
 
     let r = Rapira::start(Mode::Classic).expect("classic boot");
     let h = r.handle();
-    let (status, body) = drain(h.handle_blocking(req("/", script)).expect("dispatch"));
+    let (status, body) = drain(submit(&h, req("/", script)).expect("dispatch"));
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(status, 200, "{script} must run clean (body: {body:?})");
     assert!(body.contains("logged"), "{script} ran to the end: {body:?}");
 
-    captured()
+    let all = captured();
+    let app = all
         .iter()
         .filter(|c| c.target == "app")
         .map(|c| (c.level, c.message.clone(), c.context.clone()))
-        .collect()
+        .collect();
+    let php = all
+        .iter()
+        .filter(|c| c.target == "php")
+        .map(|c| c.message.clone())
+        .collect();
+    (app, php)
 }
 
 /// Returns the one `app` record that `script` must create. The count assertion detects any additional record.
 pub fn app_record(script: &str) -> AppRecord {
-    let records = app_records(script);
+    let (records, _) = app_records(script);
     assert_eq!(
         records.len(),
         1,
@@ -456,7 +521,26 @@ pub fn app_record(script: &str) -> AppRecord {
     records.into_iter().next().expect("checked above")
 }
 
-/// Installs the unfiltered capture subscriber once so `LOG_CAPTURE` receives all records from `tracing` and the `log` facade, including trace records.
+/// Polls the captured records until an `app` record with `message` appears. The poll stops after 10 s. Returns the context of the record.
+pub fn wait_app_record(message: &str) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Some(ctx) = captured()
+            .iter()
+            .find(|c| c.target == "app" && c.message == message)
+            .map(|c| c.context.clone())
+        {
+            return ctx;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no {message:?} app record within 10s"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// Installs the unfiltered capture subscriber once so `LOG_CAPTURE` receives all records, including trace records.
 pub fn init_log_capture() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
@@ -464,4 +548,139 @@ pub fn init_log_capture() {
         use tracing_subscriber::util::SubscriberInitExt;
         let _ = tracing_subscriber::registry().with(CaptureLayer).try_init();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use extension_api::ReplySource;
+    use std::io::Write;
+
+    struct VecSource(std::collections::VecDeque<ReplyEvent>);
+
+    impl ReplySource for VecSource {
+        fn poll_next(
+            &mut self,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<ReplyEvent>> {
+            std::task::Poll::Ready(self.0.pop_front())
+        }
+    }
+
+    fn reply(events: Vec<ReplyEvent>) -> Reply {
+        Reply::new(Box::new(VecSource(events.into())))
+    }
+
+    fn fields() -> HeaderMap {
+        HeaderMap::from_iter([(
+            http::HeaderName::from_static("x-a"),
+            http::HeaderValue::from_static("1"),
+        )])
+    }
+
+    fn head() -> ReplyEvent {
+        ReplyEvent::Head {
+            status: 200,
+            headers: fields(),
+            content_length: None,
+            bodiless: false,
+        }
+    }
+
+    fn end(truncated: bool) -> ReplyEvent {
+        ReplyEvent::End {
+            trailers: HeaderMap::new(),
+            truncated,
+        }
+    }
+
+    #[test]
+    fn read_slice_uses_each_requested_offset() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(b"0123456789").unwrap();
+
+        assert_eq!(read_slice(&file, 4, 3).unwrap(), b"456");
+        assert_eq!(read_slice(&file, 0, 2).unwrap(), b"01");
+        assert_eq!(read_slice(&file, 7, 3).unwrap(), b"789");
+    }
+
+    #[test]
+    fn read_slice_rejects_early_eof() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(b"0123456789").unwrap();
+
+        for (offset, len) in [(8, 5), (10, 1), (12, 1)] {
+            assert_eq!(
+                read_slice(&file, offset, len).unwrap_err().kind(),
+                std::io::ErrorKind::UnexpectedEof
+            );
+        }
+    }
+
+    /// A file slice that ends early is an error, not a shorter body.
+    #[tokio::test]
+    async fn collect_rejects_a_file_slice_that_ends_early() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(b"ab").unwrap();
+        let error = collect(reply(vec![
+            ReplyEvent::Head {
+                status: 200,
+                headers: HeaderMap::new(),
+                content_length: Some(5),
+                bodiless: false,
+            },
+            ReplyEvent::File {
+                file,
+                offset: 0,
+                len: 5,
+            },
+            end(false),
+        ]))
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::UnexpectedEof
+        );
+    }
+
+    /// Each failed stream maps to its error: no events, no `End`, a truncated `End`, no head.
+    #[tokio::test]
+    async fn collect_maps_stream_outcomes() {
+        let died = collect(reply(Vec::new())).await.unwrap_err();
+        assert!(died.to_string().contains("died mid-response"), "{died:#}");
+
+        let cut = collect(reply(vec![head()])).await.unwrap_err();
+        assert!(cut.to_string().contains("truncated"), "{cut:#}");
+
+        let cut = collect(reply(vec![head(), end(true)])).await.unwrap_err();
+        assert!(cut.to_string().contains("truncated"), "{cut:#}");
+
+        let headless = collect(reply(vec![end(false)])).await.unwrap_err();
+        assert!(
+            headless.to_string().contains("no response head"),
+            "{headless:#}"
+        );
+    }
+
+    /// Chunks concatenate in order. Interim heads are dropped.
+    #[tokio::test]
+    async fn collect_concatenates_the_stream() {
+        let r = collect(reply(vec![
+            ReplyEvent::Interim {
+                status: 103,
+                headers: HeaderMap::new(),
+            },
+            head(),
+            ReplyEvent::Chunk(b"one,"[..].into()),
+            ReplyEvent::Chunk(b"two"[..].into()),
+            end(false),
+        ]))
+        .await
+        .unwrap();
+        assert_eq!(r.status, 200);
+        assert_eq!(r.headers, fields());
+        assert_eq!(r.body, b"one,two");
+    }
 }

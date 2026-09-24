@@ -15,12 +15,19 @@ pub type Body = http_body_util::combinators::UnsyncBoxBody<Bytes, BoxError>;
 pub type HttpRequest = http::Request<Body>;
 pub type HttpResponse = http::Response<Body>;
 
-/// An empty [`Body`].
 pub fn empty_body() -> Body {
     use http_body_util::BodyExt;
     http_body_util::Empty::<Bytes>::new()
         .map_err(BoxError::from)
         .boxed_unsync()
+}
+
+// The HTTP and gRPC plugins insert this value. A later plugin, such as jobs, adds a variant.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Protocol {
+    Http,
+    Grpc,
 }
 
 #[derive(Debug, Clone)]

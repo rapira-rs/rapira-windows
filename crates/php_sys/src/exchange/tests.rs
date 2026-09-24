@@ -12,23 +12,25 @@ fn base_req() -> Request {
         target: None,
         authority: None,
         https: false,
-        query: String::new(),
         protocol: String::new(),
         remote: Addr::Inet(([127, 0, 0, 1], 8080).into()),
         server: Addr::Inet(([127, 0, 0, 1], 8080).into()),
         server_name: String::new(),
         server_port: 8080,
-        script_name: String::new(),
-        document_root: String::new(),
-        script_filename: PathBuf::new(),
-        headers: Vec::new(),
-        server_vars: Vec::new(),
+        headers: HeaderMap::new(),
         content_type: None,
         content_length: 0,
-        body: Body::Raw(Box::new(std::io::empty())),
+        body: Body::Raw(std::io::Cursor::new(Vec::new())),
         received_at: None,
         tls: None,
     }
+}
+
+fn map(lines: &[(&'static str, &'static str)]) -> HeaderMap {
+    lines
+        .iter()
+        .map(|&(k, v)| (HeaderName::from_static(k), HeaderValue::from_static(v)))
+        .collect()
 }
 
 enum Sealed {
@@ -68,11 +70,8 @@ fn state_of(
     tokio::sync::mpsc::Receiver<crate::types::Frame>,
 ) {
     let (tx, rx) = tokio::sync::mpsc::channel(64);
-    let job = Box::new(Context::new(req, tx, false));
-    let Ok(st) = ExchangeState::new(job) else {
-        unreachable!("empty cursor body always reads")
-    };
-    (st, rx)
+    let job = Box::new(Context::new(req, tx, /*superglobals=*/ false));
+    (ExchangeState::new(job), rx)
 }
 
 fn state() -> (
@@ -112,7 +111,7 @@ fn full_response_channel_waits_for_capacity() {
     sender.join().unwrap();
 }
 
-/// An overflow without sealing would leave the unit in `Handling`. The single-flight check would then reject all later receive() calls.
+/// An overflow without sealing would leave the unit unfinalized. The single-flight check would then reject all later receive() calls.
 #[test]
 fn overflow_seals_the_unit_truncated() {
     let (mut st, mut rx) = state();
@@ -135,7 +134,7 @@ fn overflow_seals_the_unit_truncated() {
 #[test]
 fn seal_drops_the_body_for_304() {
     let (mut st, mut rx) = state();
-    assert_eq!(write_head_core(&mut st, 304, Vec::new()), Verb::Ok);
+    assert_eq!(write_head_core(&mut st, 304, HeaderMap::new()), Verb::Ok);
     let v = unsafe { write_body_core(&mut st, c"gone".as_ptr(), 4, true) };
     assert_eq!(v, Verb::Ok);
     let Sealed::Complete { status, body } = recv_sealed(&mut rx) else {
@@ -152,7 +151,7 @@ fn empty_non_eos_chunk_commits_nothing() {
     let v = unsafe { write_body_core(&mut st, c"".as_ptr(), 0, false) };
     assert_eq!(v, Verb::Ok);
     assert_eq!(
-        write_head_core(&mut st, 404, Vec::new()),
+        write_head_core(&mut st, 404, HeaderMap::new()),
         Verb::Ok,
         "the head slot must still be open"
     );
@@ -164,29 +163,16 @@ fn empty_non_eos_chunk_commits_nothing() {
     assert_eq!(status, 404);
 }
 
-/// The response validators use the same byte sets as the classic path.
+/// The view normalizes the protocol spelling and maps an empty unix path to the unnamed endpoint.
 #[test]
-fn wire_validators_match_the_classic_byte_sets() {
-    assert!(wire_token(b"x-trace"));
-    assert!(!wire_token(b""));
-    assert!(!wire_token(b"bad name"));
-    assert!(!wire_token(b"x:y"));
-    assert!(wire_value(b"a\tb \xff"));
-    assert!(!wire_value(b"a\x01b"));
-    assert!(!wire_value(b"a\x7fb"));
-    assert!(!wire_value(b"split\r\nx: y"));
-    assert!(!wire_value(b"nul\0"));
-}
-
-/// Construction normalizes the protocol spelling and maps an empty unix path to the unnamed endpoint.
-#[test]
-fn construction_normalizes_protocol_and_empty_unix_path() {
+fn view_normalizes_protocol_and_empty_unix_path() {
     let mut req = base_req();
-    req.protocol = "HTTP/3.0".into();
     req.remote = Addr::Unix(Some(PathBuf::new()));
-    let (st, _rx) = state_of(req);
-    assert_eq!(st.protocol_php, "HTTP/3");
-    assert!(matches!(st.remote, AddrOwned::Unix(None)));
+    assert_eq!(protocol_php("HTTP/3.0"), "HTTP/3");
+    assert!(matches!(
+        RequestView::new(&req).remote,
+        AddrOwned::Unix(None)
+    ));
 }
 
 /// A one-shot write includes its computed length in the `Head` frame. The HTTP server selects framing for a streamed write.
@@ -215,7 +201,7 @@ fn head_frame_length_follows_the_write_shape() {
 fn content_length_exceeded_sends_the_prefix_and_seals() {
     use crate::types::Frame;
     let (mut st, mut rx) = state();
-    let v = write_head_core(&mut st, 200, vec![("content-length".into(), b"5".to_vec())]);
+    let v = write_head_core(&mut st, 200, map(&[("content-length", "5")]));
     assert_eq!(v, Verb::Ok);
     let v = unsafe { write_body_core(&mut st, c"0123456789".as_ptr(), 10, true) };
     assert_eq!(v, Verb::ContentLengthExceeded);
@@ -244,42 +230,30 @@ fn repeated_content_length_is_a_bad_field() {
     let v = write_head_core(
         &mut st,
         200,
-        vec![
-            ("content-length".into(), b"5".to_vec()),
-            ("Content-Length".into(), b"7".to_vec()),
-        ],
+        map(&[("content-length", "5"), ("content-length", "7")]),
     );
     assert!(matches!(v, Verb::BadField(_)));
     assert_eq!(st.stage, Stage::Open, "a rejected head commits nothing");
 }
 
-/// An interim head is sent immediately without framing fields. A final head can still follow it.
+/// An interim head is sent immediately with its fields as written. The HTTP server frames the message. A final head can still follow it.
 #[test]
-fn interim_head_emits_without_framing_fields() {
+fn interim_head_emits_its_fields_and_leaves_the_final_head_open() {
     use crate::types::Frame;
     let (mut st, mut rx) = state();
-    let v = write_head_core(
-        &mut st,
-        103,
-        vec![
-            ("link".into(), b"</a.css>; rel=preload".to_vec()),
-            ("content-length".into(), b"5".to_vec()),
-            ("connection".into(), b"close".to_vec()),
-        ],
-    );
-    assert_eq!(v, Verb::Interim);
+    let fields = map(&[
+        ("link", "</a.css>; rel=preload"),
+        ("content-length", "5"),
+        ("connection", "close"),
+    ]);
+    let v = write_head_core(&mut st, 103, fields.clone());
+    assert_eq!(v, Verb::Ok);
     let Ok(Frame::Interim(head)) = rx.try_recv() else {
         panic!("interim head must be on the stream");
     };
     assert_eq!(head.status, 103);
-    assert_eq!(
-        head.headers.len(),
-        1,
-        "framing fields stripped: {:?}",
-        head.headers
-    );
-    assert_eq!(head.headers[0].0, "link");
-    let v = write_head_core(&mut st, 200, Vec::new());
+    assert_eq!(head.headers, fields);
+    let v = write_head_core(&mut st, 200, HeaderMap::new());
     assert_eq!(v, Verb::Ok, "the final-head slot stays open");
 }
 
@@ -325,7 +299,7 @@ fn flush_emits_the_implicit_head_once() {
 fn a_101_head_drops_body_chunks() {
     use crate::types::Frame;
     let (mut st, mut rx) = state();
-    assert_eq!(write_head_core(&mut st, 101, Vec::new()), Verb::Ok);
+    assert_eq!(write_head_core(&mut st, 101, HeaderMap::new()), Verb::Ok);
     let v = unsafe { write_body_core(&mut st, c"upgrade".as_ptr(), 7, true) };
     assert_eq!(v, Verb::Ok);
     let Ok(Frame::Head { bodiless, .. }) = rx.try_recv() else {
@@ -439,11 +413,11 @@ fn send_file_validation_table() {
 fn trailers_finalize_with_a_committed_head() {
     use crate::types::Frame;
     let (mut st, mut rx) = state();
-    let v = write_trailers_core(&mut st, vec![("x".into(), b"y".to_vec())]);
+    let v = write_trailers_core(&mut st, map(&[("x", "y")]));
     assert_eq!(v, Verb::HeadNotWritten, "nothing here commits a head");
 
-    assert_eq!(write_head_core(&mut st, 200, Vec::new()), Verb::Ok);
-    let v = write_trailers_core(&mut st, vec![("x".into(), b"y".to_vec())]);
+    assert_eq!(write_head_core(&mut st, 200, HeaderMap::new()), Verb::Ok);
+    let v = write_trailers_core(&mut st, map(&[("x", "y")]));
     assert_eq!(v, Verb::Ok);
     let Ok(Frame::Head { content_length, .. }) = rx.try_recv() else {
         panic!("head first");
@@ -461,9 +435,9 @@ fn trailers_finalize_with_a_committed_head() {
         panic!("the trailers ride the End frame");
     };
     assert!(!truncated);
-    assert_eq!(trailers, vec![("x".to_string(), b"y".to_vec())]);
+    assert_eq!(trailers, map(&[("x", "y")]));
 
-    let v = write_trailers_core(&mut st, Vec::new());
+    let v = write_trailers_core(&mut st, HeaderMap::new());
     assert_eq!(v, Verb::Finalized);
 }
 
@@ -508,6 +482,6 @@ fn seal_unlinks_the_spool_files() {
         }],
     };
     assert!(path.exists());
-    seal(&mut st, false, Vec::new());
+    seal(&mut st, false, HeaderMap::new());
     assert!(!path.exists(), "seal must unlink the spooled file");
 }

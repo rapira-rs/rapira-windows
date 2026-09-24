@@ -14,7 +14,7 @@ fn failboot_worker_serves_503_and_drops_cleanly() -> anyhow::Result<()> {
             "failboot_worker_tests/failboot-worker.php",
         )))?;
         let h = r.handle();
-        let rx = h.handle_blocking(req("/", "failboot_worker_tests/failboot-worker.php"))?;
+        let rx = tests::submit(&h, req("/", "failboot_worker_tests/failboot-worker.php"))?;
         drop(h);
         let (status, body) = drain(rx);
         drop(r);
@@ -34,7 +34,7 @@ fn failboot_worker_serves_503_and_drops_cleanly() -> anyhow::Result<()> {
 #[test]
 fn failboot_worker_flags_unhealthy_after_threshold() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let (done_tx, done_rx) = mpsc::sync_channel::<(usize, Vec<u16>)>(1);
+    let (done_tx, done_rx) = mpsc::sync_channel::<(bool, Vec<u16>)>(1);
 
     let scenario = std::thread::spawn(move || -> anyhow::Result<()> {
         let (hook_entered_tx, hook_entered_rx) = mpsc::sync_channel::<()>(1);
@@ -56,7 +56,7 @@ fn failboot_worker_flags_unhealthy_after_threshold() -> anyhow::Result<()> {
         )?;
         let h = r.handle();
         let mut responses = (0..5)
-            .map(|_| h.handle_blocking(req("/", "failboot_worker_tests/failboot-worker.php")))
+            .map(|_| tests::submit(&h, req("/", "failboot_worker_tests/failboot-worker.php")))
             .collect::<Result<Vec<_>, _>>()?;
         let fifth = responses.pop().expect("five responses were queued");
         let mut statuses = Vec::with_capacity(5);
@@ -75,7 +75,7 @@ fn failboot_worker_flags_unhealthy_after_threshold() -> anyhow::Result<()> {
         let (s, _) = drain(fifth);
         statuses.push(s);
         drop(h);
-        r.shutdown();
+        drop(r);
         let _ = done_tx.send((unhealthy, statuses));
         Ok(())
     });
@@ -87,8 +87,8 @@ fn failboot_worker_flags_unhealthy_after_threshold() -> anyhow::Result<()> {
         statuses.iter().all(|&s| s == 503),
         "each boot-failed job must 503 (got {statuses:?})"
     );
-    assert_eq!(
-        unhealthy, 1,
+    assert!(
+        unhealthy,
         "5 consecutive boot failures must flag the worker unhealthy"
     );
     scenario.join().expect("scenario thread panicked")?;

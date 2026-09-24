@@ -20,7 +20,6 @@ size_t rapira_ub_write(const char *str, size_t len) {
 enum {
     OK = 0,
     BAILOUT = 1,
-    EXIT = 2,
     THROW = 3,
 };
 
@@ -61,7 +60,7 @@ PHP_FUNCTION(rapira_finish_request) {
         RETURN_THROWS();
     }
     if (rapira_finish_output() != OK) {
-        // Raise the bailout again so rapira_run_handler sends status 500 and recycles the worker.
+        // Raise the bailout again. rapira_run_handler catches it in worker mode, and php_execute_script catches it in classic mode.
         zend_bailout();
     }
     rapira_rs_finish_response();
@@ -204,7 +203,7 @@ static void rapira_request_init(void) {
     }
 }
 
-// Enable CG(auto_globals) because worker mode does not call sapi_activate for each request.
+// php_hash_environment enables CG(auto_globals) for each request. The per-job path does not call it.
 static void rapira_activate_auto_globals(void) {
     zend_auto_global *auto_global = NULL;
     zend_string *_env = ZSTR_KNOWN(ZEND_STR_AUTOGLOBAL_ENV);
@@ -282,12 +281,9 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
     int outcome = OK;
     zval retval;
     ZVAL_UNDEF(&retval);
-    fci->size = sizeof *fci;
     // fci uses retval only while this frame exists.
     // cppcheck-suppress autoVariables
     fci->retval = &retval;
-    fci->param_count = 0;
-    fci->named_params = NULL;
 
     // Only _zend_bailout sets this flag during a request (zend.c:1264). A change from 0 to 1 proves a bailout.
     bool unclean_at_entry = CG(unclean_shutdown);
@@ -304,7 +300,6 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
         if (EG(exception)) {
             if (zend_is_unwind_exit(EG(exception)) ||
                 zend_is_graceful_exit(EG(exception))) {
-                outcome = EXIT;
                 zend_clear_exception();
             } else {
                 // The user exception handler can cause a bailout.
@@ -373,7 +368,7 @@ static void rapira_release_header_callback(void) {
 // Run SAPI cleanup for each request (main/main.c:1985,2002,2031).
 int rapira_request_teardown(void) {
     int bailed = OK;
-    // Close the observer frames before handleRequest removes the VM stack.
+    // Close the observer frames before handle_request removes the VM stack.
     zend_execute_data *observed_base = EG(current_observed_frame);
 
     RAPIRA_GUARD(php_output_end_all(), bailed, observed_base);
@@ -448,6 +443,7 @@ void rapira_release_temporary_streams(void) {
         if (val->type == stream_type) {
             php_stream *stream = val->ptr;
             if (stream != NULL && stream->ops == &php_stream_temp_ops &&
+                !(stream->flags & PHP_STREAM_FLAG_NO_FCLOSE) &&
                 stream->__exposed == 0 && GC_REFCOUNT(val) == 1) {
                 zend_list_delete(val);
             }

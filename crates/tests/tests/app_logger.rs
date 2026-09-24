@@ -4,7 +4,7 @@ use tracing::Level;
 /// Each LogLevel case maps to the corresponding tracing level. An omitted argument maps to Info.
 #[test]
 fn log_levels_map_onto_tracing_levels() {
-    let records = app_records("app_logger/app-logger-levels.php");
+    let (records, _) = app_records("app_logger/app-logger-levels.php");
 
     let got: Vec<(Level, &str)> = records
         .iter()
@@ -28,7 +28,7 @@ fn log_levels_map_onto_tracing_levels() {
 /// Absent and empty contexts do not add a field.
 #[test]
 fn log_context_is_json_encoded() {
-    let records = app_records("app_logger/app-logger-context.php");
+    let (records, _) = app_records("app_logger/app-logger-context.php");
     let find = |needle: &str| {
         records
             .iter()
@@ -135,6 +135,30 @@ fn app_logger_dateinterval_easy() {
     );
 }
 
+/// The encoder cuts a cycle at its back edge and raises no PHP diagnostic.
+#[test]
+fn cycles_are_broken_without_a_diagnostic() {
+    let (records, phpdiag) = app_records("app_logger/limits-cycles.php");
+    let [(level, _, ctx)] = records.as_slice() else {
+        panic!("expected one app record, got {records:?}");
+    };
+
+    assert_eq!(*level, Level::ERROR);
+    assert!(
+        ctx.contains(r#""objects":{"bar":{"foo":null}}"#),
+        "object cycle must be cut at the back-edge: {ctx:?}"
+    );
+    assert!(
+        ctx.contains(r#""arrays":{"x":{"foo":"bar","y":null}}"#),
+        "reference cycle must be cut at the back-edge: {ctx:?}"
+    );
+    assert!(
+        ctx.contains(r#""keep":"visible""#),
+        "siblings of a cycle must survive: {ctx:?}"
+    );
+    assert!(phpdiag.is_empty(), "cycles must raise nothing: {phpdiag:?}");
+}
+
 /// An exception from jsonSerialize() must not exit log(). The host must still receive the record.
 #[test]
 fn log_survives_a_throwing_json_serializer() {
@@ -149,17 +173,18 @@ fn log_survives_a_throwing_json_serializer() {
 #[test]
 fn log_preserves_exit_from_a_serializer() {
     use php_sys::{Mode, Rapira};
-    use tests::{drain, php_lock, req};
+    use tests::{drain, init_log_capture, php_lock, req};
 
     let _guard = php_lock();
+    init_log_capture();
     let r = Rapira::start(Mode::Classic).expect("classic boot");
     let h = r.handle();
     let (status, body) = drain(
-        h.handle_blocking(req("/", "app_logger/app-logger-exit-in-serializer.php"))
+        tests::submit(&h, req("/", "app_logger/app-logger-exit-in-serializer.php"))
             .expect("dispatch"),
     );
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(status, 200);
     assert!(body.contains("quitting"), "got: {body:?}");

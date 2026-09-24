@@ -1,12 +1,9 @@
 use bytes::Bytes;
-use std::collections::HashMap;
+use http::header::{AUTHORIZATION, COOKIE, HeaderMap, HeaderName};
 use std::ffi::CString;
-use std::io::Read;
 use std::os::raw::c_int;
 use std::path::PathBuf;
-use tokio::sync::mpsc::Sender;
-
-pub type FieldLines = Vec<(String, Vec<u8>)>;
+use tokio::sync::mpsc::{Sender, error::TrySendError};
 
 #[derive(Debug, Clone)]
 pub enum Mode {
@@ -20,7 +17,6 @@ pub enum Mode {
 pub enum Outcome {
     Ok = 0,
     Bailout = 1,
-    Exit = 2,
     Throw = 3,
 }
 
@@ -29,7 +25,6 @@ impl Outcome {
         match v {
             0 => Self::Ok,
             1 => Self::Bailout,
-            2 => Self::Exit,
             3 => Self::Throw,
             _ => Self::Bailout,
         }
@@ -46,7 +41,6 @@ pub enum Frame {
         content_length: Option<u64>,
         /// A 204, 304, 1xx, or `HEAD` response has no body bytes or framing fields in the HTTP message.
         bodiless: bool,
-        body_coded: bool,
     },
     Chunk(Bytes),
     File {
@@ -55,7 +49,7 @@ pub enum Frame {
         len: u64,
     },
     End {
-        trailers: FieldLines,
+        trailers: HeaderMap,
         truncated: bool,
     },
 }
@@ -111,7 +105,7 @@ impl Drop for SpooledFile {
 pub struct FormField {
     pub name: Vec<u8>,
     pub value: Vec<u8>,
-    pub headers: FieldLines,
+    pub headers: Vec<(String, Vec<u8>)>,
 }
 
 pub struct UploadedFile {
@@ -119,7 +113,7 @@ pub struct UploadedFile {
     pub client_filename: Vec<u8>,
     /// Exact content type. An empty value or a value that contains only OWS maps to `None` upstream.
     pub client_media_type: Option<Vec<u8>>,
-    pub headers: FieldLines,
+    pub headers: Vec<(String, Vec<u8>)>,
     pub file: SpooledFile,
     /// Number of bytes written to disk. The FFI boundary requires a 64-bit zend_long.
     pub size: u64,
@@ -131,7 +125,7 @@ pub struct MultipartBody {
 }
 
 pub enum Body {
-    Raw(Box<dyn Read + Send>),
+    Raw(std::io::Cursor<Vec<u8>>),
     Multipart(MultipartBody),
 }
 
@@ -143,7 +137,6 @@ pub struct Request {
     /// Exact authority value from the client. `None` means that the client did not specify an authority.
     pub authority: Option<Vec<u8>>,
     pub https: bool,
-    pub query: String,
     /// HTTP or CGI value, such as "HTTP/2.0". The exchange view converts it to the API value.
     pub protocol: String,
     pub remote: Addr,
@@ -151,11 +144,7 @@ pub struct Request {
     /// Configured CGI SERVER_NAME and SERVER_PORT values. URI construction also uses these values as a fallback.
     pub server_name: String,
     pub server_port: u16,
-    pub script_name: String,
-    pub document_root: String,
-    pub script_filename: PathBuf,
-    pub headers: FieldLines,
-    pub server_vars: Vec<(String, String)>,
+    pub headers: HeaderMap,
     /// First content-type field line, raw bytes.
     pub content_type: Option<Vec<u8>>,
     /// Byte count from the HTTP message. Parsed parts do not determine this value. A value of -1 means that the count is unknown.
@@ -168,8 +157,12 @@ pub struct Request {
 
 pub struct ResponseHead {
     pub status: u16,
-    pub headers: FieldLines,
+    pub headers: HeaderMap,
 }
+
+/// CGI `Status` pseudo-field: php-src passes it as a plain header line.
+/// https://www.rfc-editor.org/rfc/rfc3875#section-6.3.3
+static STATUS: HeaderName = HeaderName::from_static("status");
 
 fn status_field_code(value: &[u8]) -> Option<u16> {
     let digits: &[u8] = value
@@ -188,9 +181,6 @@ pub struct ReqC {
     pub ctype: Option<CString>,
     pub cookie: Option<CString>,
     pub authorization: Option<CString>,
-    pub env: HashMap<Box<[u8]>, CString>,
-    /// One deterministic value per name for the `HTTP_*` mapping (crate::fold).
-    pub folded_headers: FieldLines,
     pub remote_addr: String,
     pub remote_port: String,
     pub server_port: String,
@@ -216,40 +206,28 @@ fn cgi_cstring(field: &str, bytes: &[u8]) -> CString {
 impl ReqC {
     /// Repeated Cookie values use `"; "` as the separator, as required by the php-src parser.
     pub fn build(r: &Request) -> Self {
-        let folded_headers = crate::fold::fold_field_lines(&r.headers);
-
-        let cookie: Option<CString> = folded_headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("cookie"))
-            .map(|(_, v)| cgi_cstring("Cookie", v));
+        let mut joined = Vec::new();
+        let cookie: Option<CString> =
+            crate::callbacks::joined_field(&r.headers, &COOKIE, &mut joined)
+                .map(|v| cgi_cstring("Cookie", v));
 
         let authorization: Option<CString> = r
             .headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
-            .map(|(_, v)| cgi_cstring("Authorization", v));
-
-        let env: HashMap<Box<[u8]>, CString> = r
-            .server_vars
-            .iter()
-            .filter_map(|(k, v)| match CString::new(v.as_bytes()) {
-                Ok(v) => Some((k.as_bytes().into(), v)),
-                Err(_) => {
-                    tracing::warn!(target: "rapira", "server var {k} carries a NUL byte; dropped");
-                    None
-                }
-            })
-            .collect();
+            .get(AUTHORIZATION)
+            .map(|v| cgi_cstring("Authorization", v.as_bytes()));
 
         let (remote_addr, remote_port) = cgi_addr_strings(&r.remote);
 
         Self {
             method: cgi_cstring("REQUEST_METHOD", r.method.as_bytes()),
-            query: cgi_cstring("QUERY_STRING", r.query.as_bytes()),
+            query: cgi_cstring(
+                "QUERY_STRING",
+                r.uri.split_once('?').map_or("", |(_, q)| q).as_bytes(),
+            ),
             uri: cgi_cstring("REQUEST_URI", r.uri.as_bytes()),
             script: cgi_cstring(
                 "SCRIPT_FILENAME",
-                r.script_filename.to_string_lossy().as_bytes(),
+                crate::context::script().filename.as_bytes(),
             ),
             cookie,
             authorization,
@@ -257,8 +235,6 @@ impl ReqC {
                 .content_type
                 .as_deref()
                 .map(|s| cgi_cstring("CONTENT_TYPE", s)),
-            env,
-            folded_headers,
             remote_addr,
             remote_port,
             server_port: r.server_port.to_string(),
@@ -299,21 +275,22 @@ impl Context {
         }
     }
 
-    pub fn commit_head(&mut self, mut status: u16, mut headers: FieldLines) {
-        headers.retain(|(name, value)| {
-            if !name.eq_ignore_ascii_case("status") {
-                return true;
-            }
-            match status_field_code(value) {
+    pub fn is_truncated(&self, errored: bool) -> bool {
+        errored && self.stream == StreamState::BodyStreamed
+    }
+
+    pub fn commit_head(&mut self, mut status: u16, mut headers: HeaderMap) {
+        for value in headers.get_all(&STATUS) {
+            match status_field_code(value.as_bytes()) {
                 Some(code) => status = code,
                 None => tracing::warn!(
                     target: "php",
                     "ignored malformed Status field {:?}; status stays {status}",
-                    String::from_utf8_lossy(value)
+                    String::from_utf8_lossy(value.as_bytes())
                 ),
             }
-            false
-        });
+        }
+        headers.remove(&STATUS);
         self.head = Some(ResponseHead { status, headers });
         self.stream = StreamState::HeadSent;
     }
@@ -328,25 +305,33 @@ impl Context {
             let bodiless = matches!(head.status, 204 | 304)
                 || (100..200).contains(&head.status)
                 || self.req.method.eq_ignore_ascii_case("HEAD");
-            let body_coded = head
-                .headers
-                .iter()
-                .any(|(n, _)| n.eq_ignore_ascii_case("content-encoding"));
             let content_length = (!bodiless && !truncated).then_some(body.len() as u64);
-            let _ = tx.blocking_send(Frame::Head {
-                head,
-                content_length,
-                bodiless,
-                body_coded,
-            });
+            send(
+                &tx,
+                Frame::Head {
+                    head,
+                    content_length,
+                    bodiless,
+                },
+            );
             if !body.is_empty() {
-                let _ = tx.blocking_send(Frame::Chunk(body.into()));
+                send(&tx, Frame::Chunk(body.into()));
             }
         }
-        let _ = tx.blocking_send(Frame::End {
-            trailers: Vec::new(),
-            truncated,
-        });
+        send(
+            &tx,
+            Frame::End {
+                trailers: HeaderMap::new(),
+                truncated,
+            },
+        );
+    }
+}
+
+/// Blocks only on a full channel: `blocking_send` runs a `block_on` on every call.
+fn send(tx: &Sender<Frame>, frame: Frame) {
+    if let Err(TrySendError::Full(frame)) = tx.try_send(frame) {
+        let _ = tx.blocking_send(frame);
     }
 }
 
@@ -379,20 +364,15 @@ mod tests {
                 target: None,
                 authority: None,
                 https: false,
-                query: String::new(),
                 protocol: String::new(),
                 remote: Addr::Inet(([127, 0, 0, 1], 8080).into()),
                 server: Addr::Inet(([127, 0, 0, 1], 8080).into()),
                 server_name: String::new(),
                 server_port: 8080,
-                script_name: String::new(),
-                document_root: String::new(),
-                script_filename: PathBuf::new(),
-                headers: Vec::new(),
-                server_vars: Vec::new(),
+                headers: HeaderMap::new(),
                 content_type: None,
                 content_length: -1,
-                body: Body::Raw(Box::new(std::io::empty())),
+                body: Body::Raw(std::io::Cursor::new(Vec::new())),
                 received_at: None,
                 tls: None,
             },
@@ -405,7 +385,12 @@ mod tests {
         };
         let headers = headers
             .iter()
-            .map(|(k, v)| ((*k).to_owned(), v.as_bytes().to_vec()))
+            .map(|(k, v)| {
+                (
+                    HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                    http::HeaderValue::from_str(v).unwrap(),
+                )
+            })
             .collect();
         ctx.commit_head(status, headers);
         ctx.head.expect("commit_head records a head")
@@ -417,7 +402,7 @@ mod tests {
         let head = head_of(200, &[("status", "404 Not Found"), ("X-Keep", "kept")]);
         assert_eq!(head.status, 404);
         assert_eq!(head.headers.len(), 1);
-        assert_eq!(head.headers[0].0, "X-Keep");
+        assert!(head.headers.contains_key("x-keep"));
     }
 
     /// The function removes an invalid `Status:` field without changing the response code. Sending this field would add a literal `Status:` field to the HTTP message.
@@ -426,5 +411,11 @@ mod tests {
         let head = head_of(201, &[("Status", "NotFound")]);
         assert_eq!(head.status, 201);
         assert!(head.headers.is_empty());
+    }
+
+    /// RFC 3875 section 6.3.3 makes `Status` the result code of the script, so it overrides the code that php-src recorded. https://www.rfc-editor.org/rfc/rfc3875#section-6.3.3
+    #[test]
+    fn commit_head_lets_the_status_field_override_the_recorded_code() {
+        assert_eq!(head_of(500, &[("Status", "404")]).status, 404);
     }
 }
