@@ -12,13 +12,21 @@ anyhow = { workspace = true }
 extension_api = { workspace = true }
 http = { workspace = true }
 php_sys = { workspace = true }
-tokio = { workspace = true, features = ["rt", "time"] }
+tokio = { workspace = true, features = ["rt", "time", "net"] }
 tracing = { workspace = true }
 # The capture layer in init_log_capture.
 tracing-subscriber = "0.3"
+# The app-record helpers case_results and dispatcher_record.
+serde_json = "1"
+# The gRPC harness in src/grpc.rs: a fake PHP behind rapira_grpc, and hyper clients for gRPC, gRPC-Web and Connect.
+rapira_grpc = { workspace = true }
+bytes = { workspace = true }
+base64 = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true, features = ["client", "http1", "http2"] }
+hyper-util = { workspace = true, features = ["tokio"] }
 
 [dev-dependencies]
-http-body-util = { workspace = true }
 rapira_http = { workspace = true }
 rapira_runtime = { workspace = true }
 # The streaming end-to-end tests set socket options on a client socket.
@@ -28,8 +36,6 @@ tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 # The end-to-end test harness controls the Rapira process.
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading"] }
-# The end-to-end tests check the log format with serde_json.
-serde_json = "1"
 
 # The end-to-end suite starts the Rapira binary and sends concurrent requests. The e2e feature excludes this suite from `cargo test --workspace`. Build Rapira first, then run `cargo test -p tests --test e2e --features e2e`.
 [features]

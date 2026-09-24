@@ -1,4 +1,5 @@
-use php_sys::{Mode, PoolHooks, Rapira};
+use http::HeaderMap;
+use php_sys::{GrpcOutcome, GrpcStatus, Mode, PoolHooks, Rapira};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 use tests::{drain, fixture, php_lock, req};
@@ -26,6 +27,45 @@ fn failboot_worker_serves_503_and_drops_cleanly() -> anyhow::Result<()> {
         .recv_timeout(Duration::from_secs(10))
         .expect("broken worker black-holed the request or hung Drop (A6 regression)");
     assert_eq!(status, 503, "a boot-failed worker must 503 the queued job");
+    scenario.join().expect("scenario thread panicked")?;
+    Ok(())
+}
+
+// A gRPC worker that has a fatal error before its receive loop must shed the queued call with UNAVAILABLE, as the HTTP worker sheds with 503.
+#[test]
+fn failboot_grpc_worker_sheds_with_unavailable() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let (done_tx, done_rx) = mpsc::sync_channel::<Option<GrpcOutcome>>(1);
+
+    let scenario = std::thread::spawn(move || -> anyhow::Result<()> {
+        let r = Rapira::start(Mode::GrpcDispatcher {
+            script: fixture("failboot_worker_tests/failboot-worker.php"),
+            services: tests::echo_services(),
+        })?;
+        let h = r.handle();
+        let rx = tests::call(&h, tests::grpc_request("echo:hi"))?;
+        drop(h);
+        let got = tests::outcome(rx);
+        drop(r);
+        let _ = done_tx.send(got);
+        Ok(())
+    });
+
+    let got = done_rx
+        .recv_timeout(Duration::from_secs(15))
+        .expect("broken worker black-holed the call or hung Drop");
+    assert_eq!(
+        got,
+        Some(GrpcOutcome {
+            headers: HeaderMap::new(),
+            trailers: HeaderMap::new(),
+            result: Err(GrpcStatus {
+                code: 14,
+                message: "the worker failed to boot".into(),
+                details: Vec::new(),
+            }),
+        })
+    );
     scenario.join().expect("scenario thread panicked")?;
     Ok(())
 }

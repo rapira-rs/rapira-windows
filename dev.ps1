@@ -3,13 +3,15 @@
 # .\dev.ps1 -Devel C:\php\php-devel -Runtime C:\php\php-runtime -Task build
 # .\dev.ps1 -Runtime C:\php\php-runtime -Task stubs -PhpSrc C:\src\php-src
 # .\dev.ps1 -Devel C:\php\php-devel -Task clangd
+# .\dev.ps1 -Task grpc_fixtures
 param(
-    [ValidateSet('build', 'test', 'test_e2e', 'coverage', 'stubs', 'clangd')]
+    [ValidateSet('build', 'test', 'test_e2e', 'coverage', 'stubs', 'clangd', 'grpc_fixtures')]
     [string]$Task = 'build',
     [string]$Devel,
     [string]$Runtime,
     [string]$Llvm = 'C:\Program Files\LLVM\bin',
-    [string]$PhpSrc
+    [string]$PhpSrc,
+    [string]$BufVersion = 'v1.73.0'
 )
 $ErrorActionPreference = 'Stop'
 
@@ -114,7 +116,7 @@ function Find-NativeVisualStudio {
     return $selected.Path
 }
 
-if ($Task -ne 'stubs') {
+if ($Task -notin @('stubs', 'grpc_fixtures')) {
     if ([string]::IsNullOrWhiteSpace($Devel)) {
         throw 'Pass -Devel with a PHP devel pack that contains a ZTS import library.'
     }
@@ -134,7 +136,7 @@ if ($Task -ne 'stubs') {
     }
 }
 
-$needsRuntime = $Task -ne 'clangd'
+$needsRuntime = $Task -notin @('clangd', 'grpc_fixtures')
 if ($needsRuntime) {
     if ([string]::IsNullOrWhiteSpace($Runtime)) {
         throw 'Pass -Runtime with a PHP ZTS runtime directory.'
@@ -163,6 +165,12 @@ if ($Task -eq 'stubs') {
     $stubFiles = @(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'crates\php_sys') -Filter '*.stub.php' -File)
     if ($stubFiles.Count -eq 0) {
         throw 'No .stub.php files found in crates\php_sys.'
+    }
+} elseif ($Task -eq 'grpc_fixtures') {
+    # buf runs through the Go module cache at a pinned version, so the descriptor sets are the same on every machine.
+    $go = Get-Command go -CommandType Application -ErrorAction SilentlyContinue
+    if (-not $go) {
+        throw 'go.exe was not found on PATH. Install Go to run buf.'
     }
 } else {
     Assert-File (Join-Path $Llvm 'libclang.dll')
@@ -204,6 +212,15 @@ try {
         Copy-Item -LiteralPath $generator -Destination $localGenerator -Force
         foreach ($stubFile in $stubFiles) {
             Invoke-Tool -Command $phpExe -Arguments @($localGenerator, $stubFile.FullName)
+        }
+    } elseif ($Task -eq 'grpc_fixtures') {
+        $buf = @('run', "github.com/bufbuild/buf/cmd/buf@$BufVersion", 'build', 'fixtures/grpc', '--as-file-descriptor-set')
+        Push-Location -LiteralPath (Join-Path $PSScriptRoot 'crates\tests')
+        try {
+            Invoke-Tool -Command $go.Source -Arguments ($buf + @('-o', 'fixtures/grpc/echo.binpb'))
+            Invoke-Tool -Command $go.Source -Arguments ($buf + @('--exclude-imports', '-o', 'fixtures/grpc/echo-no-imports.binpb'))
+        } finally {
+            Pop-Location
         }
     } elseif ($Task -eq 'clangd') {
         $clangCl = Join-Path $llvmDirectory 'clang-cl.exe'

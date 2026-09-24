@@ -79,6 +79,7 @@ clangd reads the generated commands from the ignored `target/clangd` directory. 
 | `crates/scoreboard` | Per-thread counters |
 | `crates/net` | Accept loop and server thread shared by the plugins |
 | `crates/plugins/http` | HTTP front |
+| `crates/plugins/grpc` | gRPC front |
 | `crates/middleware` | Built-in HTTP middleware |
 | `crates/tests` | Integration and end-to-end suites |
 
