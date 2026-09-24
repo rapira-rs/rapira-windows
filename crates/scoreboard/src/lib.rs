@@ -22,11 +22,10 @@ pub struct SharedSlot {
     pub handled: AtomicU64,
     pub errors: AtomicU64,
     pub recycles: AtomicU64,
-    pub restarts: AtomicU64,
     pub unhealthy: AtomicU32,
     _pad: [u8; 4],
     pub last_activity_ms: AtomicU64,
-    _tail: [u8; 8],
+    _tail: [u8; 16],
 }
 
 const _: () = assert!(size_of::<SharedSlot>() == 64 && align_of::<SharedSlot>() == 64);
@@ -46,9 +45,7 @@ pub struct SlotSnapshot {
     pub handled: u64,
     pub errors: u64,
     pub recycles: u64,
-    pub restarts: u64,
     pub unhealthy: bool,
-    pub last_activity_ms: u64,
 }
 
 /// Milliseconds from a process-wide monotonic [`Instant`](https://doc.rust-lang.org/std/time/struct.Instant.html).
@@ -58,7 +55,7 @@ pub fn now_millis() -> u64 {
 }
 
 impl Scoreboard {
-    /// Creates one slot for each worker thread before the workers start.
+    /// Creates one slot for each worker thread before the workers start. php_sys passes the configured thread count.
     pub fn create(nslots: usize) -> anyhow::Result<Scoreboard> {
         anyhow::ensure!(
             (1..=SB_MAX_SLOTS).contains(&nslots),
@@ -71,11 +68,10 @@ impl Scoreboard {
                 handled: AtomicU64::new(0),
                 errors: AtomicU64::new(0),
                 recycles: AtomicU64::new(0),
-                restarts: AtomicU64::new(0),
                 unhealthy: AtomicU32::new(0),
                 _pad: [0; 4],
                 last_activity_ms: AtomicU64::new(0),
-                _tail: [0; 8],
+                _tail: [0; 16],
             })
             .collect::<Box<[_]>>();
         Ok(Scoreboard {
@@ -83,16 +79,15 @@ impl Scoreboard {
         })
     }
 
-    pub fn slot(&self, i: usize) -> Option<&'static SharedSlot> {
-        self.slots.get(i)
+    pub fn slot(&self, i: usize) -> &'static SharedSlot {
+        &self.slots[i]
     }
 
     /// The boot thread reserves the slot before its worker starts.
     pub fn set_starting(&self, i: usize) {
-        if let Some(s) = self.slots.get(i) {
-            s.last_activity_ms.store(now_millis(), Relaxed);
-            s.state.store(SLOT_STARTING, Release);
-        }
+        let s = self.slot(i);
+        s.last_activity_ms.store(now_millis(), Relaxed);
+        s.state.store(SLOT_STARTING, Release);
     }
 
     pub fn snapshot_slots(&self) -> Vec<SlotSnapshot> {
@@ -107,9 +102,7 @@ impl Scoreboard {
                 handled: s.handled.load(Relaxed),
                 errors: s.errors.load(Relaxed),
                 recycles: s.recycles.load(Relaxed),
-                restarts: s.restarts.load(Relaxed),
                 unhealthy: s.unhealthy.load(Relaxed) != 0,
-                last_activity_ms: s.last_activity_ms.load(Relaxed),
             })
             .collect()
     }
@@ -121,7 +114,6 @@ impl SharedSlot {
         self.handled.store(0, Relaxed);
         self.errors.store(0, Relaxed);
         self.recycles.store(0, Relaxed);
-        self.restarts.store(0, Relaxed);
         self.unhealthy.store(0, Relaxed);
         self.pid.store(pid, Relaxed);
         self.last_activity_ms.store(now_millis(), Relaxed);
@@ -142,7 +134,7 @@ mod tests {
             .enumerate()
             .map(|(index, handled)| {
                 thread::spawn(move || {
-                    let slot = sb.slot(index).unwrap();
+                    let slot = sb.slot(index);
                     slot.bind(index as u32);
                     slot.handled.fetch_add(handled, Relaxed);
                     slot.recycles.fetch_add(index as u64 + 1, Relaxed);
@@ -166,9 +158,9 @@ mod tests {
         let sb = Scoreboard::create(1).unwrap();
         let before = now_millis();
         sb.set_starting(0);
-        let starting = sb.slot(0).unwrap().last_activity_ms.load(Relaxed);
+        let starting = sb.slot(0).last_activity_ms.load(Relaxed);
         let bound = thread::spawn(move || {
-            let slot = sb.slot(0).unwrap();
+            let slot = sb.slot(0);
             slot.bind(0);
             slot.last_activity_ms.load(Relaxed)
         })
@@ -184,14 +176,14 @@ mod tests {
     #[test]
     fn create_bind_snapshot_roundtrip() {
         let sb = Scoreboard::create(3).unwrap();
-        assert_eq!(sb.slot(0).unwrap().state.load(Relaxed), SLOT_FREE);
+        assert_eq!(sb.slot(0).state.load(Relaxed), SLOT_FREE);
         assert!(sb.snapshot_slots().is_empty());
 
         sb.set_starting(0);
-        assert_eq!(sb.slot(0).unwrap().state.load(Relaxed), SLOT_STARTING);
-        assert_eq!(sb.slot(1).unwrap().state.load(Relaxed), SLOT_FREE);
+        assert_eq!(sb.slot(0).state.load(Relaxed), SLOT_STARTING);
+        assert_eq!(sb.slot(1).state.load(Relaxed), SLOT_FREE);
 
-        let slot = sb.slot(0).unwrap();
+        let slot = sb.slot(0);
         slot.bind(4242);
         slot.handled.fetch_add(2, Relaxed);
         slot.errors.fetch_add(1, Relaxed);

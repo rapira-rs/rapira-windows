@@ -14,7 +14,6 @@ pub enum Event {
     Handled(bool),
     Shed,
     Recycled,
-    Restart,
     Unhealthy,
     Healthy,
     Idle,
@@ -45,9 +44,6 @@ pub fn sb_update(event: Event) {
         Event::Recycled => {
             s.recycles.fetch_add(1, Relaxed);
         }
-        Event::Restart => {
-            s.restarts.fetch_add(1, Relaxed);
-        }
         Event::Unhealthy => {
             s.unhealthy.store(1, Relaxed);
             crate::quota::fire_unhealthy();
@@ -75,7 +71,6 @@ pub struct ScoreboardSnapshot {
     pub handled: u64,
     pub errors: u64,
     pub recycles: u64,
-    pub restarts: u64,
     pub unhealthy: usize,
     pub workers: Vec<SlotSnapshot>,
 }
@@ -86,7 +81,6 @@ pub(crate) fn snapshot(board: &rapira_scoreboard::Scoreboard) -> ScoreboardSnaps
         handled: workers.iter().map(|w| w.handled).sum(),
         errors: workers.iter().map(|w| w.errors).sum(),
         recycles: workers.iter().map(|w| w.recycles).sum(),
-        restarts: workers.iter().map(|w| w.restarts).sum(),
         unhealthy: workers.iter().filter(|w| w.unhealthy).count(),
         workers,
     }
@@ -99,7 +93,7 @@ mod tests {
     #[test]
     fn rebuilt_interpreter_returns_to_idle_and_keeps_totals() {
         let board = rapira_scoreboard::Scoreboard::create(1).unwrap();
-        let slot = board.slot(0).unwrap();
+        let slot = board.slot(0);
         slot.bind(0);
         sb_set(slot);
         sb_update(Event::Shed);

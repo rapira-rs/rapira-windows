@@ -176,7 +176,7 @@ impl Rapira {
         };
 
         for index in 0..processes {
-            let slot = board.slot(index).expect("worker slot exists");
+            let slot = board.slot(index);
             board.set_starting(index);
             let rx = job_rx.clone();
             let mode = mode.clone();
@@ -830,7 +830,7 @@ try {
         let handled = rx.handled.clone();
         JOB_RX.with_borrow_mut(|slot| *slot = Some(rx));
         let board = rapira_scoreboard::Scoreboard::create(1).unwrap();
-        let slot = board.slot(0).unwrap();
+        let slot = board.slot(0);
         slot.bind(0);
         sb_set(slot);
         quota::install(0);
@@ -854,7 +854,7 @@ try {
         let handled = rx.handled.clone();
         JOB_RX.with_borrow_mut(|slot| *slot = Some(rx));
         let board = rapira_scoreboard::Scoreboard::create(1).unwrap();
-        let slot = board.slot(0).unwrap();
+        let slot = board.slot(0);
         slot.bind(0);
         sb_set(slot);
         quota::install(0);
