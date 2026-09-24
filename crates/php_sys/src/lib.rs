@@ -46,6 +46,9 @@ unsafe extern "C" {
     pub fn rapira_process_init();
     pub fn rapira_tsrmls_cache_update();
     pub fn rapira_thread_init();
+    // The mode of the calling interpreter thread (rapira_dispatcher.c).
+    pub fn rapira_mode_set(mode: c_int);
+    pub fn rapira_mode_get() -> c_int;
     pub fn rapira_thread_disarm();
     pub fn rapira_timer_rearm(timeout: zend_long);
     pub fn rapira_release_temporary_streams();

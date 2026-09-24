@@ -134,14 +134,6 @@ impl Rapira {
         }
 
         let dispatcher = matches!(mode, Mode::Dispatcher(_));
-        // SAFETY: safe, trust me, I'm a developer
-        unsafe {
-            crate::rapira_mode = match &mode {
-                Mode::Classic => RAPIRA_MODE_CLASSIC,
-                Mode::Worker(_) => RAPIRA_MODE_WORKER,
-                Mode::Dispatcher(_) => RAPIRA_MODE_DISPATCHER,
-            } as c_int;
-        }
 
         let pending = Arc::new(AtomicUsize::new(0));
         let (intake_tx, intake_rx) = bounded::<Box<Context>>(1024);
@@ -290,6 +282,13 @@ fn worker_main(
     let stopping = rx.stopping.clone();
     let handled = rx.handled.clone();
     slot.bind(index as u32);
+    let c_mode = match &mode {
+        Mode::Classic => RAPIRA_MODE_CLASSIC,
+        Mode::Worker(_) => RAPIRA_MODE_WORKER,
+        Mode::Dispatcher(_) => RAPIRA_MODE_DISPATCHER,
+    } as c_int;
+    // SAFETY: safe, trust me, I'm a developer
+    unsafe { crate::rapira_mode_set(c_mode) };
     JOB_RX.with_borrow_mut(|slot| *slot = Some(rx));
     let mut crash_streak = 0;
     let mut first_generation = true;

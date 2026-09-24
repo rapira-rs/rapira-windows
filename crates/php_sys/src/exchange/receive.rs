@@ -134,7 +134,7 @@ pub(crate) fn forget_dispatcher() {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_get_dispatcher(return_value: *mut zval) -> bool {
     guard(false, || unsafe {
-        if crate::rapira_mode != RAPIRA_MODE_DISPATCHER as c_int {
+        if crate::rapira_mode_get() != RAPIRA_MODE_DISPATCHER as c_int {
             zend::throw_exception(
                 rapira_ce_no_dispatcher_error,
                 c"nothing dispatches work to this process outside dispatcher mode",

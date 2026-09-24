@@ -52,7 +52,7 @@ int rapira_finish_output(void) {
 
 PHP_FUNCTION(rapira_finish_request) {
     ZEND_PARSE_PARAMETERS_NONE();
-    if (rapira_mode == RAPIRA_MODE_DISPATCHER) {
+    if (rapira_mode_get() == RAPIRA_MODE_DISPATCHER) {
         // This function would write PHP output buffers to the log in dispatcher mode.
         zend_throw_error(
             NULL, "rapira_finish_request() is not available in dispatcher "

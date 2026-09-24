@@ -6,7 +6,7 @@ bind! {
     sapi_startup, sapi_shutdown, php_module_startup, php_module_shutdown, php_request_startup,
     php_tsrm_startup_ex, tsrm_shutdown, ts_resource_ex, ts_free_thread,
     php_execute_script, zend_error, zend_stream_init_filename, zend_destroy_file_handle,
-    php_register_variable_safe, rapira_mode, RAPIRA_MODE_CLASSIC, RAPIRA_MODE_WORKER,
+    php_register_variable_safe, RAPIRA_MODE_CLASSIC, RAPIRA_MODE_WORKER,
     RAPIRA_MODE_DISPATCHER,
     // Both parts of the linked libphp version check.
     PHP_VERSION_ID, php_version_id,

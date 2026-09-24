@@ -16,14 +16,19 @@ extern bool rapira_rs_get_dispatcher(zval *return_value);
 extern int rapira_rs_handle_request(zend_fcall_info *fci,
                                     zend_fcall_info_cache *fcc);
 
-int rapira_mode = RAPIRA_MODE_CLASSIC;
+// ZEND_TLS makes the variable static to this file, so the accessors below serve the other files and Rust.
+ZEND_TLS int rapira_mode = RAPIRA_MODE_CLASSIC;
+
+void rapira_mode_set(int mode) { rapira_mode = mode; }
+
+int rapira_mode_get(void) { return rapira_mode; }
 
 ZEND_FUNCTION(Rapira_get_version) {
     ZEND_PARSE_PARAMETERS_NONE();
     RETURN_STRINGL(RAPIRA_VERSION, sizeof(RAPIRA_VERSION) - 1);
 }
 
-// start.rs sets rapira_mode before the PHP thread starts. The value stays constant for the process.
+// start.rs sets rapira_mode once per interpreter thread before the thread runs PHP. The value stays constant for the thread.
 ZEND_FUNCTION(Rapira_get_mode) {
     ZEND_PARSE_PARAMETERS_NONE();
 

@@ -85,13 +85,15 @@ bool rapira_instanceof_function_slow(const zend_class_entry *instance_ce, const 
 typedef zend_string *(*rapira_string_init_interned_fn)(const char *str, size_t size, bool permanent);
 extern rapira_string_init_interned_fn rapira_zend_string_init_interned;
 
-// Keep these values the same as Mode in types.rs and start_pool in start.rs.
+// Keep these values the same as Mode in types.rs and worker_main in start.rs.
 enum {
     RAPIRA_MODE_CLASSIC = 0,
     RAPIRA_MODE_WORKER = 1,
     RAPIRA_MODE_DISPATCHER = 2,
 };
-extern int rapira_mode;
+// The mode of the calling interpreter thread (rapira_dispatcher.c).
+void rapira_mode_set(int mode);
+int rapira_mode_get(void);
 
 // Keep these values the same as HandleAction in rapira_worker.rs.
 enum {
