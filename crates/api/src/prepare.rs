@@ -11,6 +11,14 @@ pub enum ListenAddr {
     Tcp(SocketAddr),
 }
 
+impl std::fmt::Display for ListenAddr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tcp(a) => write!(f, "{a}"),
+        }
+    }
+}
+
 /// Owns a listener socket until the extension takes ownership.
 #[derive(Debug)]
 pub struct PreparedListener {
@@ -42,6 +50,12 @@ impl PrepareCtx {
     /// The resolved address of each bound listener, in bind order. A test reads the port of a listener that was bound to port 0.
     pub fn listener_addrs(&self) -> Vec<ListenAddr> {
         self.addrs.clone()
+    }
+
+    pub fn bind(&mut self, addr: &ListenAddr) -> anyhow::Result<PreparedListener> {
+        match addr {
+            ListenAddr::Tcp(addr) => self.bind_tcp(*addr),
+        }
     }
 
     /// Sets nonblocking mode before the extension creates a Tokio listener. https://docs.rs/tokio/latest/tokio/net/struct.TcpListener.html#method.from_std
