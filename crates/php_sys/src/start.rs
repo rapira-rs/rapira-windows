@@ -14,7 +14,7 @@ use types::Unit;
 
 use crate::quota::{self, PoolHooks};
 use crate::rapira_worker::{WorkerExit, rapira_worker};
-use crate::scoreboard::{Event, sb_set, sb_update};
+use crate::scoreboard::{Event, ScoreboardSnapshot, sb_set, sb_update};
 use crate::{classic_worker::classic_worker, types::Mode, *};
 
 const QUICK_CRASH: Duration = Duration::from_secs(10);
