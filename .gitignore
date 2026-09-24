@@ -9,6 +9,9 @@ target
 # rustfmt generates these backup files.
 **/*.rs.bk
 
+# macOS Finder creates these files in a checkout.
+.DS_Store
+
 # MSVC builds of rustc generate these debug information files.
 *.pdb
 

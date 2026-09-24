@@ -46,6 +46,7 @@ jobs:
   test:
     needs: prepare
     runs-on: windows-latest
+    timeout-minutes: 45
     env:
       CARGO_TARGET: x86_64-pc-windows-msvc
     strategy:

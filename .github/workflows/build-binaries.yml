@@ -374,12 +374,8 @@ jobs:
                       gh api -X POST "repos/$GH_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$SHA" >/dev/null
                   fi
                   gh release edit "$TAG" --prerelease --notes "Rolling Windows build. Version $VERSION. Commit $SHA."
-                  KEEP=$(tr -cd '[:alnum:]' <<< "$VERSION")
-                  ASSETS=$(gh release view "$TAG" --json assets --jq '.assets[].name')
-                  # Confirm that the filter keeps the assets from this run before it removes older assets.
-                  tr -cd '[:alnum:]\n' <<< "$ASSETS" | grep -qF "$KEEP" \
-                    || { echo "::error::no asset matches $KEEP"; exit 1; }
-                  while read -r name; do
-                      case "$(tr -cd '[:alnum:]' <<< "$name")" in *"$KEEP"*) continue ;; esac
+                  # Every asset name from this run contains the version as given, so an older asset is one that does not.
+                  gh release view "$TAG" --json assets --jq '.assets[].name' | while read -r name; do
+                      case "$name" in *"$VERSION"*) continue ;; esac
                       gh release delete-asset "$TAG" "$name" --yes
-                  done <<< "$ASSETS"
+                  done
