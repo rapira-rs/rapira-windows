@@ -711,7 +711,18 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "rapira_net",
  "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "rapira_net"
+version = "0.8.0"
+dependencies = [
+ "anyhow",
+ "extension_api",
  "tokio",
  "tracing",
 ]

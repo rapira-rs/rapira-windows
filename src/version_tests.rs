@@ -11,6 +11,7 @@ const PACKAGE_MANIFESTS: &[(&str, &str)] = &[
         "rapira_http",
         include_str!("../crates/plugins/http/Cargo.toml"),
     ),
+    ("rapira_net", include_str!("../crates/net/Cargo.toml")),
     (
         "rapira_runtime",
         include_str!("../crates/runtime/Cargo.toml"),
