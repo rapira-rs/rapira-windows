@@ -28,6 +28,7 @@ Download the archive for your PHP minor and architecture from [GitHub Releases](
 - `getmypid()` returns the same process ID in every interpreter.
 - Every request starts in the process working directory. That directory is the `http.pool.entrypoint` directory, or the `grpc.pool.entrypoint` directory when the configuration has no `[http]` table. A `chdir()` call does not persist across requests because ZTS PHP resets the thread working directory at request startup. A gRPC pool script that runs next to an HTTP pool uses `__DIR__` for its relative paths.
 - A PHP boot failure in either pool stops the server process with exit code 70.
+- A listener that stops serving stops the server process with exit code 1.
 - A native crash in one interpreter thread stops the server process.
 - `http.listen` and `grpc.listen` accept a TCP address. They do not accept a Unix socket path.
 - The first Ctrl+C or Ctrl+Break event drains active work. A second event forces exit code 130.

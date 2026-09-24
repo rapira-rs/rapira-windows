@@ -42,6 +42,13 @@ fn exit_code(boot_failed: bool, outcomes: Option<&[Result<(), String>]>) -> u8 {
     }
 }
 
+/// Stops every extension host. The stoppers exist after every host is running.
+fn stop_all(stoppers: &OnceLock<Vec<Stopper>>) {
+    for stopper in stoppers.get().into_iter().flatten() {
+        stopper.stop();
+    }
+}
+
 fn remove_spool_dir(dir: Option<&Path>) {
     if let Some(dir) = dir
         && let Err(e) = std::fs::remove_dir_all(dir)
@@ -90,11 +97,7 @@ pub fn worker_body(mut pools: Vec<PoolRun>, grace: Duration) -> anyhow::Result<W
         let stoppers = stoppers.clone();
         move || {
             boot_failed.store(true, SeqCst);
-            if let Some(stoppers) = stoppers.get() {
-                for stopper in stoppers {
-                    stopper.stop();
-                }
-            }
+            stop_all(&stoppers);
         }
     });
 
@@ -156,16 +159,21 @@ pub fn worker_body(mut pools: Vec<PoolRun>, grace: Duration) -> anyhow::Result<W
         let _ = stoppers.set(runnings.iter().map(Running::stopper).collect());
         // PHP can fail before the stoppers are registered.
         if boot_failed.load(SeqCst) {
-            for running in &runnings {
-                running.stopper().stop();
-            }
+            stop_all(&stoppers);
         }
-        // `serve` blocks on the runtime of its host, so each host serves on its own thread.
+        // `serve` blocks on the runtime of its host, so each host serves on its own thread. A host that stops serving stops the other hosts, so the process exits instead of serving one plugin.
         let shutdown = &shutdown;
+        let stoppers = &stoppers;
         std::thread::scope(|scope| {
             let served: Vec<_> = runnings
                 .into_iter()
-                .map(|running| scope.spawn(move || running.serve(shutdown)))
+                .map(|running| {
+                    scope.spawn(move || {
+                        let outcomes = catch_unwind(AssertUnwindSafe(|| running.serve(shutdown)));
+                        stop_all(stoppers);
+                        outcomes.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+                    })
+                })
                 .collect();
             served
                 .into_iter()

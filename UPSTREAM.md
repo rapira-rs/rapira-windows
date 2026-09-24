@@ -17,7 +17,7 @@ Rapira for Windows runs one process with one static pool of ZTS PHP interpreter 
 | `crates/*/Cargo.toml` | Version 0.8.0; `windows-sys` in place of `libc`; the `tempfile` and `socket2` test dependencies; the exact tower-http 0.7.1 pin. |
 | `crates/php_sys/build.rs` | Compiles the C files for the MSVC toolchain, defines the package version, selects php84 or php85, maps the PHP vectorcall exports to C ABI bridges, generates the DLL data imports, and rejects an NTS PHP. |
 | `ci/`, `dev.ps1`, `.clangd` | Native Windows build, test, fixture, and release tooling. The `grpc_fixtures` task replaces the Makefile target. |
-| `crates/tests/fixtures/grpc/` | The fixtures match the source bytes. `echo.proto` names the Makefile target in its comment because a rebuild with the pinned `buf` release writes different descriptor bytes. |
+| `crates/tests/fixtures/grpc/` | The descriptor sets match the source bytes. The `echo.proto` comment names the `dev.ps1` task. |
 
 ## PHP SAPI (`crates/php_sys`)
 
@@ -64,7 +64,7 @@ Rapira for Windows runs one process with one static pool of ZTS PHP interpreter 
 |---|---|
 | `crates/config/src/lib.rs`, `grpc.rs`, `listen.rs`, `pool.rs`, `supervisor.rs` | Accept only TCP listen addresses, use the Windows pool key set, and describe the drain margin within the runtime timeout budget. |
 | `src/main.rs` | Boots one process: validates paths, loads the gRPC schema, and binds every listener before PHP starts, probes spool owners through Windows process APIs, keeps the pidfile handle until the shutdown verdict, and calls `TerminateProcess` when the interpreter threads did not join. |
-| `src/worker.rs` | Enters the entrypoint directory of the first pool, sets the script paths of the HTTP pool, boots PHP once, adds one pool per plugin table, serves each extension host on its own thread, and computes the exit code from the shared boot-failure hook and the extension outcomes. |
+| `src/worker.rs` | Enters the entrypoint directory of the first pool, sets the script paths of the HTTP pool, boots PHP once, adds one pool per plugin table, serves each extension host on its own thread, stops every host when one host stops, and computes the exit code from the shared boot-failure hook and the extension outcomes. |
 | `src/pidfile.rs` | Creates the pidfile exclusively and keeps its handle until clean shutdown. |
 | `src/logging.rs` | Prints the Windows package banner. |
 | `src/version_tests.rs` | Verifies one product version across the workspace packages, the CLI, and the PHP API. |
