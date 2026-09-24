@@ -17,6 +17,7 @@
 --enable-calendar
 --enable-exif
 --enable-ftp
+--enable-bcmath
 --enable-opcache
 --disable-opcache-jit
 --with-php-build={PHP_BUILD}

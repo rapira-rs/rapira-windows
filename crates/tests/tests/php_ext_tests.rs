@@ -26,6 +26,27 @@ fn check_extension(name: &str, token: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Checks one successful request for an extension that has no exception path in its fixture.
+fn success(name: &str, token: &str) -> anyhow::Result<()> {
+    let out = run_worker(name, &["/"])?;
+    if out[0].1 == "skip" {
+        assert_skip_allowed(name);
+        return Ok(());
+    }
+    assert_eq!(out[0].0, 200, "{name} must serve 200 (got: {:?})", out[0]);
+    assert!(
+        out[0].1.contains(token),
+        "{name} must echo {token:?} (got: {:?})",
+        out[0].1
+    );
+    Ok(())
+}
+
+#[test]
+fn bcmath_success() -> anyhow::Result<()> {
+    success("php_ext/bcmath-worker.php", "bcmath:0.30")
+}
+
 #[test]
 fn zlib_success_and_exception() -> anyhow::Result<()> {
     check_extension("php_ext/zlib-worker.php", "zlib:rapira zlib")
