@@ -316,7 +316,7 @@ fn scoreboard_counts_worker() -> anyhow::Result<()> {
         req("/?boom=1", "shared/throw-worker.php"),
     )?);
     drop(h);
-    let snap = r.scoreboard().expect("private scoreboard slot");
+    let snap = r.scoreboard();
     drop(r);
 
     assert_eq!(snap.handled, 3, "3 requests handled");
@@ -338,7 +338,7 @@ fn scoreboard_counts_recycles_worker() -> anyhow::Result<()> {
         req("/", "shared/shutdown-fatal-worker.php"),
     )?);
     drop(h);
-    let snap = r.scoreboard().expect("private scoreboard slot");
+    let snap = r.scoreboard();
     drop(r);
 
     assert_eq!(s2, 200, "worker recovers after the recycle");
@@ -360,7 +360,7 @@ fn scoreboard_counts_classic() -> anyhow::Result<()> {
     let _ = drain(tests::submit(&h, req("/", "shared/hello.php"))?);
     let _ = drain(tests::submit(&h, req("/", "basic_tests/failboot.php"))?);
     drop(h);
-    let snap = r.scoreboard().expect("private scoreboard slot");
+    let snap = r.scoreboard();
     drop(r);
 
     assert_eq!(snap.handled, 3, "3 requests handled");

@@ -217,7 +217,7 @@ impl Store {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct CachingBackend {
     store: Arc<Mutex<Store>>,
     #[cfg(test)]

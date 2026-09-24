@@ -115,7 +115,7 @@ fn uncaught_throwable_reaches_exception_handler() -> anyhow::Result<()> {
         req("/", "general_tests/exception-handler-worker.php"),
     )?);
     drop(h);
-    let snap = r.scoreboard().expect("private scoreboard slot");
+    let snap = r.scoreboard();
     drop(r);
 
     assert_eq!(s1, 200);

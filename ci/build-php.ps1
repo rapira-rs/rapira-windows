@@ -605,6 +605,8 @@ try {
         $before = '#elif defined(__aarch64__) || defined(_M_ARM64)'
         $after = '#elif (defined(__aarch64__) || defined(_M_ARM64)) && !defined(_MSC_VER)'
         Replace-RequiredText -Path (Join-Path $sourceRoot 'Zend\zend_simd.h') -Before $before -After $after -Description 'PHP 8.5 MSVC ARM64 SIMD fallback'
+        # The bcmath NEON path uses GCC compound literals and inline assembly. Without XSSE2 the library uses its scalar code.
+        Replace-RequiredText -Path (Join-Path $sourceRoot 'ext\bcmath\libbcmath\src\xsse.h') -Before $before -After $after -Description 'PHP 8.5 MSVC ARM64 bcmath SIMD fallback'
     }
 
     Invoke-Batch -NativeCmd $nativeCmd -WorkingDirectory $workRoot -Name 'tool-probe' -Lines @(

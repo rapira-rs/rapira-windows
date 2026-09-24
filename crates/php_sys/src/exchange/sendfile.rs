@@ -1,12 +1,13 @@
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Mutex, PoisonError};
 
 use super::respond::{Verb, discard_unit, emit_head, seal, send_frame, throw_verb};
 use super::*;
 
-static SENDFILE_ROOT: OnceLock<PathBuf> = OnceLock::new();
+/// A mutex, because one test binary sets several roots. The server sets the root once before PHP starts.
+static SENDFILE_ROOT: Mutex<Option<PathBuf>> = Mutex::new(None);
 
-/// The first call sets the root for the process; a later call changes nothing.
+/// Sets the root of the process. A later call replaces it.
 pub fn set_sendfile_root(root: PathBuf) {
     let canonical = std::fs::canonicalize(&root).unwrap_or_else(|e| {
         tracing::warn!(
@@ -16,7 +17,14 @@ pub fn set_sendfile_root(root: PathBuf) {
         );
         root
     });
-    let _ = SENDFILE_ROOT.set(canonical);
+    *SENDFILE_ROOT.lock().unwrap_or_else(PoisonError::into_inner) = Some(canonical);
+}
+
+fn sendfile_root() -> Option<PathBuf> {
+    SENDFILE_ROOT
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
 }
 
 fn open_send_file(
@@ -26,10 +34,10 @@ fn open_send_file(
 ) -> Result<(std::fs::File, u64), &'static CStr> {
     let path = std::str::from_utf8(path).map_err(|_| c"the path is not valid UTF-8")?;
     let canonical = std::fs::canonicalize(path).map_err(|_| c"no readable file at the path")?;
-    let Some(root) = SENDFILE_ROOT.get() else {
+    let Some(root) = sendfile_root() else {
         return Err(c"no sendfile root is configured");
     };
-    if !canonical.starts_with(root) {
+    if !canonical.starts_with(&root) {
         return Err(c"the path is outside the configured sendfile root");
     }
     let file = std::fs::File::open(&canonical).map_err(|_| c"no readable file at the path")?;

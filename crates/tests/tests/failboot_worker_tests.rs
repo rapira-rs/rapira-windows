@@ -109,7 +109,7 @@ fn failboot_worker_flags_unhealthy_after_threshold() -> anyhow::Result<()> {
             .recv_timeout(Duration::from_secs(10))
             .expect("worker did not reach the unhealthy boot-failure hook");
         // A new Windows interpreter generation clears the current health in the bind-once slot. Capture generation 1 at the threshold before generation 2 starts.
-        let unhealthy = r.scoreboard().unhealthy;
+        let unhealthy = r.scoreboard().unhealthy == 1;
         let _ = hook_release_tx.send(());
 
         let (s, _) = drain(fifth);

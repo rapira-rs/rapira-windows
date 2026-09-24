@@ -37,7 +37,7 @@ Rapira for Windows runs one process with one static pool of ZTS PHP interpreter 
 | `src/exchange/mod.rs` | Converts Windows paths to bytes and exposes the dispatcher-cache reset. |
 | `src/exchange/receive.rs` | Forgets the cached dispatcher of the interpreter and reads the run mode of the thread. The C shims contain the timer bailouts. |
 | `src/exchange/respond.rs` | Safe functions that use the C timer shims while a frame sender waits. |
-| `src/exchange/sendfile.rs` | Rejects a path that is not valid UTF-8 before the Windows canonicalization and containment checks. |
+| `src/exchange/sendfile.rs` | Rejects a path that is not valid UTF-8 before the Windows canonicalization and containment checks. Keeps the root in a mutex, because one test binary sets several roots. |
 | `src/exchange/tests.rs` | Tests Unicode, invalid UTF-8, and verbatim paths; uses Windows symlinks with a privilege-only skip. |
 | `src/types.rs` | No `Job` wrapper. |
 

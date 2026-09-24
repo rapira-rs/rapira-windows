@@ -374,8 +374,8 @@ jobs:
                       gh api -X POST "repos/$GH_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$SHA" >/dev/null
                   fi
                   gh release edit "$TAG" --prerelease --notes "Rolling Windows build. Version $VERSION. Commit $SHA."
-                  # Every asset name from this run contains the version as given, so an older asset is one that does not.
+                  # Every asset name from this run contains the delimited version, so an older asset is one that does not.
                   gh release view "$TAG" --json assets --jq '.assets[].name' | while read -r name; do
-                      case "$name" in *"$VERSION"*) continue ;; esac
+                      case "$name" in *"-v$VERSION-"*) continue ;; esac
                       gh release delete-asset "$TAG" "$name" --yes
                   done
