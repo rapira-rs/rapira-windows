@@ -1,7 +1,8 @@
 use std::time::{Duration, Instant};
 
 use crate::harness::{
-    Conn, diagnostics, http_get, http_get_raw, spawn_with_config, wait_log_contains, wait_workers,
+    Conn, diagnostics, http_get, http_get_raw, spawn_with_config, spawn_without_rust_log,
+    wait_log_contains, wait_workers,
 };
 
 const T: Duration = Duration::from_secs(10);
@@ -364,10 +365,11 @@ fn reset_during_buffered_write_cancels_php() {
     use std::io::{Read, Write};
     use std::net::TcpStream;
 
-    let srv = spawn_with_config(
+    // The debug log records when the connection ends, which the failure diagnostics show.
+    let srv = spawn_without_rust_log(
         "lifecycle/buffered-download-worker.php",
         1,
-        "mode = \"dispatcher\"\n",
+        "mode = \"dispatcher\"\n[log]\nlevel = \"debug\"\n",
     );
     wait_workers(&srv, T, "1 worker", |p| p.len() == 1);
     let pid = srv.pid();

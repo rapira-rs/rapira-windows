@@ -178,7 +178,7 @@ fn abandoned_exchange_is_discarded_by_next_receive() {
         diagnostics(&srv)
     );
     assert!(
-        wait_log_contains(&srv, "discarded an unfinalized exchange", BOOT),
+        wait_log_contains(&srv, "discarded an unfinalized unit", BOOT),
         "the discard must be logged\n{}",
         diagnostics(&srv)
     );
