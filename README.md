@@ -11,7 +11,7 @@ This repository provides the Windows build of [Rapira](https://github.com/rapira
 - It produces `rapira.exe` and requires the [Microsoft Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist) for the target architecture.
 - Release archives use the name `rapira-v<VERSION>-php<8.4|8.5>-windows-<x86_64|arm64>.zip`. Each architecture has a `rapira-v<VERSION>-windows-<x86_64|arm64>-SHA256SUMS.txt` file.
 - Each archive contains `rapira.exe`, the matching project-built PHP runtime, extension DLLs, `php.ini`, `PHP_VERSION.txt`, `README.md`, `LICENSE`, and `PHP-LICENSE.txt`.
-- The bundled PHP profile provides fileinfo and mbstring as extension DLLs. It includes OPcache and disables JIT.
+- The bundled PHP profile provides fileinfo and mbstring as extension DLLs. It includes bcmath and OPcache and disables JIT.
 - The bundled PHP profile excludes OpenSSL, cURL, SQLite, PDO SQLite, XML, libxml, and iconv. FTP has no TLS support. mbregex is disabled.
 - Extension DLLs must match the bundled PHP minor, ZTS setting, architecture, and toolchain. See the [PHP Windows extension requirements](https://www.php.net/manual/en/install.pecl.windows.php).
 
@@ -19,14 +19,16 @@ Download the archive for your PHP minor and architecture from [GitHub Releases](
 
 ## Process model and control
 
+- Start the server with `rapira.exe serve rapira.toml`. The configuration file is required, and the command has no override flags.
 - Rapira starts one server process with a static pool of PHP interpreter threads.
 - MINIT runs once before the interpreter threads start.
-- `pool.processes` and `--processes` set the interpreter thread count.
+- `http.pool.processes` sets the interpreter thread count.
 - The Windows build supports only a static pool. It rejects the main build's scaling settings. It does not support reload or status requests.
-- `pool.max_requests` rebuilds an interpreter on the same thread.
+- `http.pool.max_requests` rebuilds an interpreter on the same thread.
 - `getmypid()` returns the same process ID in every interpreter.
+- Every request starts in the process working directory, which is the entrypoint directory. A `chdir()` call does not persist across requests because ZTS PHP resets the thread working directory at request startup.
 - A native crash in one interpreter thread stops the server process.
-- `--listen` and `http.listen` accept TCP addresses. They do not accept Unix socket paths.
+- `http.listen` accepts a TCP address. It does not accept a Unix socket path.
 - The first Ctrl+C or Ctrl+Break event drains active work. A second event forces exit code 130.
 - Closing the console window does not start a drain.
 - A forced exit can leave the pidfile. Remove a stale pidfile before the next start.

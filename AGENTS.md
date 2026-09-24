@@ -22,7 +22,8 @@
 - Run one process with a static pool of PHP interpreter threads.
 - Run MINIT once before the interpreter threads start.
 - Run in the foreground. Keep pidfile support.
-- `pool.processes` and `--processes` set the interpreter thread count.
+- `http.pool.processes` sets the interpreter thread count.
+- `rapira serve <CONFIG>` is the only command. The configuration file is required, and the command has no override flags.
 - Do not add reload, status, or dynamic pool scaling.
 - Use `TerminateProcess` for a forced exit while interpreter threads can be alive.
 - Put host logic in Rust through exported Zend APIs when practical. Use C for argument parsing shells, bailout isolation, and macro shims.

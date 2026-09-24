@@ -74,7 +74,7 @@ clangd reads the generated commands from the ignored `target/clangd` directory. 
 | `src/` | CLI, configuration boot, logging, pidfile, and interpreter pool startup |
 | `crates/php_sys` | PHP SAPI, C glue, bindgen bindings, request loops, and PHP stubs |
 | `crates/runtime` | Extension runtime and Windows console control handling |
-| `crates/config` | `rapira.toml` and CLI configuration |
+| `crates/config` | `rapira.toml` configuration |
 | `crates/api` | Native extension contract |
 | `crates/scoreboard` | Per-thread counters |
 | `crates/plugins/http` | HTTP front |
