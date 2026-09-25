@@ -86,7 +86,8 @@ Rapira for Windows runs one process with one static pool of ZTS PHP interpreter 
 | `crates/tests/tests/e2e/harness.rs` | Uses process groups, checked Ctrl+Break delivery, thread readiness sets, repository examples, and Windows PHP paths. Renders the `[grpc]` tables with socket addresses. |
 | `crates/tests/tests/e2e/grpc.rs` | Ctrl+Break in place of SIGQUIT. The boot-failure case names the PHP boot. |
 | `crates/tests/tests/e2e/lifecycle.rs` | Tests Windows shutdown and exit codes, bind failure, restart, per-thread recycle, memory bounds, and crash backoff. Uses the process ID for every worker because the pool is threads. |
-| `crates/tests/tests/e2e/streaming.rs` | Sets the client socket options with socket2. The reset case fixes the client receive window before the handshake, because a Windows loopback connection with an autotuned window absorbs the whole 32 MiB body. No worker-process death case. |
+| `crates/tests/tests/e2e/streaming.rs` | Sets the client socket options with socket2. The reset case fixes the client receive window before the handshake, so the client kernel drains only a few KiB of the stalled body. No worker-process death case. |
+| `crates/tests/tests/e2e/fixtures/lifecycle/buffered-download-worker.php` | Writes the body in several frames, because Windows accepts one send of any size into a socket send buffer below its limit and refuses the next send. The deadline is shorter than the test read timeout. |
 | `crates/tests/tests/e2e/concurrency.rs`, `ini.rs`, `logging.rs`, `static_files.rs` | Windows thread counts, paths, and banner. |
 | `crates/tests/tests/e2e/examples.rs`, `timeout.rs` | Windows-only proofs for the shipped example and the per-thread timer. |
 | `examples/` | PowerShell commands and the fixed interpreter thread pool configuration with a commented `[grpc]` block. |

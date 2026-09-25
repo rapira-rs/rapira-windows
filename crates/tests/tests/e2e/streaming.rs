@@ -373,7 +373,7 @@ fn reset_during_buffered_write_cancels_php() {
     wait_workers(&srv, T, "1 worker", |p| p.len() == 1);
     let pid = srv.pid();
     // A small receive window keeps most of the response in the server, so the reset arrives while the server still writes.
-    // The size is set before the handshake, because SO_RCVBUF on a connected Windows socket does not have to change the receive window, and an autotuned loopback window holds the whole body. https://learn.microsoft.com/en-us/windows/win32/winsock/sol-socket-socket-options
+    // The size is set before the handshake, because SO_RCVBUF on a connected Windows socket does not have to change the receive window. https://learn.microsoft.com/en-us/windows/win32/winsock/sol-socket-socket-options
     let mut client = socket2::Socket::new(
         socket2::Domain::for_address(srv.addr),
         socket2::Type::STREAM,

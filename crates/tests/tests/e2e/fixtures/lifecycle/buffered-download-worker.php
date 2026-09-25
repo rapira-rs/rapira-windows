@@ -11,16 +11,19 @@ try {
         $ex = $d->receive();
         ++$sequence;
         if ($ex->getRequest()->target === '/download') {
-            // Larger than the client receive buffer plus the server send buffer, which autotune to a few MiB, so the write stalls in hyper.
-            $size = 32 * 1024 * 1024;
-            $ex->writeHead(200, ['content-length' => [(string) $size]]);
-            $ex->writeBody(str_repeat('x', $size), eos: false);
-            // Bounded, so a stuck test fails on the state assertion instead of a read timeout.
-            $deadline = microtime(true) + 20;
-            while (!$ex->isCancelled() && microtime(true) < $deadline) {
-                usleep(1_000);
-            }
+            // Windows accepts one send of any size while the socket send buffer is below its limit and refuses the next send, so several frames make the second socket write stall in hyper. https://learn.microsoft.com/en-us/troubleshoot/windows-server/networking/slow-performance-copy-data-tcp-server-sockets-api
+            $chunk = str_repeat('x', 8 * 1024 * 1024);
+            $chunks = 4;
+            $ex->writeHead(200, ['content-length' => [(string) ($chunks * strlen($chunk))]]);
             try {
+                for ($i = 0; $i < $chunks; ++$i) {
+                    $ex->writeBody($chunk, eos: false);
+                }
+                // Shorter than the read timeout of the test, so a stuck test fails on the state assertion instead of a read timeout.
+                $deadline = microtime(true) + 5;
+                while (!$ex->isCancelled() && microtime(true) < $deadline) {
+                    usleep(1_000);
+                }
                 $ex->writeBody('', eos: true);
                 $result = 'timeout';
             } catch (WorkDiscardedException) {
