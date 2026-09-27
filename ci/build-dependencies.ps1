@@ -98,7 +98,7 @@ function Build-Arm64Dependencies {
 
     Cmake libxml2 @('-DBUILD_SHARED_LIBS=OFF', '-DLIBXML2_WITH_PROGRAMS=OFF', '-DLIBXML2_WITH_TESTS=OFF',
         '-DLIBXML2_WITH_PYTHON=OFF', '-DLIBXML2_WITH_LZMA=OFF', '-DLIBXML2_WITH_LEGACY=ON', "-DIconv_LIBRARY=$Root\lib\libiconv_a.lib")
-    Copy-Item (Join-Path $Root 'lib\libxml2.lib') (Join-Path $Root 'lib\libxml2_a.lib')
+    Copy-Item (Join-Path $Root 'lib\libxml2s.lib') (Join-Path $Root 'lib\libxml2_a.lib')
 
     Push-Location (Join-Path $sources 'sqlite3')
     try {
