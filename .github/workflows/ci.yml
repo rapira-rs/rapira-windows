@@ -55,11 +55,13 @@ jobs:
             arch: arm64
             runner: windows-11-vs2026-arm
     name: ${{ matrix.arch }} PHP ${{ matrix.php }}
-    env:
-      PHP_INSTALL_DIR: ${{ runner.temp }}/php-${{ matrix.arch }}/${{ fromJSON(matrix.spec).php_version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
+      - name: Set PHP install path
+        run: |
+          $path = Join-Path $env:RUNNER_TEMP 'php-${{ matrix.arch }}/${{ fromJSON(matrix.spec).php_version }}'
+          "PHP_INSTALL_DIR=$path" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
       - name: Restore native PHP
         id: php-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
