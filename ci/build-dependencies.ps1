@@ -84,7 +84,8 @@ function Build-Arm64Dependencies {
         Replace-RequiredText (Join-Path $sources 'openssl\Configurations\windows-makefile.tmpl') `
             '( platform->sharedlib_import($_), platform->staticlib($_) )' `
             '( platform->sharedlib_import($_) // platform->staticlib($_) )' 'OpenSSL shared library selection'
-        Run perl @('Configure', 'VC-WIN64-ARM', 'shared', 'no-apps', 'no-docs', 'no-asm', "--prefix=$Root", '--libdir=lib')
+        # PostgreSQL runs openssl.exe to select its OpenSSL build options.
+        Run perl @('Configure', 'VC-WIN64-ARM', 'shared', 'no-tests', 'no-docs', 'no-asm', "--prefix=$Root", '--libdir=lib')
         Run nmake @('/nologo', 'install_sw')
     } finally { Pop-Location }
 

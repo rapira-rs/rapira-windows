@@ -18,4 +18,6 @@ Invoke-Cargo @('test', '--locked', '--workspace', '--target', $Target)
 Invoke-Cargo @('build', '--locked', '--bin', 'rapira', '--target', $Target)
 $env:RAPIRA_BIN = Join-Path $env:CARGO_TARGET_DIR "$Target\debug\rapira.exe"
 Invoke-Cargo @('test', '--locked', '-p', 'tests', '--test', 'e2e', '--features', 'e2e', '--target', $Target, '--', '--test-threads=1')
-Invoke-Cargo @('llvm-cov', 'report', '--workspace', '--target', $Target, '--lcov', '--output-path', 'lcov.info', '--ignore-filename-regex', '(crates[/\\]tests[/\\]|bindings\.rs$)')
+# Forced exit tests can leave partial profiles. Merge the valid profiles.
+# https://llvm.org/docs/CommandGuide/llvm-profdata.html#cmdoption-llvm-profdata-merge-failure-mode
+Invoke-Cargo @('llvm-cov', 'report', '--workspace', '--target', $Target, '--failure-mode', 'all', '--lcov', '--output-path', 'lcov.info', '--ignore-filename-regex', '(crates[/\\]tests[/\\]|bindings\.rs$)')
