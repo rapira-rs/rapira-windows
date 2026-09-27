@@ -97,7 +97,8 @@ function Build-Arm64Dependencies {
     Copy-Item (Join-Path $gettext 'source\gettext-runtime\intl\libgnuintl.h') (Join-Path $Root 'include\libintl.h')
 
     Cmake libxml2 @('-DBUILD_SHARED_LIBS=OFF', '-DLIBXML2_WITH_PROGRAMS=OFF', '-DLIBXML2_WITH_TESTS=OFF',
-        '-DLIBXML2_WITH_PYTHON=OFF', '-DLIBXML2_WITH_LZMA=OFF', '-DLIBXML2_WITH_LEGACY=ON', "-DIconv_LIBRARY=$Root\lib\libiconv_a.lib")
+        '-DLIBXML2_WITH_PYTHON=OFF', '-DLIBXML2_WITH_LZMA=OFF', '-DLIBXML2_WITH_LEGACY=ON',
+        '-DLIBXML2_WITH_FTP=ON', "-DIconv_LIBRARY=$Root\lib\libiconv_a.lib")
     Copy-Item (Join-Path $Root 'lib\libxml2s.lib') (Join-Path $Root 'lib\libxml2_a.lib')
 
     Push-Location (Join-Path $sources 'sqlite3')

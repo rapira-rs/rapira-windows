@@ -651,6 +651,8 @@ try {
         $before = '#elif defined(__aarch64__) || defined(_M_ARM64)'
         $after = '#elif (defined(__aarch64__) || defined(_M_ARM64)) && !defined(_MSC_VER)'
         Replace-RequiredText -Path (Join-Path $sourceRoot 'Zend\zend_simd.h') -Before $before -After $after -Description 'PHP 8.5 MSVC ARM64 SIMD fallback'
+        Replace-RequiredText (Join-Path $sourceRoot 'ext\bcmath\libbcmath\src\xsse.h') `
+            '#ifndef XSSE_H' '#if !defined(XSSE_H) && !(defined(_MSC_VER) && defined(_M_ARM64))' 'PHP 8.5 MSVC ARM64 BCMath fallback'
     }
 
     Invoke-Batch -NativeCmd $nativeCmd -WorkingDirectory $workRoot -Name 'tool-probe' -Lines @(
