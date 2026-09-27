@@ -1,6 +1,6 @@
 <?php
 
-// exit() in a serializer starts PHP exit processing. log() must let the exit continue.
+// exit() inside a serializer is an unwind-exit, not a serialization failure: log() must let it keep unwinding.
 final class Quitter implements \JsonSerializable
 {
 	public function jsonSerialize(): mixed

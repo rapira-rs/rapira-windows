@@ -1,6 +1,6 @@
 <?php
 
-// PSR-3 requires the `exception` context key. The chained exception verifies that the record contains more than the outermost frame. See https://www.php-fig.org/psr/psr-3/
+// PSR-3 `['exception' => $e]`, chained so the record has to carry more than the outermost frame.
 try {
     try {
         throw new \RuntimeException('inner cause', 7);

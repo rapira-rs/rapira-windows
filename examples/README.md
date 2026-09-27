@@ -1,47 +1,26 @@
 # Examples
 
-The directory has one script for each run mode and two dispatcher variants. Use a release build of `rapira.exe` or build one with `dev.ps1`.
+Use an installed `rapira.exe`, or build one with `dev.ps1 -Task build`. Each file shows one HTTP mode. The dispatcher has synchronous and asynchronous examples.
 
-Classic mode executes the script once for each request:
+The shipped file runs `dispatcher-sync.php`. To run another example, set `http.pool.entrypoint` and `http.pool.mode` in `examples/rapira.toml` or in a copy of it:
 
 ```powershell
-.\rapira.exe serve --mode classic examples\classic.php
+.\rapira.exe serve examples\rapira.toml
 ```
 
-Worker mode keeps the script resident and runs a handler closure for each request:
+| Entrypoint             | Mode         | What it shows                                                            |
+| ---------------------- | ------------ | ------------------------------------------------------------------------ |
+| `classic.php`          | `classic`    | one script execution per request                                         |
+| `worker.php`           | `worker`     | resident script, a handler closure runs per request                      |
+| `dispatcher-sync.php`  | `dispatcher` | resident script, one request at a time on a blocking `receive()`         |
+| `dispatcher-async.php` | `dispatcher` | resident script, a fiber per request with `tryReceive()` between resumes |
+
+All of them listen on 127.0.0.1:8000 by default. Classic and worker answer any path; the dispatcher examples route:
 
 ```powershell
-.\rapira.exe serve --mode worker examples\worker.php
-```
-
-Dispatcher mode is the default. The synchronous example handles one request at a time on a blocking `receive()` call:
-
-```powershell
-.\rapira.exe serve examples\dispatcher-sync.php
-```
-
-The Fiber example runs each request in a Fiber. It completes the active exchange before it calls `receive()` for the next request:
-
-```powershell
-.\rapira.exe serve examples\dispatcher-async.php
-```
-
-Each interpreter thread boots its own resident script. `pool.processes` or `--processes` sets the number of interpreter threads.
-
-Each interpreter thread handles one active exchange. Use more interpreter threads to handle concurrent requests.
-
-All examples listen on `127.0.0.1:8000` by default. The classic and worker examples answer every path. The dispatcher examples provide these routes:
-
-```powershell
-curl.exe http://127.0.0.1:8000/
-curl.exe -d ping http://127.0.0.1:8000/echo
-curl.exe http://127.0.0.1:8000/boom
-curl.exe http://127.0.0.1:8000/nope
-curl.exe http://127.0.0.1:8000/stream
-```
-
-Start an example with the complete configuration file:
-
-```powershell
-.\rapira.exe serve --config examples\rapira.toml
+curl.exe http://127.0.0.1:8000/                # hello
+curl.exe -d 'ping' http://127.0.0.1:8000/echo   # request body
+curl.exe http://127.0.0.1:8000/boom            # handler failure: 500
+curl.exe http://127.0.0.1:8000/nope            # unknown route: 404
+curl.exe http://127.0.0.1:8000/stream          # chunked streaming
 ```

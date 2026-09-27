@@ -6,9 +6,9 @@ class State
 $handler = static function (): void {
     header('Content-Type: text/plain');
     echo "count=" . State::$n . " BEFORE";
-    \rapira_finish_request();   // php_output_end_all() and Context::finish() flush and close the stream.
-    echo " AFTER";             // The closed stream discards this output.
-    State::$n++;               // Work continues after the response. The next request reads this value.
+    \rapira_finish_request();   // php_output_end_all() + Context::finish(): flush, then close the stream
+    echo " AFTER";             // stream already closed -> dropped, never reaches the client
+    State::$n++;               // post-response work still executes; the next request observes it
 };
 while (\Rapira\handle_request($handler)) {
     gc_collect_cycles();

@@ -1,3 +1,3 @@
 <?php
-// The script does not receive a job. The host must classify this result as a boot failure.
+// never pulls a job: must classify as a boot failure, not a servable worker.
 \Rapira\log('booted');

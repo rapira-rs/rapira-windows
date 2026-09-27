@@ -1,6 +1,6 @@
 <?php
 
-// Select each test with the request target because dispatcher mode has no superglobals.
+// Probe toggles ride on the request target: this mode has no superglobals.
 
 $d = \Rapira\get_dispatcher();
 try {
@@ -10,7 +10,7 @@ try {
 		parse_str(parse_url($req->target, PHP_URL_QUERY) ?: "", $q);
 		$probe = $q["probe"] ?? "";
 		if ($probe === "headers") {
-			// The server sends lowercase names. A case-insensitive lookup lets this fixture work with each server implementation.
+			// names arrive lowercased; the case-insensitive lookup keeps this fixture plugin-agnostic
 			$vals = [];
 			foreach ($req->headers as $k => $vs) {
 				if (strcasecmp((string) $k, "x-probe") === 0) {
@@ -18,7 +18,7 @@ try {
 				}
 			}
 			$lines = ["x-probe=" . implode("|", $vals)];
-			// A dispatcher pool has no $_SERVER mapping. Names with underscores pass through without changes.
+			// a dispatcher pool has no $_SERVER mapping to protect: underscore names pass through as received
 			$lines[] =
 				"x_forwarded_for=" .
 				implode("|", $req->headers["x_forwarded_for"] ?? []);
@@ -47,6 +47,8 @@ try {
 				continue;
 			}
 			$u = $b->files[0];
+			// Chunked framing puts the response end after upload cleanup.
+			$ex->flush();
 			$ex->writeBody(
 				implode("\n", [
 					"field=" . $b->fields[0]->name . "=" . $b->fields[0]->value,

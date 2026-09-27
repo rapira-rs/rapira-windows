@@ -1,0 +1,18 @@
+[package]
+name = "rapira_net"
+version = "0.8.1"
+edition.workspace = true
+publish = false
+license = "MIT"
+description = "Windows listeners for Rapira plugins, bound before PHP starts"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+rapira_config = { workspace = true }
+tracing = { workspace = true }
+windows-sys = { workspace = true, features = ["Win32_Networking_WinSock"] }
+socket2 = { version = "0.6", features = ["all"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "time", "macros"] }

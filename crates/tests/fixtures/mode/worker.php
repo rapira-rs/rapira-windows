@@ -1,5 +1,5 @@
 <?php
-// Capture the mode once during boot and again for each job. The enum case must remain the same.
+// The boot answer is captured once, then every job re-asks: the case must stay identical.
 $boot = \Rapira\get_mode();
 $handler = static function () use ($boot): void {
     $mode = \Rapira\get_mode();

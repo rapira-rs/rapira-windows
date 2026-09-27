@@ -1,48 +1,65 @@
-# This file is an example rapira.toml configuration. Command-line options override file values. All keys except pool.entrypoint are optional. Commented keys show default values.
+# Example rapira.toml. Every key except http.pool.entrypoint is optional.
+# Commented keys show defaults or example values. Run it with: rapira serve examples/rapira.toml
 
 [http]
-listen = "127.0.0.1:8000"     # Use an IP address and port, or use ":port" for all interfaces.
+listen = "127.0.0.1:8000"    # host:port or ":port" (all interfaces)
 # server_name = "localhost"
-# server_port = 8000           # PHP receives this value as SERVER_PORT. The default is the listen port.
-# max_body_size_mb = 8         # Return status 413 for a larger request body.
-# write_timeout_secs = 30      # Close the connection when a response write exceeds this duration.
-# keepalive_timeout_secs = 60  # Close an idle keep-alive connection after this duration. This value also limits one header or body frame read.
-# unsafe_field_names = "drop" # Use "reject" to return status 400 for names that match a CGI variable.
-# middleware = ["static"]     # Apply middleware in list order. List each configured middleware here.
+# server_port = 8000         # what PHP sees as SERVER_PORT; defaults to the listen port
+# max_body_size_mb = 8       # larger request bodies answer 413
+# write_timeout_secs = 30    # closes the connection when a response write stalls this long
+# keepalive_timeout_secs = 60 # closes a keepalive connection idle past the limit; also caps one head or body-frame read
+# unsafe_field_names = "drop" # or "reject": 400 for header names aliasing a CGI variable
+# middleware = ["static"]    # applied in list order; each configured middleware must be listed
 
-# Host multipart limits apply only in dispatcher mode. Classic and worker modes use php.ini.
-# The server fails to start if another mode has an [http.uploads] table.
+# Multipart limits of the http plugin - dispatcher mode only (classic/worker parse in PHP,
+# where php.ini owns the limits); an explicit table under another mode refuses to boot.
 # [http.uploads]
-# dir = "C:\\Temp\\rapira-uploads" # The default is the Windows temporary directory.
+# dir = "uploads"            # spool root for file parts; defaults to the system temp dir
 # max_file_size_mb = 2
-# max_field_size_kb = 256
 # max_files = 20
-# max_parts = 1024
-# max_part_headers = 32
 
 # [http.sendfile]
-# root = "public"             # Restrict sendFile() paths to this directory. The default is the entrypoint directory.
+# root = "public"            # sendFile() containment; defaults to the entrypoint's directory
 
-# Serve files before PHP. Pass missing files and all dotfiles to PHP.
-# This table requires "static" in http.middleware.
-# One process cache holds up to 16 MiB. It stores files that are not larger than 256 KiB.
-# A cache entry remains valid for one second before metadata validation.
+# Serve files from a directory before PHP. A miss falls through to PHP. Dotfiles always fall through to PHP.
+# Requires "static" in http.middleware.
+# The HTTP plugin caches up to 16MiB and stores no file above 256KiB. An entry stays
+# fresh for one second, so a rewritten file reaches the client after that time.
 # [http.static]
-# root = "public"             # Required. Relative paths start from the directory of this file.
-# forbid = [".php"]           # Match file name suffixes without case sensitivity. An explicit list replaces the default list.
+# root = "public"            # required; the directory must exist; relative paths resolve against this file's directory
+# forbid = [".php"]          # file-name suffixes the server never serves; an explicit list replaces this default
 
-[pool]
-entrypoint = "dispatcher-sync.php" # Relative paths start from the directory of this file.
-mode = "dispatcher"                 # Use "classic", "worker", or "dispatcher". The default is "dispatcher".
-processes = 8                       # Set the number of PHP interpreter threads in the server process. The default is the CPU count.
-# max_requests = 0                  # Recycle an interpreter after approximately N requests. A value of 0 disables this limit.
+# The worker pool behind the http listener. Each plugin owns its pool under [<plugin>.pool].
+[http.pool]
+entrypoint = "dispatcher-sync.php" # relative paths resolve against this file's directory
+mode = "dispatcher"           # "classic" | "worker" | "dispatcher" (the default)
+processes = 16               # fixed interpreter threads; defaults to the CPU count
+# max_requests = 0            # recycle a worker after ~N requests (jittered); 0 = unlimited
+
+# The gRPC listener: unary calls over gRPC, gRPC-Web and Connect (crates/plugins/grpc/README.md).
+# With a [grpc] table, grpc.descriptor_set and grpc.pool.entrypoint are required.
+# [grpc]
+# listen = "127.0.0.1:50051"   # host:port or ":port" (all interfaces)
+# descriptor_set = "api.binpb" # relative to this file's directory; build it with its imports: buf build --as-file-descriptor-set -o api.binpb
+# services = ["billing.v1.InvoiceService"] # serve only these (fully qualified, each in descriptor_set); unset = the services of the files that no other file imports
+# reflection = false           # serve grpc.reflection.v1 and v1alpha
+# default_timeout_secs = 30    # deadline of a call without a client timeout; unset (the default) = no deadline
+# max_timeout_secs = 60        # upper limit for a client timeout; unset (the default) = no limit
+# keepalive_interval_secs = 10 # sends an HTTP/2 PING after this long without a request, request data or a PING answer
+# keepalive_timeout_secs = 10  # closes the connection when the PING has no answer within this time
+
+# The worker pool behind the grpc listener. It takes the keys of [http.pool].
+# [grpc.pool]
+# entrypoint = "grpc.php"      # relative paths resolve against this file's directory
+# mode = "dispatcher"          # the only mode for a grpc pool
+# processes = 16               # defaults to the CPU count
 
 # [supervisor]
-# pidfile = "rapira.pid"            # Relative paths start from the directory of this file.
-# process_control_timeout_secs = 30 # Allow this duration for threads to stop before a forced process exit.
+# pidfile = "rapira.pid"      # relative to this file's directory
+# process_control_timeout_secs = 30   # drain and interpreter teardown budget before forced exit
 
 [log]
-level = "trace"                    # Use error, warn, info, debug, or trace. The default is error.
-# format = "plain"                 # Use "plain" or "json".
-# [log.targets]                     # Set a level for each target. RUST_LOG replaces the complete filter.
-# php = "warn"
+# level = "error"             # error | warn | info | debug | trace
+# format = "plain"            # or "json"
+# [log.targets]               # per-target overrides; RUST_LOG replaces the whole filter
+# php = "warn"                # surfaces PHP diagnostics even under a quieter level

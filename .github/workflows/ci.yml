@@ -2,6 +2,7 @@ name: CI
 on:
   push: { branches: [main] }
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -13,239 +14,149 @@ jobs:
   prepare:
     runs-on: windows-latest
     outputs:
-      php84_version: ${{ steps.php84.outputs.php_version }}
-      php84_devel_url: ${{ steps.php84.outputs.devel_url }}
-      php84_devel_sha256: ${{ steps.php84.outputs.devel_sha256 }}
-      php84_runtime_url: ${{ steps.php84.outputs.runtime_url }}
-      php84_runtime_sha256: ${{ steps.php84.outputs.runtime_sha256 }}
-      php84_cache_key: ${{ steps.php84.outputs.cache_key }}
-      php84_source_url: ${{ steps.php84.outputs.source_url }}
-      php84_source_sha256: ${{ steps.php84.outputs.source_sha256 }}
-      php84_source_cache_key: ${{ steps.php84.outputs.source_cache_key }}
-      php85_version: ${{ steps.php85.outputs.php_version }}
-      php85_devel_url: ${{ steps.php85.outputs.devel_url }}
-      php85_devel_sha256: ${{ steps.php85.outputs.devel_sha256 }}
-      php85_runtime_url: ${{ steps.php85.outputs.runtime_url }}
-      php85_runtime_sha256: ${{ steps.php85.outputs.runtime_sha256 }}
-      php85_cache_key: ${{ steps.php85.outputs.cache_key }}
-      php85_source_url: ${{ steps.php85.outputs.source_url }}
-      php85_source_sha256: ${{ steps.php85.outputs.source_sha256 }}
-      php85_source_cache_key: ${{ steps.php85.outputs.source_cache_key }}
+      php84: ${{ steps.php84.outputs.spec }}
+      php85: ${{ steps.php85.outputs.spec }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
-      - name: Resolve PHP 8.4
-        id: php84
+      - id: php84
         shell: pwsh
-        run: ./ci/resolve-php.ps1 -Branch 8.4
-      - name: Resolve PHP 8.5
-        id: php85
+        run: |
+          $spec = ./ci/resolve-php.ps1 -Branch 8.4
+          "spec=$spec" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+      - id: php85
         shell: pwsh
-        run: ./ci/resolve-php.ps1 -Branch 8.5
+        run: |
+          $spec = ./ci/resolve-php.ps1 -Branch 8.5
+          "spec=$spec" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
 
   test:
     needs: prepare
-    runs-on: windows-latest
-    env:
-      CARGO_TARGET: x86_64-pc-windows-msvc
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - branch: "8.4"
-            version: ${{ needs.prepare.outputs.php84_version }}
-            devel_url: ${{ needs.prepare.outputs.php84_devel_url }}
-            devel_sha256: ${{ needs.prepare.outputs.php84_devel_sha256 }}
-            runtime_url: ${{ needs.prepare.outputs.php84_runtime_url }}
-            runtime_sha256: ${{ needs.prepare.outputs.php84_runtime_sha256 }}
-            cache_key: ${{ needs.prepare.outputs.php84_cache_key }}
-          - branch: "8.5"
-            version: ${{ needs.prepare.outputs.php85_version }}
-            devel_url: ${{ needs.prepare.outputs.php85_devel_url }}
-            devel_sha256: ${{ needs.prepare.outputs.php85_devel_sha256 }}
-            runtime_url: ${{ needs.prepare.outputs.php85_runtime_url }}
-            runtime_sha256: ${{ needs.prepare.outputs.php85_runtime_sha256 }}
-            cache_key: ${{ needs.prepare.outputs.php85_cache_key }}
-    name: x64 PHP ${{ matrix.branch }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with: { persist-credentials: false }
-
-      - name: Restore PHP archives
-        id: php-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/php-archives/${{ matrix.version }}
-          key: ${{ matrix.cache_key }}
-
-      - name: Provision PHP
-        shell: pwsh
-        run: |
-          ./ci/provision-php.ps1 `
-            -PhpVersion '${{ matrix.version }}' `
-            -DevelUrl '${{ matrix.devel_url }}' `
-            -DevelSha256 '${{ matrix.devel_sha256 }}' `
-            -RuntimeUrl '${{ matrix.runtime_url }}' `
-            -RuntimeSha256 '${{ matrix.runtime_sha256 }}'
-
-      - name: Save PHP archives
-        if: steps.php-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/php-archives/${{ matrix.version }}
-          key: ${{ matrix.cache_key }}
-
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-        with:
-          components: clippy, rustfmt
-          targets: x86_64-pc-windows-msvc
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
-        with:
-          cache-on-failure: true
-          key: php-${{ matrix.version }}
-
-      - name: Format
-        run: cargo fmt --all --check
-      - name: Clippy workspace
-        run: cargo clippy --locked --workspace --all-targets --target $env:CARGO_TARGET -- -D warnings
-      - name: Clippy e2e
-        run: cargo clippy --locked -p tests --features e2e --tests --target $env:CARGO_TARGET -- -D warnings
-      - name: Build workspace
-        run: cargo build --locked --workspace --target $env:CARGO_TARGET
-      - name: Test workspace
-        run: cargo test --locked --workspace --target $env:CARGO_TARGET
-      - name: Build server for e2e
-        run: cargo build --locked --bin rapira --target $env:CARGO_TARGET
-      - name: Test e2e
-        run: cargo test --locked -p tests --test e2e --features e2e --target $env:CARGO_TARGET -- --test-threads=1
-
-  test-arm64:
-    needs: prepare
-    runs-on: windows-11-vs2026-arm
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
-    env:
-      CARGO_TARGET: aarch64-pc-windows-msvc
     strategy:
       fail-fast: false
       matrix:
         include:
-          - branch: "8.4"
-            version: ${{ needs.prepare.outputs.php84_version }}
-            source_url: ${{ needs.prepare.outputs.php84_source_url }}
-            source_sha256: ${{ needs.prepare.outputs.php84_source_sha256 }}
-            source_cache_key: ${{ needs.prepare.outputs.php84_source_cache_key }}
-          - branch: "8.5"
-            version: ${{ needs.prepare.outputs.php85_version }}
-            source_url: ${{ needs.prepare.outputs.php85_source_url }}
-            source_sha256: ${{ needs.prepare.outputs.php85_source_sha256 }}
-            source_cache_key: ${{ needs.prepare.outputs.php85_source_cache_key }}
-    name: ARM64 PHP ${{ matrix.branch }}
+          - php: '8.4'
+            spec: ${{ needs.prepare.outputs.php84 }}
+            arch: x86_64
+            runner: windows-latest
+          - php: '8.5'
+            spec: ${{ needs.prepare.outputs.php85 }}
+            arch: x86_64
+            runner: windows-latest
+          - php: '8.4'
+            spec: ${{ needs.prepare.outputs.php84 }}
+            arch: arm64
+            runner: windows-11-vs2026-arm
+          - php: '8.5'
+            spec: ${{ needs.prepare.outputs.php85 }}
+            arch: arm64
+            runner: windows-11-vs2026-arm
+    name: ${{ matrix.arch }} PHP ${{ matrix.php }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
-
       - name: Set PHP install path
-        id: php-path
-        shell: pwsh
-        env:
-          PHP_FULL_VERSION: ${{ matrix.version }}
         run: |
-          $path = Join-Path (Join-Path $env:RUNNER_TEMP 'php-arm64') $env:PHP_FULL_VERSION
+          $path = Join-Path $env:RUNNER_TEMP 'php-${{ matrix.arch }}/${{ fromJSON(matrix.spec).php_version }}'
           "PHP_INSTALL_DIR=$path" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          "install_dir=$path" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
-
       - name: Restore native PHP
         id: php-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ steps.php-path.outputs.install_dir }}
-          key: ${{ matrix.source_cache_key }}-windows-arm64-${{ hashFiles('ci/build-php.ps1', 'ci/php-configure-flags.txt') }}
-
+          path: ${{ env.PHP_INSTALL_DIR }}
+          key: ${{ fromJSON(matrix.spec).source_cache_key }}-${{ matrix.arch }}-${{ hashFiles('ci/build-php.ps1', 'ci/build-common.ps1', 'ci/php-*', 'ci/*dependencies*', 'ci/windows-extensions.txt') }}
+      - name: Restore ARM64 dependencies
+        if: matrix.arch == 'arm64' && steps.php-cache.outputs.cache-hit != 'true'
+        id: deps-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/rapira-php-dependencies/arm64
+          key: php-dependencies-arm64-${{ hashFiles('ci/build-dependencies.ps1', 'ci/build-common.ps1', 'ci/php-dependencies-arm64.json') }}
+      - name: Build ARM64 dependencies
+        if: matrix.arch == 'arm64' && steps.php-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./ci/build-dependencies.ps1 -InstallDirectory "$env:RUNNER_TEMP\rapira-php-dependencies\arm64"
+      - name: Save ARM64 dependencies
+        if: matrix.arch == 'arm64' && steps.php-cache.outputs.cache-hit != 'true' && steps.deps-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/rapira-php-dependencies/arm64
+          key: ${{ steps.deps-cache.outputs.cache-primary-key }}
       - name: Build native PHP
         shell: pwsh
         run: |
           ./ci/build-php.ps1 `
-            -PhpVersion '${{ matrix.version }}' `
-            -SourceUrl '${{ matrix.source_url }}' `
-            -SourceSha256 '${{ matrix.source_sha256 }}' `
+            -PhpVersion '${{ fromJSON(matrix.spec).php_version }}' `
+            -SourceUrl '${{ fromJSON(matrix.spec).source_url }}' `
+            -SourceSha256 '${{ fromJSON(matrix.spec).source_sha256 }}' `
             -InstallDirectory $env:PHP_INSTALL_DIR
-
       - name: Save native PHP
         if: steps.php-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ steps.php-path.outputs.install_dir }}
+          path: ${{ env.PHP_INSTALL_DIR }}
           key: ${{ steps.php-cache.outputs.cache-primary-key }}
-
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: clippy, rustfmt
-          targets: aarch64-pc-windows-msvc
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           cache-on-failure: true
-          key: arm64-php-${{ matrix.version }}
-
-      - name: Clippy workspace
-        run: cargo clippy --locked --workspace --all-targets --target $env:CARGO_TARGET -- -D warnings
-      - name: Clippy e2e
-        run: cargo clippy --locked -p tests --features e2e --tests --target $env:CARGO_TARGET -- -D warnings
-      - name: Build workspace
-        run: cargo build --locked --workspace --target $env:CARGO_TARGET
-      - name: Test workspace
-        run: cargo test --locked --workspace --target $env:CARGO_TARGET
-      - name: Build server for e2e
-        run: cargo build --locked --bin rapira --target $env:CARGO_TARGET
-      - name: Test e2e
-        run: cargo test --locked -p tests --test e2e --features e2e --target $env:CARGO_TARGET -- --test-threads=1
+          key: ${{ matrix.arch }}-php-${{ fromJSON(matrix.spec).php_version }}
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: ./dev.ps1 -Task clippy -Devel $env:PHP_DEVEL_DIR -Runtime $env:PHP_RUNTIME
+      - name: Workspace tests
+        run: ./dev.ps1 -Task test -Devel $env:PHP_DEVEL_DIR -Runtime $env:PHP_RUNTIME
+      - name: End-to-end tests
+        run: ./dev.ps1 -Task test_e2e -Devel $env:PHP_DEVEL_DIR -Runtime $env:PHP_RUNTIME
+      - name: Release bundle
+        run: |
+          ./dev.ps1 -Task build -Release -Devel $env:PHP_DEVEL_DIR -Runtime $env:PHP_RUNTIME
+          $target = if ('${{ matrix.arch }}' -eq 'arm64') { 'aarch64-pc-windows-msvc' } else { 'x86_64-pc-windows-msvc' }
+          ./ci/package.ps1 -Binary "target\$target\release\rapira.exe" -PhpInstall $env:PHP_INSTALL_DIR -Destination "$env:RUNNER_TEMP\bundle"
 
   coverage:
     needs: prepare
     runs-on: windows-latest
-    env:
-      CARGO_TARGET: x86_64-pc-windows-msvc
     permissions:
       contents: read
       id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
-
-      - name: Restore PHP archives
+      - name: Set PHP install path
+        run: |
+          "PHP_INSTALL_DIR=$env:RUNNER_TEMP\php-x86_64\${{ fromJSON(needs.prepare.outputs.php85).php_version }}" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Restore native PHP
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/php-archives/${{ needs.prepare.outputs.php85_version }}
-          key: ${{ needs.prepare.outputs.php85_cache_key }}
-
-      - name: Provision PHP 8.5
+          path: ${{ env.PHP_INSTALL_DIR }}
+          key: ${{ fromJSON(needs.prepare.outputs.php85).source_cache_key }}-x86_64-${{ hashFiles('ci/build-php.ps1', 'ci/build-common.ps1', 'ci/php-*', 'ci/*dependencies*', 'ci/windows-extensions.txt') }}
+      - name: Build native PHP 8.5
         shell: pwsh
         run: |
-          ./ci/provision-php.ps1 `
-            -PhpVersion '${{ needs.prepare.outputs.php85_version }}' `
-            -DevelUrl '${{ needs.prepare.outputs.php85_devel_url }}' `
-            -DevelSha256 '${{ needs.prepare.outputs.php85_devel_sha256 }}' `
-            -RuntimeUrl '${{ needs.prepare.outputs.php85_runtime_url }}' `
-            -RuntimeSha256 '${{ needs.prepare.outputs.php85_runtime_sha256 }}'
-
+          ./ci/build-php.ps1 `
+            -PhpVersion '${{ fromJSON(needs.prepare.outputs.php85).php_version }}' `
+            -SourceUrl '${{ fromJSON(needs.prepare.outputs.php85).source_url }}' `
+            -SourceSha256 '${{ fromJSON(needs.prepare.outputs.php85).source_sha256 }}' `
+            -InstallDirectory $env:PHP_INSTALL_DIR
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: llvm-tools-preview
-          targets: x86_64-pc-windows-msvc
       - uses: taiki-e/install-action@b1d53d4d726d74b5a950a5b3798a3c6ede4e0f64 # cargo-llvm-cov
         with:
           tool: cargo-llvm-cov
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           cache-on-failure: true
-          key: coverage-php-${{ needs.prepare.outputs.php85_version }}
-
+          key: coverage-php-${{ fromJSON(needs.prepare.outputs.php85).php_version }}
       - name: Generate coverage
-        shell: pwsh
-        run: >-
-          cargo llvm-cov --locked --workspace --target $env:CARGO_TARGET
-          --lcov --output-path lcov.info
-          --ignore-filename-regex '(crates[\\/]tests[\\/]|bindings\.rs$|[\\/]src[\\/]main\.rs$)'
-
+        run: ./dev.ps1 -Task coverage -Devel $env:PHP_DEVEL_DIR -Runtime $env:PHP_RUNTIME
       - name: Upload to Codecov
         uses: codecov/codecov-action@0b35c9ecc4f0529d0eb674914510c22f85b196b4 # v7
         with:

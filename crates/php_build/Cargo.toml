@@ -1,0 +1,12 @@
+[package]
+name = "rapira_php_build"
+version = "0.8.1"
+edition.workspace = true
+description = "Native ZTS PHP discovery and C compilation for the SAPI and plugins"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+cc = "1.2"

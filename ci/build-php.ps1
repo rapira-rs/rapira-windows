@@ -10,22 +10,37 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'build-common.ps1')
 
 $requiredModules = @(
+    'bcmath',
     'calendar',
     'ctype',
     'exif',
     'fileinfo',
     'filter',
     'ftp',
+    'iconv',
+    'libxml',
     'mbstring',
+    'PDO',
+    'Phar',
+    'dom',
+    'SimpleXML',
+    'xml',
+    'xmlreader',
+    'xmlwriter',
+    'zlib',
     'session',
+    'shmop',
     'sockets',
     'tokenizer',
     'Zend OPcache'
 )
-$requiredExtensionModules = @('fileinfo', 'mbstring')
-$requiredExtensions = $requiredExtensionModules -join ','
+$requiredExtensionModules = @(Get-Content (Join-Path $PSScriptRoot 'windows-extensions.txt') |
+    ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -notmatch '^#' })
+$requiredModules += $requiredExtensionModules
+$requiredExtensions = (($requiredModules | ForEach-Object { $_.ToLowerInvariant().Replace('zend opcache', 'opcache') } | Sort-Object -Unique) -join ',')
 
 if ($PhpVersion -notmatch '^8\.(4|5)\.\d+$') {
     throw "Unsupported PHP version '$PhpVersion'; expected an exact 8.4.x or 8.5.x version."
@@ -43,240 +58,6 @@ if (-not $sourceUri.IsAbsoluteUri -or
     $sourceUri.Host -ne 'www.php.net' -or
     $sourceFileName -notmatch "^php-$escapedVersion\.tar\.xz$") {
     throw "SourceUrl must name php-$PhpVersion.tar.xz on https://www.php.net."
-}
-
-function Get-Architecture {
-    $osArchitecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture
-    $processArchitecture = [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture
-    if ($processArchitecture -ne $osArchitecture) {
-        throw "Run ci/build-php.ps1 from native $osArchitecture PowerShell; the current process is $processArchitecture."
-    }
-
-    $architecture = $osArchitecture.ToString()
-    switch ($architecture) {
-        'Arm64' {
-            return [pscustomobject] @{
-                Name = 'arm64'
-                PeMachine = [uint16] 0xaa64
-                PhpMachine = 'ARM64'
-                VcVars = 'arm64'
-            }
-        }
-        'X64' {
-            return [pscustomobject] @{
-                Name = 'x86_64'
-                PeMachine = [uint16] 0x8664
-                PhpMachine = 'AMD64'
-                VcVars = 'x64'
-            }
-        }
-        default {
-            throw "Unsupported native Windows architecture '$architecture'."
-        }
-    }
-}
-
-function Get-PeMachine {
-    param([Parameter(Mandatory)] [string] $Path)
-
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        throw "PE file '$Path' does not exist."
-    }
-    $stream = [IO.File]::OpenRead($Path)
-    try {
-        $reader = [IO.BinaryReader]::new($stream)
-        if ($reader.ReadUInt16() -ne 0x5a4d) {
-            throw "'$Path' has no DOS executable header."
-        }
-        $stream.Position = 0x3c
-        $peOffset = $reader.ReadUInt32()
-        if ($peOffset -gt $stream.Length - 6) {
-            throw "'$Path' has an invalid PE header offset."
-        }
-        $stream.Position = $peOffset
-        if ($reader.ReadUInt32() -ne 0x00004550) {
-            throw "'$Path' has no PE signature."
-        }
-        return $reader.ReadUInt16()
-    }
-    finally {
-        $stream.Dispose()
-    }
-}
-
-function Assert-PeMachine {
-    param(
-        [Parameter(Mandatory)] [string] $Path,
-        [Parameter(Mandatory)] [uint16] $Expected
-    )
-
-    $actual = Get-PeMachine -Path $Path
-    if ($actual -ne $Expected) {
-        throw "'$Path' has PE machine 0x$($actual.ToString('X4')); expected native machine 0x$($Expected.ToString('X4'))."
-    }
-}
-
-function Get-NativeSystemExecutable {
-    param(
-        [Parameter(Mandatory)] [string] $Name,
-        [Parameter(Mandatory)] [uint16] $ExpectedMachine
-    )
-
-    $systemDirectory = Join-Path $env:SystemRoot 'System32'
-    $path = Join-Path $systemDirectory $Name
-    Assert-PeMachine -Path $path -Expected $ExpectedMachine
-    return $path
-}
-
-function Assert-ManagedPath {
-    param(
-        [Parameter(Mandatory)] [string] $Path,
-        [Parameter(Mandatory)] [string] $Root,
-        [Parameter(Mandatory)] [string] $Name
-    )
-
-    $fullPath = [IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
-    $fullRoot = [IO.Path]::GetFullPath($Root).TrimEnd('\', '/')
-    $rootPrefix = $fullRoot + [IO.Path]::DirectorySeparatorChar
-    if ($fullPath.Equals($fullRoot, [StringComparison]::OrdinalIgnoreCase) -or
-        -not $fullPath.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-        throw "$Name must be a child of '$fullRoot'."
-    }
-    return $fullPath
-}
-
-function Remove-ManagedDirectory {
-    param(
-        [Parameter(Mandatory)] [string] $Path,
-        [Parameter(Mandatory)] [string] $Root
-    )
-
-    $verifiedPath = Assert-ManagedPath -Path $Path -Root $Root -Name 'Directory'
-    if (-not (Test-Path -LiteralPath $verifiedPath)) {
-        return
-    }
-    $item = Get-Item -LiteralPath $verifiedPath -Force
-    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw "Refusing to remove reparse point '$verifiedPath'."
-    }
-    Remove-Item -LiteralPath $verifiedPath -Recurse -Force
-}
-
-function Test-FileHash {
-    param(
-        [Parameter(Mandatory)] [string] $Path,
-        [Parameter(Mandatory)] [string] $ExpectedSha256
-    )
-
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        return $false
-    }
-    $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
-    return $actual.Equals($ExpectedSha256, [StringComparison]::OrdinalIgnoreCase)
-}
-
-function Get-VerifiedSource {
-    param(
-        [Parameter(Mandatory)] [Uri] $Uri,
-        [Parameter(Mandatory)] [string] $Path,
-        [Parameter(Mandatory)] [string] $ExpectedSha256
-    )
-
-    if (Test-Path -LiteralPath $Path -PathType Leaf) {
-        if (Test-FileHash -Path $Path -ExpectedSha256 $ExpectedSha256) {
-            Write-Host "Using verified PHP source archive '$Path'."
-            return
-        }
-        Remove-Item -LiteralPath $Path -Force
-    }
-
-    $downloadPath = "$Path.download-$([Guid]::NewGuid().ToString('N'))"
-    try {
-        Invoke-WebRequest -Uri $Uri -OutFile $downloadPath -MaximumRetryCount 3 -RetryIntervalSec 2 | Out-Null
-        if (-not (Test-FileHash -Path $downloadPath -ExpectedSha256 $ExpectedSha256)) {
-            $actual = (Get-FileHash -LiteralPath $downloadPath -Algorithm SHA256).Hash.ToLowerInvariant()
-            throw "PHP source SHA256 mismatch: expected $ExpectedSha256, got $actual."
-        }
-        Move-Item -LiteralPath $downloadPath -Destination $Path
-    }
-    finally {
-        if (Test-Path -LiteralPath $downloadPath) {
-            Remove-Item -LiteralPath $downloadPath -Force
-        }
-    }
-}
-
-function Replace-RequiredText {
-    param(
-        [Parameter(Mandatory)] [string] $Path,
-        [Parameter(Mandatory)] [string] $Before,
-        [Parameter(Mandatory)] [string] $After,
-        [Parameter(Mandatory)] [string] $Description
-    )
-
-    $text = [IO.File]::ReadAllText($Path)
-    $matches = [regex]::Matches($text, [regex]::Escape($Before)).Count
-    if ($matches -ne 1) {
-        throw "Expected exactly one $Description site in '$Path', found $matches."
-    }
-    [IO.File]::WriteAllText($Path, $text.Replace($Before, $After), [Text.UTF8Encoding]::new($false))
-}
-
-function Find-VisualStudio {
-    $visualStudioRoot = Join-Path $env:SystemDrive 'Program Files\Microsoft Visual Studio'
-    if (-not (Test-Path -LiteralPath $visualStudioRoot -PathType Container)) {
-        throw "Visual Studio was not found below '$visualStudioRoot'."
-    }
-
-    $candidates = foreach ($versionDirectory in Get-ChildItem -LiteralPath $visualStudioRoot -Directory) {
-        foreach ($editionDirectory in Get-ChildItem -LiteralPath $versionDirectory.FullName -Directory) {
-            $vcVars = Join-Path $editionDirectory.FullName 'VC\Auxiliary\Build\vcvarsall.bat'
-            if (Test-Path -LiteralPath $vcVars -PathType Leaf) {
-                $rank = if ($versionDirectory.Name -match '^\d{4}$') {
-                    switch ($versionDirectory.Name) {
-                        '2022' { 17 }
-                        '2019' { 16 }
-                        default { [int] $versionDirectory.Name }
-                    }
-                }
-                elseif ($versionDirectory.Name -match '^\d+$') {
-                    [int] $versionDirectory.Name
-                }
-                else {
-                    0
-                }
-                [pscustomobject] @{ Path = $vcVars; Rank = $rank }
-            }
-        }
-    }
-    $selected = $candidates | Sort-Object Rank -Descending | Select-Object -First 1
-    if ($null -eq $selected) {
-        throw "Visual Studio vcvarsall.bat was not found below '$visualStudioRoot'."
-    }
-    return $selected.Path
-}
-
-function Invoke-Batch {
-    param(
-        [Parameter(Mandatory)] [string] $NativeCmd,
-        [Parameter(Mandatory)] [string] $WorkingDirectory,
-        [Parameter(Mandatory)] [string] $Name,
-        [Parameter(Mandatory)] [string[]] $Lines
-    )
-
-    $batchPath = Join-Path $WorkingDirectory ".rapira-$Name-$([Guid]::NewGuid().ToString('N')).cmd"
-    try {
-        [IO.File]::WriteAllLines($batchPath, @('@echo off', 'setlocal') + $Lines, [Text.ASCIIEncoding]::new())
-        & $NativeCmd /d /c $batchPath
-        if ($LASTEXITCODE -ne 0) {
-            throw "$Name failed with exit code $LASTEXITCODE."
-        }
-    }
-    finally {
-        if (Test-Path -LiteralPath $batchPath) {
-            Remove-Item -LiteralPath $batchPath -Force
-        }
-    }
 }
 
 function Invoke-Php {
@@ -406,8 +187,8 @@ function Assert-PhpInstall {
     }
     $modules = @($modulesResult.Stdout -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     foreach ($module in $requiredModules) {
-        if (-not ($modules -ccontains $module)) {
-            throw "The native PHP build is missing required module '$module'."
+        if (-not ($modules -contains $module)) {
+            throw "The native PHP build is missing required module '$module'.`n$($modulesResult.Stdout)`n$($modulesResult.Stderr)"
         }
     }
     foreach ($coverageDriver in @('xdebug', 'pcov')) {
@@ -505,7 +286,10 @@ else {
 $tempRoot = [IO.Path]::GetFullPath($tempRoot).TrimEnd('\', '/')
 $InstallDirectory = Assert-ManagedPath -Path $InstallDirectory -Root $tempRoot -Name 'InstallDirectory'
 $flagFile = Join-Path $PSScriptRoot 'php-configure-flags.txt'
-$buildScriptSha256 = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$buildInputs = @(Get-Item $PSCommandPath) + @(Get-ChildItem $PSScriptRoot -File |
+    Where-Object { $_.Name -like 'php-*' -or $_.Name -like '*dependencies*' -or $_.Name -in @('build-common.ps1', 'windows-extensions.txt') } |
+    Sort-Object Name)
+$buildScriptSha256 = (($buildInputs | Get-FileHash -Algorithm SHA256).Hash -join '').ToLowerInvariant()
 $configureFlagsSha256 = (Get-FileHash -LiteralPath $flagFile -Algorithm SHA256).Hash.ToLowerInvariant()
 
 if (Test-Path -LiteralPath $InstallDirectory) {
@@ -533,12 +317,28 @@ Get-VerifiedSource -Uri $sourceUri -Path $sourceArchive -ExpectedSha256 $SourceS
 
 $workRoot = Join-Path $workParent "$PhpVersion-$($architecture.Name)-$([Guid]::NewGuid().ToString('N'))"
 $extractRoot = Join-Path $workRoot 'extract'
-$dependencyRoot = Join-Path $workRoot 'dependencies'
+$dependencyRoot = if ($architecture.Name -eq 'arm64') {
+    Join-Path $tempRoot 'rapira-php-dependencies\arm64'
+} else {
+    Join-Path $workRoot 'dependencies'
+}
 $stageRoot = Join-Path $workRoot 'install'
 New-Item -ItemType Directory -Path $extractRoot, $dependencyRoot, $stageRoot -Force | Out-Null
 $buildSucceeded = $false
 
 try {
+    if ($architecture.Name -eq 'x86_64') {
+        $dependencies = Get-Content (Join-Path $PSScriptRoot 'php-dependencies-x64.json') -Raw | ConvertFrom-Json -AsHashtable
+        foreach ($entry in $dependencies.GetEnumerator()) {
+            $archive = Join-Path $archiveDirectory $entry.Key
+            Get-VerifiedSource -Uri "https://downloads.php.net/~windows/php-sdk/deps/vs17/x64/$($entry.Key)" -Path $archive -ExpectedSha256 $entry.Value
+            & $nativeTar -xf $archive -C $dependencyRoot
+            if ($LASTEXITCODE) { throw "Cannot extract $archive" }
+        }
+    } else {
+        & (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File (Join-Path $PSScriptRoot 'build-dependencies.ps1') -InstallDirectory $dependencyRoot
+        if ($LASTEXITCODE) { throw "ARM64 dependency build failed with exit code $LASTEXITCODE." }
+    }
     Write-Host "Extracting PHP $PhpVersion source with native $($architecture.Name) tar."
     & $nativeTar -xf $sourceArchive -C $extractRoot
     if ($LASTEXITCODE -ne 0) {
@@ -547,6 +347,18 @@ try {
     $sourceRoot = Join-Path $extractRoot "php-$PhpVersion"
     if (-not (Test-Path -LiteralPath $sourceRoot -PathType Container)) {
         throw "PHP source archive did not contain 'php-$PhpVersion'."
+    }
+
+    $extensions = Get-Content (Join-Path $PSScriptRoot 'php-extensions.json') -Raw | ConvertFrom-Json -AsHashtable
+    foreach ($entry in $extensions.GetEnumerator()) {
+        $stem = "$($entry.Key)-$($entry.Value.version)"
+        $archive = Join-Path $archiveDirectory "$stem.tgz"
+        Get-VerifiedSource -Uri "https://pecl.php.net/get/$stem.tgz" -Path $archive -ExpectedSha256 $entry.Value.sha256
+        $extensionRoot = Join-Path $workRoot $entry.Key
+        New-Item -ItemType Directory $extensionRoot | Out-Null
+        & $nativeTar -xf $archive -C $extensionRoot
+        if ($LASTEXITCODE) { throw "Cannot extract $archive" }
+        Move-Item (Join-Path $extensionRoot $stem) (Join-Path $sourceRoot "ext\$($entry.Key)")
     }
 
     $confUtils = Join-Path $sourceRoot 'win32\build\confutils.js'
@@ -581,6 +393,18 @@ try {
         Replace-RequiredText -Path (Join-Path $sourceRoot 'ext\exif\config.w32') -Before $exifBefore -After $exifAfter -Description 'PHP 8.4 optional mbstring dependency'
     }
 
+    if ($architecture.Name -eq 'arm64') {
+        Replace-RequiredText (Join-Path $sourceRoot 'ext\ffi\config.w32') `
+            '/DZEND_ENABLE_STATIC_TSRMLS_CACHE=1' '/DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 /DFFI_STATIC_BUILD' 'static ARM64 libffi linkage'
+        # The ARM64 OpenSSL target does not use the Applink adapter.
+        # https://docs.openssl.org/3.5/man3/OPENSSL_Applink/
+        # PHP 8.4 and 8.5 only. Do not apply this patch to PHP master.
+        # Remove this patch when PHP 8.6 is released.
+        Replace-RequiredText (Join-Path $sourceRoot 'sapi\cli\php_cli.c') `
+            '#if defined(PHP_WIN32) && defined(HAVE_OPENSSL_EXT)' `
+            '#if defined(PHP_WIN32) && defined(HAVE_OPENSSL_EXT) && !defined(_M_ARM64)' 'ARM64 OpenSSL CLI include'
+    }
+
     $env:RAPIRA_VCVARS = $vcVars
     $env:RAPIRA_VCVARS_ARCH = $architecture.VcVars
     $env:RAPIRA_PHP_SOURCE = $sourceRoot
@@ -605,6 +429,8 @@ try {
         $before = '#elif defined(__aarch64__) || defined(_M_ARM64)'
         $after = '#elif (defined(__aarch64__) || defined(_M_ARM64)) && !defined(_MSC_VER)'
         Replace-RequiredText -Path (Join-Path $sourceRoot 'Zend\zend_simd.h') -Before $before -After $after -Description 'PHP 8.5 MSVC ARM64 SIMD fallback'
+        Replace-RequiredText (Join-Path $sourceRoot 'ext\bcmath\libbcmath\src\xsse.h') `
+            '#ifndef XSSE_H' '#if !defined(XSSE_H) && !(defined(_MSC_VER) && defined(_M_ARM64))' 'PHP 8.5 MSVC ARM64 BCMath fallback'
     }
 
     Invoke-Batch -NativeCmd $nativeCmd -WorkingDirectory $workRoot -Name 'tool-probe' -Lines @(
@@ -704,8 +530,19 @@ try {
         $destination = if ($dll.Name -like 'php_*.dll') { $runtimeExtStage } else { $runtimeStage }
         Copy-Item -LiteralPath $dll.FullName -Destination $destination
     }
+    Get-ChildItem (Join-Path $dependencyRoot 'bin') -File -Filter '*.dll' | Copy-Item -Destination $runtimeStage
+    Copy-Item (Join-Path $dependencyRoot 'share') (Join-Path $stageRoot 'share') -Recurse
     Get-ChildItem -LiteralPath $develRoots[0].FullName -Force |
         Copy-Item -Destination $develStage -Recurse -Force
+    New-Item -ItemType Directory (Join-Path $develStage 'build') -Force | Out-Null
+    Copy-Item (Join-Path $sourceRoot 'build\gen_stub.php') (Join-Path $develStage 'build\gen_stub.php')
+    foreach ($name in $extensions.Keys) {
+        $licenses = Join-Path $stageRoot "share\licenses\$name"
+        New-Item -ItemType Directory $licenses -Force | Out-Null
+        Get-ChildItem (Join-Path $sourceRoot "ext\$name") -File |
+            Where-Object { $_.Name -match '^(COPYING|LICENSE)' } |
+            Copy-Item -Destination $licenses
+    }
     Copy-Item -LiteralPath (Join-Path $sourceRoot 'LICENSE') -Destination (Join-Path $stageRoot 'PHP-LICENSE.txt')
     [pscustomobject] @{
         php_version = $PhpVersion

@@ -9,7 +9,7 @@ try {
     $clone = 'blocked';
 }
 
-// No response is available. Write the results to the application log.
+// No response to write into here, so the results travel out through the app log.
 \Rapira\log('dispatcher', context: [
     'class' => $d::class,
     'name' => $d->name(),

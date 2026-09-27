@@ -1,6 +1,6 @@
 <?php
 
-// Write the parsed Multipart structure to the response. Finalization deletes the spool file before the response arrives.
+// Chunked framing puts the response end after upload cleanup.
 
 $d = \Rapira\get_dispatcher();
 try {
@@ -16,7 +16,7 @@ try {
             'class=' . $b::class,
             'counts=' . count($b->fields) . '/' . count($b->files),
         ];
-        // Report each index so that the output shows a swapped or misaligned part.
+        // per-index: a swapped or misaligned part must show up in the output
         foreach ($b->fields as $i => $f) {
             $lines[] = "field$i=" . $f->name . '=' . $f->value;
             $lines[] = "field$i-cd=" . var_export(isset($f->headers['content-disposition']), true);
@@ -25,7 +25,9 @@ try {
             $lines[] = "file$i=" . $u->name . ':' . $u->clientFilename . ':' . $u->size
                 . ':' . file_get_contents($u->tmpPath);
             $lines[] = "file$i-type=" . var_export($u->clientMediaType, true);
+            $lines[] = "file$i-cd=" . var_export(isset($u->headers['content-disposition']), true);
         }
+        $ex->flush();
         $ex->writeBody(implode("\n", $lines));
     }
 } catch (\Rapira\Exception\ClosedException) {

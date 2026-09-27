@@ -45,7 +45,7 @@ env:
     CARGO_TERM_COLOR: always
 
 jobs:
-    # Resolve each PHP branch once. This prevents parallel jobs from selecting different patch versions if releases.json changes during the workflow.
+    # Resolve each PHP branch once so every architecture uses the same patch version.
     prepare:
         runs-on: windows-latest
         timeout-minutes: 10
@@ -90,32 +90,27 @@ jobs:
                       target: x86_64-pc-windows-msvc
                       asset_arch: x86_64
                       install_group: php-x86_64
-                      vc_arch: x64
                     - php_branch: "8.5"
                       spec: ${{ needs.prepare.outputs.php_85 }}
                       runner: windows-latest
                       target: x86_64-pc-windows-msvc
                       asset_arch: x86_64
                       install_group: php-x86_64
-                      vc_arch: x64
                     - php_branch: "8.4"
                       spec: ${{ needs.prepare.outputs.php_84 }}
                       runner: windows-11-vs2026-arm
                       target: aarch64-pc-windows-msvc
                       asset_arch: arm64
                       install_group: php-arm64
-                      vc_arch: ARM64
                     - php_branch: "8.5"
                       spec: ${{ needs.prepare.outputs.php_85 }}
                       runner: windows-11-vs2026-arm
                       target: aarch64-pc-windows-msvc
                       asset_arch: arm64
                       install_group: php-arm64
-                      vc_arch: ARM64
         env:
             STEM: rapira-v${{ inputs.version }}-php${{ matrix.php_branch }}-windows-${{ matrix.asset_arch }}
             CARGO_TARGET: ${{ matrix.target }}
-            VC_ARCH: ${{ matrix.vc_arch }}
         steps:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with:
@@ -139,7 +134,27 @@ jobs:
               uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
               with:
                   path: ${{ steps.php-path.outputs.install_dir }}
-                  key: ${{ fromJSON(matrix.spec).source_cache_key }}-windows-${{ matrix.asset_arch }}-${{ hashFiles('ci/build-php.ps1', 'ci/php-configure-flags.txt') }}
+                  key: ${{ fromJSON(matrix.spec).source_cache_key }}-${{ matrix.asset_arch }}-${{ hashFiles('ci/build-php.ps1', 'ci/build-common.ps1', 'ci/php-*', 'ci/*dependencies*', 'ci/windows-extensions.txt') }}
+
+            - name: Restore ARM64 dependencies
+              if: matrix.asset_arch == 'arm64' && steps.sourcephpcache.outputs.cache-hit != 'true'
+              id: deps-cache
+              uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+              with:
+                  path: ${{ runner.temp }}/rapira-php-dependencies/arm64
+                  key: php-dependencies-arm64-${{ hashFiles('ci/build-dependencies.ps1', 'ci/build-common.ps1', 'ci/php-dependencies-arm64.json') }}
+
+            - name: Build ARM64 dependencies
+              if: matrix.asset_arch == 'arm64' && steps.sourcephpcache.outputs.cache-hit != 'true'
+              shell: pwsh
+              run: ./ci/build-dependencies.ps1 -InstallDirectory "$env:RUNNER_TEMP\rapira-php-dependencies\arm64"
+
+            - name: Save ARM64 dependencies
+              if: matrix.asset_arch == 'arm64' && steps.sourcephpcache.outputs.cache-hit != 'true' && steps.deps-cache.outputs.cache-hit != 'true'
+              uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+              with:
+                  path: ${{ runner.temp }}/rapira-php-dependencies/arm64
+                  key: ${{ steps.deps-cache.outputs.cache-primary-key }}
 
             - name: Build native PHP
               shell: pwsh
@@ -167,127 +182,13 @@ jobs:
                   key: ${{ matrix.asset_arch }}-php-${{ fromJSON(matrix.spec).php_version }}
 
             - name: Build rapira
-              run: cargo build --release --locked --bin rapira --target $env:CARGO_TARGET
+              run: ./dev.ps1 -Task build -Release -Devel $env:PHP_DEVEL_DIR -Runtime $env:PHP_RUNTIME
 
-            - name: Assemble bundle
+            - name: Assemble and test bundle
               shell: pwsh
               run: |
-                  $bundle = Join-Path 'dist' $env:STEM
-                  $bundleExt = Join-Path $bundle 'ext'
-                  New-Item -ItemType Directory -Force $bundleExt | Out-Null
-                  Copy-Item (Join-Path "target\$env:CARGO_TARGET\release" 'rapira.exe') $bundle
-                  Copy-Item 'README.md','LICENSE' $bundle
-                  Copy-Item (Join-Path $env:PHP_INSTALL_DIR 'PHP-LICENSE.txt') $bundle
-                  $env:PHP_FULL | Set-Content (Join-Path $bundle 'PHP_VERSION.txt') -Encoding ascii
-
-                  $runtimeDlls = @(Get-ChildItem -LiteralPath $env:PHP_RUNTIME -Filter '*.dll' -File)
-                  if (-not ($runtimeDlls.Name -contains 'php8ts.dll')) {
-                      throw 'The provisioned PHP runtime has no php8ts.dll.'
-                  }
-                  $runtimeDlls | Copy-Item -Destination $bundle
-
-                  $modules = @(& (Join-Path $env:PHP_RUNTIME 'php.exe') -n -m 2>&1 |
-                    ForEach-Object { $_.ToString().Trim() } |
-                    Where-Object { $_ })
-                  if ($LASTEXITCODE -ne 0) {
-                      throw "Could not inspect the provisioned PHP modules.`n$($modules -join "`n")"
-                  }
-                  $extensions = @(Get-Content 'ci\windows-extensions.txt' |
-                    ForEach-Object { $_.Trim() } |
-                    Where-Object { $_ -and $_ -notmatch '^#' })
-                  $expected = @('fileinfo','mbstring')
-                  if (@(Compare-Object $expected $extensions).Count -ne 0 -or $extensions.Count -ne 2) {
-                      throw 'ci\windows-extensions.txt must contain exactly fileinfo and mbstring.'
-                  }
-                  $extensionDlls = @(Get-ChildItem -LiteralPath (Join-Path $env:PHP_RUNTIME 'ext') -Filter 'php_*.dll' -File)
-                  $extensionDlls | Copy-Item -Destination $bundleExt
-
-                  foreach ($extension in $extensions) {
-                      $source = Join-Path $env:PHP_RUNTIME "ext\php_$extension.dll"
-                      if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
-                          throw "Missing required PHP extension: '$source'."
-                      }
-                  }
-
-                  $ini = @('extension_dir=ext')
-                  $opcache = Join-Path $env:PHP_RUNTIME 'ext\php_opcache.dll'
-                  if (Test-Path -LiteralPath $opcache -PathType Leaf) {
-                      $ini += 'zend_extension=php_opcache.dll'
-                  } else {
-                      if (-not ($modules -contains 'Zend OPcache')) {
-                          throw 'OPcache is neither built into PHP nor available as php_opcache.dll.'
-                      }
-                  }
-                  $ini += @($extensions | ForEach-Object { "extension=php_$_.dll" })
-                  $ini | Set-Content (Join-Path $bundle 'php.ini') -Encoding ascii
-                  Add-Content (Join-Path $bundle 'README.md') `
-                    "`nRuntime requirement: Microsoft Visual C++ Redistributable for Visual Studio 2015-2022 $env:VC_ARCH." `
-                    -Encoding utf8
-
-            # The server PATH contains only Windows system directories. This step checks php8ts.dll and its bundled dependencies. Windows system DLLs and the required VC++ runtime remain external.
-            - name: PATH-stripped HTTP smoke test
-              shell: pwsh
-              run: |
-                  $bundle = (Resolve-Path (Join-Path 'dist' $env:STEM)).ProviderPath
-                  $smoke = Join-Path $env:RUNNER_TEMP "rapira-smoke-${{ matrix.php_branch }}"
-                  New-Item -ItemType Directory -Path $smoke -Force | Out-Null
-                  @'
-                  <?php
-                  $handler = static function (): void {
-                      header('content-type: text/plain');
-                      echo 'rapira-windows-bundle-ok';
-                  };
-                  while (\Rapira\handle_request($handler)) {
-                  }
-                  '@ | Set-Content (Join-Path $smoke 'smoke-worker.php') -Encoding ascii
-
-                  $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
-                  $listener.Start()
-                  $port = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
-                  $listener.Stop()
-                  @"
-                  [http]
-                  listen = "127.0.0.1:$port"
-                  [pool]
-                  processes = 1
-                  mode = "worker"
-                  entrypoint = "smoke-worker.php"
-                  "@ | Set-Content (Join-Path $smoke 'rapira.toml') -Encoding ascii
-
-                  $env:PHPRC = Join-Path $bundle 'php.ini'
-                  $env:PHP_INI_SCAN_DIR = ''
-                  $env:PATH = "$env:SystemRoot;$env:SystemRoot\System32"
-                  $stdout = Join-Path $smoke 'stdout.log'
-                  $stderr = Join-Path $smoke 'stderr.log'
-                  $process = Start-Process -FilePath (Join-Path $bundle 'rapira.exe') `
-                    -ArgumentList @('serve','--config',(Join-Path $smoke 'rapira.toml')) `
-                    -WorkingDirectory $bundle -RedirectStandardOutput $stdout `
-                    -RedirectStandardError $stderr -WindowStyle Hidden -PassThru
-                  try {
-                      $deadline = [DateTime]::UtcNow.AddSeconds(30)
-                      $response = $null
-                      while ([DateTime]::UtcNow -lt $deadline) {
-                          if ($process.HasExited) { break }
-                          try {
-                              $response = Invoke-WebRequest "http://127.0.0.1:$port/" -TimeoutSec 2
-                              break
-                          } catch {
-                              Start-Sleep -Milliseconds 100
-                          }
-                      }
-                      if ($process.HasExited) {
-                          throw "rapira exited before the smoke request: $($process.ExitCode)`n$(Get-Content $stderr -Raw -ErrorAction SilentlyContinue)"
-                      }
-                      if ($null -eq $response -or $response.StatusCode -ne 200 -or
-                          $response.Content.Trim() -ne 'rapira-windows-bundle-ok') {
-                          throw "The bundled server did not return the expected smoke response.`n$(Get-Content $stderr -Raw -ErrorAction SilentlyContinue)"
-                      }
-                  } finally {
-                      if (-not $process.HasExited) {
-                          Stop-Process -Id $process.Id -Force
-                          $process.WaitForExit()
-                      }
-                  }
+                  ./ci/package.ps1 -Binary "target\$env:CARGO_TARGET\release\rapira.exe" `
+                    -PhpInstall $env:PHP_INSTALL_DIR -Destination "dist\$env:STEM"
 
             - name: Archive
               shell: pwsh

@@ -1,6 +1,6 @@
 <?php
 
-// The precision INI directive has a default value of 14. The response body shows if the test php.ini overrides it. https://github.com/php/php-src/blob/dab13a022a54f8bc03302f93ccb6484907ec1245/main/main.c#L868
+// precision is a plain scalar ini with a well-known built-in default (14), so a planted php.ini is detectable from the body.
 
 $d = \Rapira\get_dispatcher();
 try {

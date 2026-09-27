@@ -6,7 +6,7 @@ $handler = static function (): void {
 	}
 	if (($_GET['boom'] ?? '') === '1') {
 		ini_set('display_errors', '0');
-		// The object constructor throws an exception when the magic database is missing. finfo_open() causes a warning.
+		// the OO ctor throws on a missing magic db; finfo_open() only warns
 		new finfo(FILEINFO_NONE, '/nonexistent-dir-xyz/magic.mgc');
 		return;
 	}

@@ -1,95 +1,133 @@
 use anyhow::bail;
 use serde::Deserialize;
+use std::fmt;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use crate::{Overrides, config_relative};
+use crate::ConfigCtx;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PoolSettings {
     pub entrypoint: PathBuf,
-    /// PHP interpreter threads in one process.
+    /// Fixed interpreter thread count for this plugin.
     pub processes: usize,
-    pub mode: RunMode,
-    /// Number of requests that a worker serves before recycling, including jitter. A value of 0 has no limit.
+    pub mode: Mode,
+    /// Requests per interpreter generation, with jitter; zero is unlimited.
     pub max_requests: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum RunMode {
+pub enum Mode {
     Classic,
     Worker,
-    #[default]
     Dispatcher,
 }
 
-impl RunMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            RunMode::Classic => "classic",
-            RunMode::Worker => "worker",
-            RunMode::Dispatcher => "dispatcher",
-        }
+impl fmt::Display for Mode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Classic => "classic",
+            Self::Worker => "worker",
+            Self::Dispatcher => "dispatcher",
+        })
     }
 }
 
-impl std::str::FromStr for RunMode {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "classic" => Ok(RunMode::Classic),
-            "worker" => Ok(RunMode::Worker),
-            "dispatcher" => Ok(RunMode::Dispatcher),
-            other => Err(format!(
-                "unknown mode `{other}` (expected classic, worker, or dispatcher)"
-            )),
-        }
-    }
-}
-
+/// Embedded by name: serde does not support flatten with deny_unknown_fields.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct PoolSection {
+pub struct PoolSection {
     entrypoint: Option<String>,
     processes: Option<usize>,
-    mode: Option<RunMode>,
+    mode: Option<Mode>,
     max_requests: Option<u64>,
 }
 
-fn default_processes() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
-}
-
-pub(crate) fn resolve_pool(
+pub fn resolve_pool(
     section: PoolSection,
-    cli: &Overrides,
-    config_dir: Option<&Path>,
+    table: &str,
+    ctx: &ConfigCtx,
 ) -> anyhow::Result<PoolSettings> {
-    let processes = cli
+    let processes = section
         .processes
-        .or(section.processes)
-        .unwrap_or_else(default_processes);
-    if processes == 0 {
-        bail!("pool.processes must be at least 1");
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
+    if !(1..=4096).contains(&processes) {
+        bail!("{table}.processes must be between 1 and 4096");
     }
-
-    let mode = cli.mode.or(section.mode).unwrap_or_default();
-
-    let entrypoint = if let Some(script) = &cli.entrypoint {
-        std::path::absolute(script)?
-    } else if let Some(ep) = section.entrypoint.as_deref().filter(|s| !s.is_empty()) {
-        config_relative(config_dir, ep)?
-    } else {
-        bail!("no entrypoint: pass a SCRIPT argument or set pool.entrypoint in the config file");
+    let Some(ep) = section.entrypoint.as_deref().filter(|s| !s.is_empty()) else {
+        bail!("{table}.entrypoint is required");
     };
-
     Ok(PoolSettings {
-        entrypoint,
+        entrypoint: ctx.resolve_path(ep)?,
         processes,
-        mode,
+        mode: section.mode.unwrap_or(Mode::Dispatcher),
         max_requests: section.max_requests.unwrap_or(0),
     })
+}
+
+pub fn check_entrypoint(table: &str, entrypoint: &Path) -> anyhow::Result<()> {
+    let meta = File::open(entrypoint)
+        .and_then(|f| f.metadata())
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "{table}.entrypoint {} is not readable: {e}",
+                entrypoint.display()
+            )
+        })?;
+    anyhow::ensure!(
+        meta.is_file(),
+        "{table}.entrypoint {} is not a regular file",
+        entrypoint.display()
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pool(text: &str) -> anyhow::Result<PoolSettings> {
+        resolve_pool(
+            toml::from_str(text)?,
+            "http.pool",
+            &ConfigCtx {
+                dir: PathBuf::from("C:/app"),
+            },
+        )
+    }
+
+    #[test]
+    fn pool_paths_modes_and_quotas_resolve() {
+        let got = pool(
+            "entrypoint = 'public/index.php'\nprocesses = 4\nmode = 'worker'\nmax_requests = 200",
+        )
+        .unwrap();
+        assert_eq!(got.entrypoint, Path::new("C:/app/public/index.php"));
+        assert_eq!(
+            (got.processes, got.mode, got.max_requests),
+            (4, Mode::Worker, 200)
+        );
+        assert_eq!(
+            pool("entrypoint = 'index.php'").unwrap().mode,
+            Mode::Dispatcher
+        );
+    }
+
+    #[test]
+    fn invalid_pool_settings_name_the_key() {
+        for (text, key) in [
+            ("", "entrypoint"),
+            ("entrypoint = ''", "entrypoint"),
+            ("entrypoint = 'a.php'\nprocesses = 0", "processes"),
+            ("entrypoint = 'a.php'\nprocesses = 4097", "processes"),
+            ("scaling = 'dynamic'", "scaling"),
+            (
+                "request_terminate_timeout_secs = 1",
+                "request_terminate_timeout_secs",
+            ),
+        ] {
+            assert!(pool(text).unwrap_err().to_string().contains(key));
+        }
+    }
 }

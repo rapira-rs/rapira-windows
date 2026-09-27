@@ -1,5 +1,5 @@
 <?php
-// A shutdown function that a job registers runs once at the end of the job. A function that bootstrap registers runs at the end of the cycle.
+// A shutdown function registered during a job runs at the end of that job, exactly once. The boot-registered one runs at cycle end.
 $bootFired = 0;
 $jobFired = 0;
 register_shutdown_function(static function () use (&$bootFired): void {

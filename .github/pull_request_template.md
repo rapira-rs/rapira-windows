@@ -1,19 +1,23 @@
-# Reason for this pull request
+# Reason for This PR
 
-`[Add an issue reference or explain the reason.]`
+`[Author TODO: add issue # or explain reasoning.]`
 
-## Changes
+## Description of Changes
 
-`[Describe the final behavior and significant implementation changes.]`
+`[Author TODO: add description of changes.]`
 
-## License acceptance
+## License Acceptance
 
 By submitting this pull request, I confirm that my contribution is made under the terms of the MIT license.
 
-## Checklist
+## PR Checklist
 
-- [ ] I signed every commit with `git commit -s`.
-- [ ] The pull request title follows Conventional Commits and ends with the issue reference when one exists.
-- [ ] The description states the reason and the final behavior.
-- [ ] I included required code and documentation changes.
-- [ ] I added meaningful tests for changed behavior.
+`[Author TODO: Meet these criteria.]`
+`[Reviewer TODO: Verify that these criteria are met. Request changes if not]`
+
+- [ ] All commits in this PR are signed (`git commit -s`).
+- [ ] The reason for this PR is clearly provided (issue no. or explanation).
+- [ ] The description of changes is clear and encompassing.
+- [ ] Any required documentation changes (code and docs) are included in this PR.
+- [ ] The PR title is a conventional commit (`feat:`, `fix:`, `chore:`, ...), issue no. at the end.
+- [ ] All added/changed functionality is tested.

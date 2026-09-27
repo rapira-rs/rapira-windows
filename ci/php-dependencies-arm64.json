@@ -1,0 +1,58 @@
+{
+  "zlib": {
+    "url": "https://codeload.github.com/winlibs/zlib/tar.gz/0089522e62e6b5d4950e62bd20f0cb06a9288413",
+    "sha256": "e2af9f28fcdf723e464b40af73fdeed07ce3e581a9ea110702c1ba733983f8a0"
+  },
+  "openssl": {
+    "url": "https://codeload.github.com/winlibs/openssl/tar.gz/5cc37af43ae0abd60363013536b678be5b54fb70",
+    "sha256": "28657481d983dafd34571b2ad252e4dae8f7c660adc7301eaf6ae526e780a963"
+  },
+  "libonig": {
+    "url": "https://codeload.github.com/winlibs/oniguruma/tar.gz/fceeeffdb609661ffaea9be4075c6ff4d6696611",
+    "sha256": "064ef4fe0f63b466f7cd90276f5375f0315ec14450e91139540f27cc2cad9f04"
+  },
+  "libpq": {
+    "url": "https://codeload.github.com/winlibs/postgresql/tar.gz/5cb6f940a63def19804e2f8c954bf985e4e30724",
+    "sha256": "48759f47c5e0101e5eeec7c3187bb832971527578650485fbc90a9efac8e3c66"
+  },
+  "libiconv": {
+    "url": "https://codeload.github.com/winlibs/libiconv/tar.gz/8f55a0aa6532f30f947261d90e72b200f350a5df",
+    "sha256": "3d2aa028550a104ba513aa4b9e23f59994445cf31089de9a43eb2f791fb00230"
+  },
+  "libffi": {
+    "url": "https://codeload.github.com/winlibs/libffi/tar.gz/30ae078e9dbf2cb36de5db54b9740e89d8ff52e1",
+    "sha256": "a88b10bf2471158cd863705956d1c2b3c182f32d04d21f3e7cc45a1b47b65cb6"
+  },
+  "libcurl": {
+    "url": "https://codeload.github.com/winlibs/curl/tar.gz/e4dd89bce50940c78fd32c70ffe31c102a6ce69f",
+    "sha256": "1f9d860f987ba3369177305125c5c0b337c498b126ac177238db37d53d24a4da"
+  },
+  "libssh2": {
+    "url": "https://codeload.github.com/winlibs/libssh2/tar.gz/7817741ff29d52165b0e8c157acbe4c0ec582117",
+    "sha256": "c08c3b964e6a2dac55d55d8dfdd106194b269fdcdae0a5e55309439383123cec"
+  },
+  "nghttp2": {
+    "url": "https://codeload.github.com/winlibs/nghttp2/tar.gz/50895b5f3cebeb2553a4e40a62561707a1a129e0",
+    "sha256": "b18755036852acd5b0cfcff34023894f8c1440c424076e48d18bf5fea8eefa93"
+  },
+  "libxml2": {
+    "url": "https://codeload.github.com/winlibs/libxml2/tar.gz/c8797dc3b7964fabdb94d0b3176afb461afbd40b",
+    "sha256": "e89cc6a0ce83cc94f247f5106f76fde8812dbef47142884b6b290f77b97274b6"
+  },
+  "sqlite3": {
+    "url": "https://codeload.github.com/winlibs/sqlite3/tar.gz/90771f2f145baf5b9a2e094ff9ad36d700079125",
+    "sha256": "ee8839ce8766407fb67069185d6241ce0bfff7e2bad4b3bf93880116c5efa081"
+  },
+  "ICU": {
+    "url": "https://codeload.github.com/winlibs/icu4c/tar.gz/11bca20cc331c2ad3d38e240e5921ebfad8fe523",
+    "sha256": "e19f330617153778dc898e3fcf23e5dd657acb7aa70b90f7d7797144d90b9039"
+  },
+  "gettext": {
+    "url": "https://codeload.github.com/winlibs/gettext/tar.gz/refs/tags/gettext-0.18.3-9",
+    "sha256": "c01c62b2eff06196409fd997ab3b71e57ff88ed6965211e70237e3f632298e49"
+  },
+  "perl": {
+    "url": "https://www.cpan.org/src/5.0/perl-5.42.2.tar.xz",
+    "sha256": "0a585eeb9e363c0f80482ddb3571625250c2c86aeb408853e8ea50805cfb14bb"
+  }
+}

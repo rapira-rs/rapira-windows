@@ -1,211 +1,57 @@
-use std::collections::BTreeSet;
+use std::cell::Cell;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use windows_sys::Win32::System::Console::{
-    AllocConsole, CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent, GetConsoleProcessList,
-    SetConsoleCtrlHandler,
-};
-use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
-use windows_sys::core::BOOL;
+pub use super::console::send_ctrl_break;
+use rapira_net::ListenAddr;
+use rapira_sapi::{Addr, Mode};
+use serde_json::Value;
+use tests::server_log;
+use windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
 
-const CONSOLE_PROBE: &str = "RAPIRA_E2E_CONSOLE_PROBE";
-
-/// Connection timeout for a new Windows server process.
+/// Startup budget for the server and its interpreter pools.
 pub const BOOT: Duration = Duration::from_secs(30);
 
-/// Verifies console event delivery before server tests use console control.
-pub fn assert_console_delivery() {
-    static RESULT: OnceLock<Result<(), String>> = OnceLock::new();
-    let result = RESULT.get_or_init(|| {
-        if let Err(first) = console_delivery_attempt() {
-            let mut pid = 0;
-            // SAFETY: the output buffer has capacity for the single supplied entry.
-            if unsafe { GetConsoleProcessList(&mut pid, 1) } != 0 {
-                return Err(first);
-            }
-            // A redirected test runner can start without a console. Allocate one console and verify that new process groups inherit it.
-            if unsafe { AllocConsole() } == 0 {
-                return Err(format!(
-                    "{first}; AllocConsole failed: {} (no shared console)",
-                    io::Error::last_os_error()
-                ));
-            }
-            console_delivery_attempt()
-                .map_err(|second| format!("{first}; after AllocConsole: {second}"))?;
-        }
-        Ok(())
-    });
-    assert!(
-        result.is_ok(),
-        "Ctrl+Break delivery preflight failed: {result:?}"
-    );
-}
+/// Master could not bring up a serviceable gen-0 pool.
+pub const MASTER_EXIT_FAILBOOT: i32 = 70;
+pub const MASTER_EXIT_OK: i32 = 0;
+/// Master forced stop (a second signal arrived while draining).
+pub const MASTER_EXIT_FORCED: i32 = 130;
 
-fn console_delivery_attempt() -> Result<(), String> {
-    let dir = scratch_dir();
-    let ready = dir.join("console.ready");
-    let log_path = dir.join("console.log");
-    let log = File::create(&log_path).map_err(|e| e.to_string())?;
-    let mut child = Command::new(std::env::current_exe().map_err(|e| e.to_string())?)
-        .args(["--exact", "harness::console_probe_child", "--nocapture"])
-        .env(CONSOLE_PROBE, &ready)
-        .creation_flags(CREATE_NEW_PROCESS_GROUP)
-        .stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?))
-        .stderr(Stdio::from(log))
-        .spawn()
-        .map_err(|e| format!("spawn console probe: {e}"))?;
-    let result = (|| {
-        let deadline = Instant::now() + BOOT;
-        while !ready.exists() {
-            if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
-                return Err(format!(
-                    "console probe exited before installing its handler: {status}"
-                ));
-            }
-            if Instant::now() >= deadline {
-                return Err("console probe did not install its handler (no shared console)".into());
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        // SAFETY: The child is the leader of this process group, and the test has not reaped it.
-        if unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, child.id()) } == 0 {
-            return Err(format!(
-                "GenerateConsoleCtrlEvent failed: {} (no shared console)",
-                io::Error::last_os_error()
-            ));
-        }
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
-                return if status.success() {
-                    Ok(())
-                } else {
-                    Err(format!(
-                        "console probe did not handle Ctrl+Break: {status} (no shared console)"
-                    ))
-                };
-            }
-            if Instant::now() >= deadline {
-                return Err(
-                    "GenerateConsoleCtrlEvent succeeded but the child did not observe it (no shared console)"
-                        .into(),
-                );
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    })();
-    force_reap(&mut child);
-    let result = result.map_err(|error| {
-        format!(
-            "{error}\n{}",
-            std::fs::read_to_string(&log_path).unwrap_or_default()
-        )
-    });
-    let _ = std::fs::remove_dir_all(dir);
-    result
-}
+/// Exceeds the default 30-second budget for plugin drain and PHP teardown.
+pub const STOP_BUDGET: Duration = Duration::from_secs(45);
 
-#[test]
-fn console_probe_child() {
-    let Some(ready) = std::env::var_os(CONSOLE_PROBE) else {
-        return;
-    };
-    static OBSERVED: AtomicBool = AtomicBool::new(false);
-    unsafe extern "system" fn handler(event: u32) -> BOOL {
-        if event == CTRL_BREAK_EVENT {
-            OBSERVED.store(true, Ordering::Release);
-            1
-        } else {
-            0
-        }
-    }
-    // SAFETY: This handler runs only in the child, has the system ABI, and remains valid until exit.
-    if unsafe { SetConsoleCtrlHandler(Some(handler), 1) } == 0 {
-        panic!(
-            "SetConsoleCtrlHandler failed: {} (no shared console)",
-            io::Error::last_os_error()
-        );
-    }
-    std::fs::write(ready, b"handler installed").unwrap();
-    let deadline = Instant::now() + BOOT;
-    while !OBSERVED.load(Ordering::Acquire) {
-        assert!(
-            Instant::now() < deadline,
-            "Ctrl+Break was not delivered (no shared console)"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
-pub fn send_ctrl_break(pid: u32) {
-    // SAFETY: Callers retain the `Child` while they send events to its process group.
-    if unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) } == 0 {
-        panic!(
-            "GenerateConsoleCtrlEvent({pid}) failed: {} (no shared console)",
-            io::Error::last_os_error()
-        );
-    }
-}
-
-fn force_reap(child: &mut Child) {
-    if child.try_wait().ok().flatten().is_none() {
-        let _ = Command::new("taskkill")
-            .args(["/PID", &child.id().to_string(), "/T", "/F"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-}
-
-/// Isolates PHP module startup and always terminates and reaps a child that does not complete.
-pub fn run_isolated_test(name: &str, env_name: &str, value: &str, timeout: Duration) -> String {
-    assert_console_delivery();
-    let dir = scratch_dir();
-    let log = File::create(dir.join("server.log")).unwrap();
-    let child = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", name, "--nocapture"])
-        .env(env_name, value)
-        .env_remove(CONSOLE_PROBE)
-        .creation_flags(CREATE_NEW_PROCESS_GROUP)
-        .stdout(Stdio::from(log.try_clone().unwrap()))
-        .stderr(Stdio::from(log))
-        .spawn()
-        .expect("spawn isolated PHP proof");
-    let mut server = Server {
-        child,
-        addr: "127.0.0.1:0".parse().unwrap(),
-        dir,
-    };
-    let status = server.wait_exit(timeout);
-    let log = std::fs::read_to_string(server.dir.join("server.log")).unwrap_or_default();
-    assert!(
-        status.is_some_and(|status| status.success()),
-        "isolated test {name} ({value}) failed or exceeded {timeout:?}: {status:?}\n{log}"
-    );
-    log
-}
-
-/// A running server and the temporary directory that contains its configuration and log.
+/// A running server and the scratch directory for its config and log.
 pub struct Server {
     pub child: Child,
+    /// The TCP listener of the first pool.
     pub addr: SocketAddr,
     pub dir: PathBuf,
+    /// The listener of the `[grpc]` pool, when the config has one.
+    pub grpc: Option<ListenAddr>,
 }
 
 impl Server {
     pub fn pid(&self) -> u32 {
         self.child.id()
+    }
+
+    /// The standard output and standard error of the server.
+    pub fn log_file(&self) -> PathBuf {
+        self.dir.join("server.log")
+    }
+
+    /// Waits for clean shutdown and the final scoreboard records. Drop removes the scratch directory.
+    pub fn stop(&mut self) {
+        send_ctrl_break(self.pid());
+        let status = self.wait_exit(STOP_BUDGET);
+        assert_exit_code(status, MASTER_EXIT_OK, self);
     }
 
     pub fn wait_exit(&mut self, timeout: Duration) -> Option<ExitStatus> {
@@ -229,9 +75,15 @@ impl Server {
 }
 
 impl Drop for Server {
-    /// Reaps only a running child because the system can reuse the process ID of a reaped child.
+    /// Sends a control event only while the server is alive. An exited PID can be reused.
     fn drop(&mut self) {
-        force_reap(&mut self.child);
+        if self.child.try_wait().ok().flatten().is_none() {
+            send_ctrl_break(self.child.id());
+            if self.wait_exit(Duration::from_secs(5)).is_none() {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+            }
+        }
         if std::thread::panicking() {
             eprintln!("{}", log_tail(&self.dir));
             return;
@@ -240,7 +92,7 @@ impl Drop for Server {
     }
 }
 
-/// The binary is in the root package, so CARGO_BIN_EXE is not set here. Locate it next to the test binary or use `RAPIRA_BIN`.
+/// The bin belongs to the root package, so CARGO_BIN_EXE is unset here: locate it beside the test binary, or via `RAPIRA_BIN`.
 fn rapira_bin() -> PathBuf {
     if let Ok(p) = std::env::var("RAPIRA_BIN") {
         return PathBuf::from(p);
@@ -253,53 +105,43 @@ fn rapira_bin() -> PathBuf {
         .join("rapira.exe");
     assert!(
         bin.exists(),
-        "rapira binary not found at {}; build it first (cargo build -p rapira_windows --bin rapira) or set RAPIRA_BIN",
+        "rapira binary not found at {}; build it first (dev.ps1 -Task build) or set RAPIRA_BIN",
         bin.display()
     );
     bin
 }
 
-/// Appends `extra_toml` inside `[pool]`. Another section requires its own header after all pool keys.
+/// `extra_toml` is appended inside `[http.pool]`, bare keys first; a `[log]` or `[supervisor]` header may follow, and it must not open `[http]` or `[http.*]`.
 pub fn spawn_with_config(fixture: &str, processes: usize, extra_toml: &str) -> Server {
     spawn_with_extras(fixture, processes, "", extra_toml, Some("info"), None)
 }
 
-/// Starts an example from the repository `examples` directory.
-pub fn spawn_example(name: &str, processes: usize) -> Server {
-    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../examples")
-        .join(name);
-    spawn_with_source(&source, name, processes, "", "", Some("info"), None)
-}
-
-/// Calls [`spawn_with_config`] with keys in `[http]`, where the final `extra_toml` cannot add values.
+/// [`spawn_with_config`] for keys inside `[http]`: `http_extra` follows `listen` and may open `[http.static]` or `[http.uploads]`.
 pub fn spawn_with_http_extra(fixture: &str, processes: usize, http_extra: &str) -> Server {
     spawn_with_extras(fixture, processes, http_extra, "", Some("info"), None)
 }
 
-/// Calls [`spawn_with_config`] without a fixed `RUST_LOG` value, so the `[log]` section controls the filter.
+/// [`spawn_with_config`] without the pinned `RUST_LOG`, so the `[log]` section owns the filter.
 pub fn spawn_without_rust_log(fixture: &str, processes: usize, extra_toml: &str) -> Server {
     spawn_with_extras(fixture, processes, "", extra_toml, None, None)
 }
 
-/// Writes php.ini to the child working directory and can set PHPRC to the same path.
+/// A `php.ini` written into the directory the child runs from, optionally also pointed at by PHPRC.
 pub struct CwdIni<'a> {
     pub contents: &'a str,
     pub via_phprc: bool,
-    pub phprc_file: Option<(&'a str, &'a str)>,
 }
 
-/// Verifies that the SAPI does not read ini files from the working directory.
+/// Pins that the SAPI does not read ini files from the cwd.
 pub fn spawn_in_cwd(fixture: &str, processes: usize, php_ini: &str) -> Server {
     let ini = CwdIni {
         contents: php_ini,
         via_phprc: false,
-        phprc_file: None,
     };
     spawn_with_extras(fixture, processes, "", "", Some("info"), Some(ini))
 }
 
-/// Calls [`spawn_in_cwd`] with PHPRC set to the same directory. It appends `extra_toml` inside `[pool]`, so another section requires its own header and must occur last.
+/// [`spawn_in_cwd`] with PHPRC pointing at the same directory; `extra_toml` is appended inside `[http.pool]`, bare keys first; a `[log]` or `[supervisor]` header may follow, and it must not open `[http]` or `[http.*]`.
 pub fn spawn_with_phprc_and_config(
     fixture: &str,
     processes: usize,
@@ -309,25 +151,8 @@ pub fn spawn_with_phprc_and_config(
     let ini = CwdIni {
         contents: php_ini,
         via_phprc: true,
-        phprc_file: None,
     };
     spawn_with_extras(fixture, processes, "", extra_toml, Some("info"), Some(ini))
-}
-
-/// A PHPRC file has precedence over php.ini in the working directory.
-pub fn spawn_with_phprc_file(
-    fixture: &str,
-    processes: usize,
-    cwd_php_ini: &str,
-    phprc_relative: &str,
-    phprc_contents: &str,
-) -> Server {
-    let ini = CwdIni {
-        contents: cwd_php_ini,
-        via_phprc: false,
-        phprc_file: Some((phprc_relative, phprc_contents)),
-    };
-    spawn_with_extras(fixture, processes, "", "", Some("info"), Some(ini))
 }
 
 fn spawn_with_extras(
@@ -338,118 +163,128 @@ fn spawn_with_extras(
     rust_log: Option<&str>,
     cwd_ini: Option<CwdIni<'_>>,
 ) -> Server {
-    spawn_with_source(
-        &fixture_path(fixture),
-        fixture,
-        processes,
-        http_extra,
-        extra_toml,
-        rust_log,
-        cwd_ini,
-    )
-}
-
-fn spawn_with_source(
-    source: &Path,
-    name: &str,
-    processes: usize,
-    http_extra: &str,
-    extra_toml: &str,
-    rust_log: Option<&str>,
-    cwd_ini: Option<CwdIni<'_>>,
-) -> Server {
-    let (dir, entrypoint) = stage_source(source, name);
+    let (dir, entrypoint) = stage_fixture(fixture);
     if let Some(ini) = &cwd_ini {
         std::fs::write(dir.join("php.ini"), ini.contents).expect("write php.ini");
-        if let Some((relative, contents)) = ini.phprc_file {
-            let path = dir.join(relative);
-            std::fs::create_dir_all(path.parent().unwrap()).expect("create PHPRC directory");
-            std::fs::write(path, contents).expect("write PHPRC file");
-        }
     }
+    let render = |port| render_config(&tcp(port), processes, &entrypoint, http_extra, extra_toml);
+    spawn_ready(dir, &render, None, rust_log, cwd_ini.as_ref(), &[])
+}
+
+/// The `listen` value of a TCP pool on `port`.
+fn tcp(port: u16) -> String {
+    format!("127.0.0.1:{port}")
+}
+
+/// Starts the server on a fresh port and waits for the selected listener.
+fn spawn_ready(
+    dir: PathBuf,
+    render: &dyn Fn(u16) -> String,
+    explicit: Option<&ListenAddr>,
+    rust_log: Option<&str>,
+    cwd_ini: Option<&CwdIni<'_>>,
+    env: &[(String, String)],
+) -> Server {
     let mut last_log = String::new();
     for _ in 0..3 {
-        let (mut child, addr) = spawn_attempt(
-            &dir,
-            processes,
-            &entrypoint,
-            http_extra,
-            extra_toml,
-            rust_log,
-            SpawnOptions {
-                cwd_ini: cwd_ini.as_ref(),
-                listen: None,
-            },
-        );
-        if wait_for_port(&addr, &mut child, BOOT) {
-            return Server { child, addr, dir };
+        let (mut child, addr) = spawn_attempt(&dir, render, rust_log, cwd_ini, env);
+        let ready = explicit.cloned().unwrap_or(ListenAddr::Tcp(addr));
+        if wait_for_listener(&ready, &mut child, BOOT) {
+            return Server {
+                child,
+                addr,
+                dir,
+                grpc: None,
+            };
         }
-        force_reap(&mut child);
+        let _ = child.kill();
+        let _ = child.wait();
         last_log = log_tail(&dir);
     }
     let _ = std::fs::remove_dir_all(&dir);
     panic!("rapira never accepted a connection after 3 attempts\n{last_log}");
 }
 
-/// A temporary directory with a copy of the fixture and its entrypoint name for the configuration.
+/// A scratch dir holding a copy of the fixture, plus the entrypoint name for the config.
 fn stage_fixture(fixture: &str) -> (PathBuf, String) {
-    stage_source(&fixture_path(fixture), fixture)
-}
-
-fn stage_source(source: &Path, name: &str) -> (PathBuf, String) {
     let dir = scratch_dir();
-    let name = Path::new(name)
+    let name = Path::new(fixture)
         .file_name()
-        .unwrap_or_else(|| panic!("source {} has no file name", source.display()));
-    std::fs::copy(source, dir.join(name))
-        .unwrap_or_else(|e| panic!("copy source {}: {e}", source.display()));
+        .unwrap_or_else(|| panic!("fixture {fixture} has no file name"));
+    std::fs::copy(fixture_path(fixture), dir.join(name))
+        .unwrap_or_else(|e| panic!("copy fixture {fixture}: {e}"));
     let entrypoint = name.to_str().expect("fixture name is utf-8").to_owned();
     (dir, entrypoint)
 }
 
-#[derive(Default)]
-struct SpawnOptions<'a> {
-    cwd_ini: Option<&'a CwdIni<'a>>,
-    listen: Option<SocketAddr>,
-}
-
-/// Starts one process on the requested port. The caller selects the wait method.
+/// One spawn on a fresh port; `render` writes the config for that port, and the caller decides how to wait.
 fn spawn_attempt(
     dir: &Path,
-    processes: usize,
-    entrypoint: &str,
-    http_extra: &str,
-    extra_toml: &str,
+    render: &dyn Fn(u16) -> String,
     rust_log: Option<&str>,
-    options: SpawnOptions<'_>,
+    cwd_ini: Option<&CwdIni<'_>>,
+    env: &[(String, String)],
 ) -> (Child, SocketAddr) {
-    assert_console_delivery();
-    let addr = options
-        .listen
-        .unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], free_port())));
-    std::fs::write(
-        dir.join("rapira.toml"),
-        render_config(addr, processes, entrypoint, http_extra, extra_toml),
-    )
-    .expect("write config");
+    super::console::prepare();
+    let port = free_port();
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    std::fs::write(dir.join("rapira.toml"), render(port)).expect("write config");
     let log = File::create(dir.join("server.log")).expect("create server.log");
     let mut cmd = Command::new(rapira_bin());
-    cmd.args(["serve", "--config"]).arg(dir.join("rapira.toml"));
+    cmd.arg("serve").arg(dir.join("rapira.toml"));
     cmd.env_remove("PHPRC");
     cmd.env("PHP_INI_SCAN_DIR", "");
-    if let Some(ini) = options.cwd_ini {
+    let mut extensions = String::new();
+    if let Some(runtime) = std::env::var_os("PHP_RUNTIME") {
+        let ext = PathBuf::from(runtime).join("ext");
+        for name in [
+            "opcache",
+            "curl",
+            "fileinfo",
+            "mbstring",
+            "exif",
+            "ffi",
+            "gettext",
+            "openssl",
+            "pdo_sqlite",
+            "sqlite3",
+            "intl",
+            "pdo_pgsql",
+            "pgsql",
+            "igbinary",
+            "redis",
+            "imap",
+        ] {
+            let dll = ext.join(format!("php_{name}.dll"));
+            if dll.is_file() {
+                let key = if name == "opcache" {
+                    "zend_extension"
+                } else {
+                    "extension"
+                };
+                extensions += &format!("{key} = \"{}\"\n", dll.display());
+            }
+        }
+    }
+    if !extensions.is_empty() {
+        let scan = dir.join("scan");
+        std::fs::create_dir_all(&scan).unwrap();
+        std::fs::write(scan.join("extensions.ini"), extensions).unwrap();
+        cmd.env("PHP_INI_SCAN_DIR", scan);
+    }
+    if let Some(ini) = cwd_ini {
         cmd.current_dir(dir);
         if ini.via_phprc {
             cmd.env("PHPRC", dir);
-        }
-        if let Some((relative, _)) = ini.phprc_file {
-            cmd.env("PHPRC", dir.join(relative));
         }
     }
     match rust_log {
         Some(v) => cmd.env("RUST_LOG", v),
         None => cmd.env_remove("RUST_LOG"),
     };
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
     let child = cmd
         .creation_flags(CREATE_NEW_PROCESS_GROUP)
         .stdout(Stdio::from(log.try_clone().expect("clone log fd")))
@@ -459,19 +294,40 @@ fn spawn_attempt(
     (child, addr)
 }
 
-/// Starts a process that must fail during startup. Waits for exit and returns the status and complete log. With `RUST_BACKTRACE` set, the backtrace after the error can exceed the log tail size.
+/// Boots expecting a startup failure: waits for the exit and returns the status with the log.
+/// The function returns the whole log, not the tail: with `RUST_BACKTRACE` set, the backtrace
+/// after the error line is longer than the tail window.
 pub fn spawn_boot_failure(fixture: &str, http_extra: &str) -> (ExitStatus, String) {
     let (dir, entrypoint) = stage_fixture(fixture);
-    let (child, addr) = spawn_attempt(
-        &dir,
-        1,
-        &entrypoint,
-        http_extra,
-        "",
-        Some("info"),
-        SpawnOptions::default(),
-    );
-    let mut srv = Server { child, addr, dir };
+    boot_failure(dir, &entrypoint, http_extra)
+}
+
+/// [`spawn_boot_failure`] with the entrypoint written into the config verbatim, so a path no
+/// fixture can stage reaches the boot check.
+pub fn spawn_boot_failure_with_entrypoint(entrypoint: &str) -> (ExitStatus, String) {
+    boot_failure(scratch_dir(), entrypoint, "")
+}
+
+fn boot_failure(dir: PathBuf, entrypoint: &str, http_extra: &str) -> (ExitStatus, String) {
+    let render = |port| render_config(&tcp(port), 1, entrypoint, http_extra, "");
+    exit_of(dir, &render, Some("info"), None, &[])
+}
+
+/// One spawn that must exit: returns the status with the whole log.
+fn exit_of(
+    dir: PathBuf,
+    render: &dyn Fn(u16) -> String,
+    rust_log: Option<&str>,
+    cwd_ini: Option<&CwdIni<'_>>,
+    env: &[(String, String)],
+) -> (ExitStatus, String) {
+    let (child, addr) = spawn_attempt(&dir, render, rust_log, cwd_ini, env);
+    let mut srv = Server {
+        child,
+        addr,
+        dir,
+        grpc: None,
+    };
     let Some(status) = srv.wait_exit(BOOT) else {
         panic!("rapira did not exit");
     };
@@ -479,51 +335,415 @@ pub fn spawn_boot_failure(fixture: &str, http_extra: &str) -> (ExitStatus, Strin
     (status, log)
 }
 
-/// Uses the specified address and does not connect to check readiness.
-pub fn spawn_on_addr_unchecked(
-    fixture: &str,
-    processes: usize,
-    extra_toml: &str,
-    addr: SocketAddr,
-) -> Server {
-    let (dir, entrypoint) = stage_fixture(fixture);
-    let (child, addr) = spawn_attempt(
-        &dir,
-        processes,
-        &entrypoint,
-        "",
-        extra_toml,
-        Some("info"),
-        SpawnOptions {
-            listen: Some(addr),
-            ..Default::default()
-        },
-    );
-    Server { child, addr, dir }
-}
-
+/// Renders `[http.pool]` before `[http]`.
+/// TOML accepts an explicit super-table header after its sub-table.
+/// `http_extra` renders last, so a header it opens ends the file.
 fn render_config(
-    addr: SocketAddr,
+    listen: &str,
     processes: usize,
     fixture: &str,
     http_extra: &str,
     extra: &str,
 ) -> String {
     format!(
-        "[http]\nlisten = \"{addr}\"\n{http_extra}\n\
-         [pool]\nprocesses = {processes}\nentrypoint = \"{fixture}\"\n\n\
-         {extra}"
+        "[http.pool]\nprocesses = {processes}\nentrypoint = \"{fixture}\"\n{extra}\n[http]\nlisten = \"{listen}\"\n{http_extra}"
     )
 }
 
-/// The child must still be running before a successful connection indicates readiness.
-fn wait_for_port(addr: &SocketAddr, child: &mut Child, timeout: Duration) -> bool {
+pub use tests::grpc::ECHO_SERVICE;
+
+/// Copies `grpc/echo-worker.php` and its descriptor set into `dir` as `grpc-worker.php` and `echo.binpb`.
+fn stage_grpc(dir: &Path) {
+    std::fs::copy(
+        fixture_path("grpc/echo-worker.php"),
+        dir.join("grpc-worker.php"),
+    )
+    .expect("copy the grpc fixture");
+    std::fs::copy(tests::echo_descriptor_set(), dir.join("echo.binpb")).expect("copy echo.binpb");
+}
+
+/// A `[grpc]` pool over `entrypoint`. `listen`, `descriptor_set` and `extra` (keys inside `[grpc]`) go into the file verbatim; `services` becomes a TOML string array, and None leaves the key out.
+fn render_grpc(
+    listen: &str,
+    processes: usize,
+    entrypoint: &str,
+    descriptor_set: &str,
+    services: Option<&[String]>,
+    extra: &str,
+) -> String {
+    let services = services.map_or(String::new(), |names| {
+        let quoted: Vec<String> = names.iter().map(|n| format!("\"{n}\"")).collect();
+        format!("services = [{}]\n", quoted.join(", "))
+    });
+    format!(
+        "[grpc]\nlisten = \"{listen}\"\ndescriptor_set = \"{descriptor_set}\"\n{services}{extra}\n\
+         [grpc.pool]\nprocesses = {processes}\nentrypoint = \"{entrypoint}\"\n"
+    )
+}
+
+/// A server with a gRPC echo pool. `addr` is the gRPC listener.
+pub fn spawn_grpc(processes: usize) -> Server {
+    let dir = scratch_dir();
+    stage_grpc(&dir);
+    let render = |port| {
+        render_grpc(
+            &tcp(port),
+            processes,
+            "grpc-worker.php",
+            "echo.binpb",
+            None,
+            "",
+        )
+    };
+    let mut srv = spawn_ready(dir, &render, None, Some("info"), None, &[]);
+    srv.grpc = Some(ListenAddr::Tcp(srv.addr));
+    srv
+}
+
+/// Starts HTTP and gRPC pools with one interpreter each. Returns the server and the HTTP address.
+pub fn spawn_grpc_with_http(http_fixture: &str) -> (Server, SocketAddr) {
+    let (dir, entrypoint) = stage_fixture(http_fixture);
+    stage_grpc(&dir);
+    let http_port = std::cell::Cell::new(0);
+    let render = |port| {
+        http_port.set(free_port());
+        render_config(&tcp(http_port.get()), 1, &entrypoint, "", "")
+            + &render_grpc(&tcp(port), 1, "grpc-worker.php", "echo.binpb", None, "")
+    };
+    let mut srv = spawn_ready(dir, &render, None, Some("info"), None, &[]);
+    srv.grpc = Some(ListenAddr::Tcp(srv.addr));
+    (srv, SocketAddr::from(([127, 0, 0, 1], http_port.get())))
+}
+
+/// Boots a `[grpc]`-only config that must fail: returns the status with the whole log.
+pub fn spawn_grpc_boot_failure(descriptor_set: &str, service: &str) -> (ExitStatus, String) {
+    let dir = scratch_dir();
+    stage_grpc(&dir);
+    let services = [service.to_owned()];
+    let render = |port| {
+        render_grpc(
+            &tcp(port),
+            1,
+            "grpc-worker.php",
+            descriptor_set,
+            Some(&services),
+            "",
+        )
+    };
+    exit_of(dir, &render, Some("info"), None, &[])
+}
+
+/// A server with one interpreter per pool by default. Each setter adds to the config.
+/// The directory of each pool's fixture is copied into `http/` or `grpc/` in the scratch dir, so a fixture can include its siblings.
+/// PHPRC names a `php.ini` in the scratch dir with the contents of `crates/tests/fixtures/ini/shared/php.ini`, unless [`Spawn::php_ini`] replaces them.
+pub struct Spawn {
+    http: Option<(Mode, PathBuf)>,
+    /// The listener of the `[http]` pool; None listens on a TCP port that the harness picks.
+    http_listen: Option<ListenAddr>,
+    grpc: Option<PathBuf>,
+    /// The listener of the `[grpc]` pool; None listens on a TCP port that the harness picks.
+    grpc_listen: Option<ListenAddr>,
+    /// The `[grpc] services` list; None leaves the key out.
+    services: Option<Vec<String>>,
+    /// The `[grpc] descriptor_set`; None stages `echo.binpb`.
+    descriptor_set: Option<PathBuf>,
+    http_extra: String,
+    grpc_extra: String,
+    http_pool: String,
+    grpc_pool: String,
+    http_processes: usize,
+    grpc_processes: usize,
+    toml: String,
+    php_ini: String,
+    env: Vec<(String, String)>,
+    rust_log: String,
+}
+
+impl Spawn {
+    /// An `[http]` pool in `mode` over `fixture`. `Server::addr` is its listener.
+    pub fn http(mode: Mode, fixture: impl Into<PathBuf>) -> Spawn {
+        Spawn {
+            http: Some((mode, fixture.into())),
+            ..Spawn::empty()
+        }
+    }
+
+    /// A `[grpc]` pool over `fixture` that serves `rapira.test.v1.EchoService` out of `echo.binpb`. `Server::grpc` is its listener, and `Server::addr` too when it listens on TCP.
+    pub fn grpc(fixture: impl Into<PathBuf>) -> Spawn {
+        Spawn {
+            grpc: Some(fixture.into()),
+            ..Spawn::empty()
+        }
+    }
+
+    fn empty() -> Spawn {
+        let ini = tests::fixture("ini/shared/php.ini");
+        Spawn {
+            http: None,
+            http_listen: None,
+            grpc: None,
+            grpc_listen: None,
+            services: Some(vec![ECHO_SERVICE.to_owned()]),
+            descriptor_set: None,
+            http_extra: String::new(),
+            grpc_extra: String::new(),
+            http_pool: String::new(),
+            grpc_pool: String::new(),
+            http_processes: 1,
+            grpc_processes: 1,
+            toml: String::new(),
+            php_ini: std::fs::read_to_string(&ini)
+                .unwrap_or_else(|e| panic!("read {}: {e}", ini.display())),
+            env: Vec::new(),
+            rust_log: "info".to_owned(),
+        }
+    }
+
+    /// Adds the `[grpc]` pool of [`Spawn::grpc`] next to the `[http]` pool. `Server::grpc` is its listener.
+    pub fn with_grpc(mut self, fixture: impl Into<PathBuf>) -> Spawn {
+        self.grpc = Some(fixture.into());
+        self
+    }
+
+    /// The `[http]` pool listens on `listen`. A TCP address here is not a readiness target: [`Spawn::spawn`] then waits for another pool.
+    pub fn http_listen(mut self, listen: ListenAddr) -> Spawn {
+        self.http_listen = Some(listen);
+        self
+    }
+
+    /// The `[grpc]` pool listens on `listen`. A TCP address here is not a readiness target: [`Spawn::spawn`] then waits for another pool.
+    pub fn grpc_listen(mut self, listen: ListenAddr) -> Spawn {
+        self.grpc_listen = Some(listen);
+        self
+    }
+
+    /// The `[grpc] services` list in place of `EchoService`. None leaves the key out, so the pool serves the services of the files that no other file imports.
+    pub fn services(mut self, services: Option<&[&str]>) -> Spawn {
+        self.services = services.map(|names| names.iter().map(|&n| n.to_owned()).collect());
+        self
+    }
+
+    /// The `[grpc] descriptor_set` in place of `echo.binpb`.
+    pub fn descriptor_set(mut self, path: &Path) -> Spawn {
+        self.descriptor_set = Some(path.to_owned());
+        self
+    }
+
+    /// Keys inside `[http]`, for example `server_port = 8080`. The text may open `[http.*]` tables after its keys.
+    pub fn http_extra(mut self, keys: &str) -> Spawn {
+        self.http_extra += keys;
+        self.http_extra.push('\n');
+        self
+    }
+
+    /// Keys inside `[grpc]`, for example `reflection = true`.
+    pub fn grpc_extra(mut self, keys: &str) -> Spawn {
+        self.grpc_extra += keys;
+        self.grpc_extra.push('\n');
+        self
+    }
+
+    pub fn processes(mut self, http: usize, grpc: usize) -> Spawn {
+        self.http_processes = http;
+        self.grpc_processes = grpc;
+        self
+    }
+
+    /// Keys inside `[http.pool]`, for example `max_requests = 10`.
+    pub fn http_pool(mut self, keys: &str) -> Spawn {
+        self.http_pool += keys;
+        self.http_pool.push('\n');
+        self
+    }
+
+    /// Keys inside `[grpc.pool]`, for example `max_requests = 10`.
+    pub fn grpc_pool(mut self, keys: &str) -> Spawn {
+        self.grpc_pool += keys;
+        self.grpc_pool.push('\n');
+        self
+    }
+
+    /// Top-level tables at the end of the config, for example `[supervisor]`.
+    pub fn toml(mut self, tables: &str) -> Spawn {
+        self.toml += tables;
+        self.toml.push('\n');
+        self
+    }
+
+    /// `[log] format = "json"`, for the readers in `tests::server_log`. RUST_LOG still selects the records.
+    pub fn json_log(self) -> Spawn {
+        self.toml("[log]\nformat = \"json\"")
+    }
+
+    /// The contents of the `php.ini` that PHPRC names.
+    pub fn php_ini(mut self, contents: &str) -> Spawn {
+        contents.clone_into(&mut self.php_ini);
+        self
+    }
+
+    /// An environment variable of the server.
+    pub fn env(mut self, key: &str, value: &str) -> Spawn {
+        self.env.push((key.to_owned(), value.to_owned()));
+        self
+    }
+
+    /// The server's RUST_LOG filter. Defaults to `info`.
+    pub fn rust_log(mut self, filter: &str) -> Spawn {
+        filter.clone_into(&mut self.rust_log);
+        self
+    }
+
+    /// Starts the server and waits for its first listener.
+    pub fn spawn(self) -> Server {
+        let grpc_port = Cell::new(0);
+        let (dir, render) = self.stage(&grpc_port);
+        let ini = self.ini();
+        let mut srv = spawn_ready(
+            dir,
+            &render,
+            self.explicit_listener(),
+            Some(&self.rust_log),
+            Some(&ini),
+            &self.env,
+        );
+        if self.grpc.is_some() {
+            srv.grpc = Some(match &self.grpc_listen {
+                Some(listen) => listen.clone(),
+                None => ListenAddr::Tcp(SocketAddr::from(([127, 0, 0, 1], grpc_port.get()))),
+            });
+        }
+        srv
+    }
+
+    /// The first explicit listener, when the harness does not select a port.
+    fn explicit_listener(&self) -> Option<&ListenAddr> {
+        let picked = (self.http.is_some() && self.http_listen.is_none())
+            || (self.grpc.is_some() && self.grpc_listen.is_none());
+        if picked {
+            return None;
+        }
+        [&self.http_listen, &self.grpc_listen]
+            .into_iter()
+            .find_map(Option::as_ref)
+    }
+
+    /// Starts a server that must fail at boot. Returns its exit status and full log.
+    pub fn boot_failure(self) -> (ExitStatus, String) {
+        let grpc_port = Cell::new(0);
+        let (dir, render) = self.stage(&grpc_port);
+        exit_of(
+            dir,
+            &render,
+            Some(&self.rust_log),
+            Some(&self.ini()),
+            &self.env,
+        )
+    }
+
+    fn ini(&self) -> CwdIni<'_> {
+        CwdIni {
+            contents: &self.php_ini,
+            via_phprc: true,
+        }
+    }
+
+    /// Fills a scratch dir and returns it with the config for a port; `grpc_port` gets the port of the `[grpc]` pool.
+    fn stage<'a>(&'a self, grpc_port: &'a Cell<u16>) -> (PathBuf, impl Fn(u16) -> String + 'a) {
+        let dir = scratch_dir();
+        std::fs::write(dir.join("php.ini"), &self.php_ini).expect("write php.ini");
+        let http = self
+            .http
+            .as_ref()
+            .map(|(mode, fixture)| (*mode, stage_dir(&dir, "http", fixture)));
+        let grpc = self.grpc.as_ref().map(|fixture| {
+            let descriptor_set = match &self.descriptor_set {
+                Some(path) => path.display().to_string().replace('\\', "/"),
+                None => {
+                    std::fs::copy(tests::echo_descriptor_set(), dir.join("echo.binpb"))
+                        .expect("copy echo.binpb");
+                    "echo.binpb".to_owned()
+                }
+            };
+            (stage_dir(&dir, "grpc", fixture), descriptor_set)
+        });
+        let render = move |port| {
+            // The spawn waits for `port`, so it goes to the first pool without a listen address.
+            let mut port = Some(port);
+            let mut config = String::new();
+            if let Some((mode, entrypoint)) = &http {
+                let listen = match &self.http_listen {
+                    Some(listen) => listen.to_string(),
+                    None => tcp(port.take().unwrap_or_else(free_port)),
+                };
+                let pool = format!("mode = \"{mode}\"\n{}", self.http_pool);
+                config += &render_config(
+                    &listen,
+                    self.http_processes,
+                    entrypoint,
+                    &self.http_extra,
+                    &pool,
+                );
+                config.push('\n');
+            }
+            if let Some((entrypoint, descriptor_set)) = &grpc {
+                let listen = match &self.grpc_listen {
+                    Some(listen) => listen.to_string(),
+                    None => {
+                        grpc_port.set(port.take().unwrap_or_else(free_port));
+                        tcp(grpc_port.get())
+                    }
+                };
+                config += &render_grpc(
+                    &listen,
+                    self.grpc_processes,
+                    entrypoint,
+                    descriptor_set,
+                    self.services.as_deref(),
+                    &self.grpc_extra,
+                );
+                // `render_grpc` ends in `[grpc.pool]`.
+                config += &self.grpc_pool;
+                config.push('\n');
+            }
+            config + &self.toml
+        };
+        (dir, render)
+    }
+}
+
+/// Copies the files of the directory of `fixture` into `dir/sub`; returns the entrypoint relative to `dir`.
+fn stage_dir(dir: &Path, sub: &str, fixture: &Path) -> String {
+    let name = fixture
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_else(|| panic!("fixture {} has no utf-8 file name", fixture.display()));
+    let from = fixture.parent().expect("fixture has a directory");
+    let to = dir.join(sub);
+    std::fs::create_dir_all(&to).expect("create the fixture dir");
+    for entry in std::fs::read_dir(from).unwrap_or_else(|e| panic!("read {}: {e}", from.display()))
+    {
+        let path = entry.expect("fixture dir entry").path();
+        if path.is_file() {
+            std::fs::copy(&path, to.join(path.file_name().expect("file name")))
+                .unwrap_or_else(|e| panic!("copy {}: {e}", path.display()));
+        }
+    }
+    format!("{sub}/{name}")
+}
+
+/// Waits for the prepared listener to accept a connection.
+fn wait_for_listener(listen: &ListenAddr, child: &mut Child, timeout: Duration) -> bool {
     let end = Instant::now() + timeout;
     while Instant::now() < end {
         if child.try_wait().ok().flatten().is_some() {
             return false;
         }
-        if TcpStream::connect_timeout(addr, Duration::from_millis(200)).is_ok() {
+        let accepted = match listen {
+            ListenAddr::Tcp(addr) => {
+                TcpStream::connect_timeout(addr, Duration::from_millis(200)).is_ok()
+            }
+        };
+        if accepted {
             std::thread::sleep(Duration::from_millis(100));
             return child.try_wait().ok().flatten().is_none();
         }
@@ -535,22 +755,23 @@ fn wait_for_port(addr: &SocketAddr, child: &mut Child, timeout: Duration) -> boo
     false
 }
 
-/// Sends an HTTP/1.1 GET with `Connection: close`. The connection close delimits the body, so the function does not parse chunked framing or keep-alive state.
+/// HTTP/1.1 GET with `Connection: close`: the body is close-delimited, so no chunked or keep-alive parsing is needed.
 pub fn http_get(addr: SocketAddr, path: &str, timeout: Duration) -> io::Result<(u16, Vec<u8>)> {
     http_get_with_headers(addr, path, &[], timeout)
 }
 
-/// Calls [`http_get`] with additional request fields in the specified order so repeated names remain separate in the HTTP message.
+/// [`http_get`] plus extra request fields, written in the order given so a repeated name stays repeated on the wire.
 pub fn http_get_with_headers(
     addr: SocketAddr,
     path: &str,
     fields: &[(&str, &str)],
     timeout: Duration,
 ) -> io::Result<(u16, Vec<u8>)> {
-    parse_status_and_body(&http_get_raw(addr, path, fields, timeout)?)
+    let raw = http_get_raw(addr, path, fields, timeout)?;
+    parse_status_and_body(&raw).map(|(status, body)| (status, body.to_vec()))
 }
 
-/// Returns the complete response, including the head, for assertions about fields that the client received.
+/// The whole response, head included: for assertions about which fields reached the client.
 pub fn http_get_raw(
     addr: SocketAddr,
     path: &str,
@@ -578,7 +799,7 @@ pub fn http_get_raw(
     Ok(raw)
 }
 
-/// Calls [`http_raw`] and returns unparsed response bytes for assertions about the header block.
+/// As [`http_raw`], returning the unparsed response bytes for asserting on the header block itself.
 pub fn http_raw_bytes(addr: SocketAddr, request: &[u8], timeout: Duration) -> io::Result<Vec<u8>> {
     let mut s = TcpStream::connect_timeout(&addr, timeout)?;
     s.set_read_timeout(Some(timeout))?;
@@ -590,19 +811,13 @@ pub fn http_raw_bytes(addr: SocketAddr, request: &[u8], timeout: Duration) -> io
     Ok(raw)
 }
 
-/// Sends a request supplied by the caller without an implicit Host or Connection field.
+/// A caller-controlled request: no implicit Host or Connection line.
 pub fn http_raw(addr: SocketAddr, request: &[u8], timeout: Duration) -> io::Result<(u16, Vec<u8>)> {
-    let mut s = TcpStream::connect_timeout(&addr, timeout)?;
-    s.set_read_timeout(Some(timeout))?;
-    s.set_write_timeout(Some(timeout))?;
-    s.write_all(request)?;
-    s.flush()?;
-    let mut raw = Vec::new();
-    s.read_to_end(&mut raw)?;
-    parse_status_and_body(&raw)
+    let raw = http_raw_bytes(addr, request, timeout)?;
+    parse_status_and_body(&raw).map(|(status, body)| (status, body.to_vec()))
 }
 
-/// Sends a request body like [`http_get`]. `content_type` uses bytes because a multipart boundary is opaque data and a field value can contain obs-text.
+/// Sibling of [`http_get`] with a body; `content_type` is bytes because a multipart boundary is opaque octets and obs-text is legal in a field value.
 pub fn http_post(
     addr: SocketAddr,
     path: &str,
@@ -610,9 +825,6 @@ pub fn http_post(
     body: &[u8],
     timeout: Duration,
 ) -> io::Result<(u16, Vec<u8>)> {
-    let mut s = TcpStream::connect_timeout(&addr, timeout)?;
-    s.set_read_timeout(Some(timeout))?;
-    s.set_write_timeout(Some(timeout))?;
     let mut req = Vec::new();
     write!(
         req,
@@ -622,14 +834,11 @@ pub fn http_post(
     req.extend_from_slice(content_type);
     write!(req, "\r\nContent-Length: {}\r\n\r\n", body.len())?;
     req.extend_from_slice(body);
-    s.write_all(&req)?;
-    s.flush()?;
-    let mut raw = Vec::new();
-    s.read_to_end(&mut raw)?;
-    parse_status_and_body(&raw)
+    http_raw(addr, &req, timeout)
 }
 
-fn parse_status_and_body(raw: &[u8]) -> io::Result<(u16, Vec<u8>)> {
+/// The status code and the body of a close-delimited response.
+pub fn parse_status_and_body(raw: &[u8]) -> io::Result<(u16, &[u8])> {
     if raw.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,
@@ -651,35 +860,35 @@ fn parse_status_and_body(raw: &[u8]) -> io::Result<(u16, Vec<u8>)> {
         .nth(1)
         .and_then(|c| c.parse::<u16>().ok())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no status code"))?;
-    Ok((code, raw[head_end + 4..].to_vec()))
+    Ok((code, &raw[head_end + 4..]))
 }
 
-fn ready_threads(log: &str) -> BTreeSet<usize> {
-    log.lines()
+/// Each (pool, thread index) appears once even after an interpreter recycle.
+fn ready_workers(srv: &Server) -> Vec<u32> {
+    let log = std::fs::read_to_string(srv.log_file()).unwrap_or_default();
+    let threads: std::collections::BTreeSet<_> = log
+        .lines()
         .filter_map(|line| {
             let (_, rest) = line.split_once("worker thread ")?;
-            let (index, event) = rest.split_once(' ')?;
-            event
-                .starts_with("ready")
-                .then(|| index.parse().ok())
-                .flatten()
+            let (id, tail) = rest.split_once(" ready")?;
+            Some((id.to_owned(), tail.to_owned()))
         })
-        .collect()
+        .collect();
+    vec![srv.pid(); threads.len()]
 }
 
-/// Counts distinct interpreter thread indices. Repeated generation-ready lines count once.
+/// Poll `worker_pids` until `pred` holds; panic with diagnostics on deadline.
 pub fn wait_workers(
     srv: &Server,
     deadline: Duration,
     what: &str,
-    pred: impl Fn(&BTreeSet<usize>) -> bool,
-) -> BTreeSet<usize> {
+    pred: impl Fn(&[u32]) -> bool,
+) -> Vec<u32> {
     let end = Instant::now() + deadline;
     loop {
-        let log = std::fs::read_to_string(srv.dir.join("server.log")).unwrap_or_default();
-        let ready = ready_threads(&log);
-        if pred(&ready) {
-            return ready;
+        let pids = ready_workers(srv);
+        if pred(&pids) {
+            return pids;
         }
         if Instant::now() >= end {
             panic!(
@@ -701,7 +910,7 @@ pub fn assert_exit_code(status: Option<ExitStatus>, expected: i32, srv: &Server)
             diagnostics(srv)
         ),
         None => panic!(
-            "expected exit {expected} [{}], but the server has no exit code or is still running\n{}",
+            "expected exit {expected} [{}], but the master was killed by a signal or is still running\n{}",
             code_name(expected),
             diagnostics(srv)
         ),
@@ -710,23 +919,16 @@ pub fn assert_exit_code(status: Option<ExitStatus>, expected: i32, srv: &Server)
 
 fn code_name(code: i32) -> String {
     match code {
-        0 => "DRAINED/OK".into(),
-        1 => "ERROR".into(),
-        70 => "BOOT_FAILURE".into(),
-        130 => "FORCED".into(),
+        MASTER_EXIT_OK => "DRAINED/OK".into(),
+        MASTER_EXIT_FAILBOOT => "MASTER_FAILBOOT".into(),
+        MASTER_EXIT_FORCED => "MASTER_FORCED".into(),
         other => format!("code {other}"),
     }
 }
 
-/// Server process ID, observed interpreter indices, and the end of the log for failures.
+/// Worker pids + `ps` subtree + server-log tail, for failure messages.
 pub fn diagnostics(srv: &Server) -> String {
-    let log = std::fs::read_to_string(srv.dir.join("server.log")).unwrap_or_default();
-    format!(
-        "server pid {}, interpreter threads {:?}\n{}",
-        srv.pid(),
-        ready_threads(&log),
-        log_tail(&srv.dir)
-    )
+    format!("server pid {}\n{}", srv.pid(), log_tail(&srv.dir))
 }
 
 fn log_tail(dir: &Path) -> String {
@@ -754,12 +956,46 @@ pub fn fixture_path(name: &str) -> PathBuf {
         .join(name)
 }
 
-fn free_port() -> u16 {
+/// `threads` clients each issue `each` sequential `GET {path}`; returns `pick(body)` for every response.
+pub fn fan_out<T: Send + 'static>(
+    addr: SocketAddr,
+    path: &'static str,
+    threads: usize,
+    each: usize,
+    pick: fn(&str) -> T,
+) -> Vec<T> {
+    let handles: Vec<_> = (0..threads)
+        .map(|_| {
+            std::thread::spawn(move || {
+                let mut out = Vec::with_capacity(each);
+                for _ in 0..each {
+                    let (code, body) =
+                        http_get(addr, path, Duration::from_secs(10)).expect("fan_out GET");
+                    let body = String::from_utf8_lossy(&body);
+                    assert_eq!(code, 200, "got {body:?}");
+                    out.push(pick(&body));
+                }
+                out
+            })
+        })
+        .collect();
+    let mut all = Vec::new();
+    for h in handles {
+        match h.join() {
+            Ok(v) => all.extend(v),
+            Err(e) => std::panic::resume_unwind(e),
+        }
+    }
+    all
+}
+
+/// A port that no listener holds when this returns.
+pub fn free_port() -> u16 {
     let l = TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral port");
     l.local_addr().expect("local_addr").port()
 }
 
-/// An open connection for incremental reads. The read-to-EOF helpers block until the stream ends.
+/// An open connection for incremental reads: the read-to-EOF helpers would block until the stream ends.
 pub struct Conn {
     s: TcpStream,
     buf: Vec<u8>,
@@ -783,7 +1019,7 @@ impl Conn {
         self.s.flush()
     }
 
-    /// Disconnects the client during a response.
+    /// The client walking away mid-response.
     pub fn abandon(self) {
         let _ = self.s.shutdown(std::net::Shutdown::Both);
     }
@@ -792,7 +1028,7 @@ impl Conn {
         &self.buf[self.consumed..]
     }
 
-    /// Reads bytes until `pat` occurs after the consumed position or until `deadline`.
+    /// Pull bytes until `pat` shows up past the consumed mark (or `deadline`).
     fn fill_until(&mut self, pat: &[u8], deadline: Duration) -> io::Result<usize> {
         let end = std::time::Instant::now() + deadline;
         loop {
@@ -825,7 +1061,7 @@ impl Conn {
         }
     }
 
-    /// Reads one head block. Interim heads use separate blocks, so another call reads the next block.
+    /// Read one head block; interim heads are separate blocks, so call again for the next one.
     pub fn read_head(&mut self, deadline: Duration) -> io::Result<(u16, Vec<(String, String)>)> {
         let head_end = self.fill_until(b"\r\n\r\n", deadline)?;
         let head = &self.buf[self.consumed..head_end];
@@ -849,7 +1085,7 @@ impl Conn {
         Ok((status, fields))
     }
 
-    /// Waits until the open response contains `pat`, then marks all bytes through the pattern as consumed.
+    /// Block until `pat` is on the wire while the response is still open; consumes through it.
     pub fn read_body_until(&mut self, pat: &[u8], deadline: Duration) -> io::Result<()> {
         let pos = self.fill_until(pat, deadline)?;
         self.consumed = pos + pat.len();
@@ -883,7 +1119,7 @@ impl Conn {
         Ok(out)
     }
 
-    /// Reads to EOF and returns all unread bytes.
+    /// Drain to EOF and return everything unread.
     pub fn read_remaining(&mut self, deadline: Duration) -> io::Result<Vec<u8>> {
         let end = std::time::Instant::now() + deadline;
         loop {
@@ -906,7 +1142,7 @@ impl Conn {
     }
 }
 
-/// Searches server.log for `needle` until the timeout.
+/// Poll `server.log` for `needle`, bounded.
 pub fn wait_log_contains(srv: &Server, needle: &str, deadline: Duration) -> bool {
     let path = srv.dir.join("server.log");
     let end = std::time::Instant::now() + deadline;
@@ -924,33 +1160,60 @@ pub fn wait_log_contains(srv: &Server, needle: &str, deadline: Duration) -> bool
     }
 }
 
-#[test]
-fn readiness_counts_each_thread_once_across_interpreter_generations() {
-    let log = "INFO worker thread 0 ready\nINFO worker thread 1 ready\n\
-               INFO worker thread 0 recycling\nINFO worker thread 0 ready\n\
-               INFO worker thread 10 ready\nINFO worker thread 3 recycling\n";
-    assert_eq!(ready_threads(log), [0, 1, 10].into_iter().collect());
+/// Drain the server and read the final operator-visible scoreboard line.
+pub fn slot_line(srv: &Server, fragment: &str) -> String {
+    send_ctrl_break(srv.pid());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        std::thread::sleep(Duration::from_millis(20));
+        let log = std::fs::read_to_string(srv.log_file()).unwrap_or_default();
+        if let Some(line) = log
+            .lines()
+            .find(|l| l.contains("slot 0 pid") && l.contains(fragment))
+        {
+            return line.to_owned();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no slot 0 line with {fragment:?} within 10s\n{log}"
+        );
+    }
 }
 
-#[test]
-fn an_exited_child_is_checked_before_connecting_to_the_port() {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-    listener.set_nonblocking(true).unwrap();
-    let mut child = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "harness::console_probe_child"])
-        .env_remove(CONSOLE_PROBE)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    assert!(child.wait().unwrap().success());
-    assert!(!wait_for_port(
-        &listener.local_addr().unwrap(),
-        &mut child,
-        Duration::from_secs(1)
-    ));
-    assert_eq!(
-        listener.accept().unwrap_err().kind(),
-        io::ErrorKind::WouldBlock
-    );
+/// The listener of the `[grpc]` pool of `srv`.
+pub fn listen(srv: &Server) -> ListenAddr {
+    srv.grpc.clone().expect("the config has a [grpc] pool")
+}
+
+/// The context of each `call` record that `grpc/wire-worker.php` logged, in log order. The fixture logs before it answers, so a call that has its response is in the log.
+pub fn calls(srv: &Server) -> Vec<Value> {
+    server_log::app_contexts(&srv.log_file(), "call")
+        .iter()
+        .map(|c| serde_json::from_str(c).expect("a call record holds JSON"))
+        .collect()
+}
+
+/// The remote TCP address that PHP reports for a client at `peer`.
+pub fn logged_remote(peer: &Addr) -> String {
+    match peer {
+        Addr::Inet(addr) => addr.to_string(),
+        Addr::Unix(_) => "unix:NULL".to_owned(),
+    }
+}
+
+/// Waits off the test runtime for the master to exit 0, so the clients on the runtime keep running through the drain.
+pub async fn exited(mut srv: Server) -> Server {
+    tokio::task::spawn_blocking(move || {
+        let status = srv.wait_exit(STOP_BUDGET);
+        assert_exit_code(status, MASTER_EXIT_OK, &srv);
+        srv
+    })
+    .await
+    .expect("the wait task")
+}
+
+/// Sends Ctrl+Break, then waits for a clean exit with [`exited`].
+pub async fn stop(srv: Server) -> Server {
+    send_ctrl_break(srv.pid());
+    exited(srv).await
 }

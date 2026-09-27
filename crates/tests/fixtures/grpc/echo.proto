@@ -1,0 +1,30 @@
+// Run dev.ps1 -Task grpc_fixtures to generate the descriptor sets.
+syntax = "proto3";
+
+package rapira.test.v1;
+
+import "dep.proto";
+import "google/protobuf/timestamp.proto";
+
+message EchoRequest {
+  string text = 1;
+  google.protobuf.Timestamp at = 2;
+}
+
+message EchoResponse {
+  string text = 1;
+  google.protobuf.Timestamp at = 2;
+  repeated int32 ids = 3;
+}
+
+service EchoService {
+  rpc Echo(EchoRequest) returns (EchoResponse);
+  rpc Get(EchoRequest) returns (EchoResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc Watch(EchoRequest) returns (stream EchoResponse);
+}
+
+service OtherService {
+  rpc Ping(EchoRequest) returns (EchoResponse);
+}

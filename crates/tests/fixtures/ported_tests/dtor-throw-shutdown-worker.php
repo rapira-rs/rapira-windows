@@ -9,7 +9,7 @@ $handler = static function () use (&$served): void {
 				throw new \RuntimeException('dtor boom');
 			}
 		};
-		// The closure retains $d until PHP releases the shutdown table after the job. The destructor then throws outside the handler frame.
+		// the closure keeps $d alive until the shutdown table is freed after the job, so the destructor throws outside any handler frame
 		register_shutdown_function(static function () use ($d): void {});
 	}
 	echo 'served=', $served;

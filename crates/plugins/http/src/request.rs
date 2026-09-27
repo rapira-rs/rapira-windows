@@ -1,12 +1,15 @@
-use extension_api::{Peer, Request};
+use rapira_sapi::Request;
+use rapira_sapi::types::Body;
 
 use crate::Config;
+use crate::middleware::Peer;
 
+/// Moves the header map out of `parts`. The body stays raw: the handler parses multipart.
 pub(crate) fn build(
-    parts: &http::request::Parts,
+    parts: &mut http::request::Parts,
     authority: Option<Vec<u8>>,
     body: Vec<u8>,
-    peer: &Peer,
+    peer: Peer,
     cfg: &Config,
 ) -> Request {
     let protocol = match parts.version {
@@ -14,39 +17,64 @@ pub(crate) fn build(
         http::Version::HTTP_10 => "HTTP/1.0".to_owned(),
         v => format!("{v:?}"),
     };
+    let headers = std::mem::take(&mut parts.headers);
     Request {
         method: parts.method.as_str().to_owned(),
-        // Produces an origin-form value for every target form. Display restores the leading slash that an authority-only absolute form omits, such as changing "http://h?q" to "/?q". It does not change "*".
+        // Origin-form view for every target form. Display restores the leading slash
+        // that an authority-only absolute-form omits ("http://h?q" -> "/?q"). It keeps
+        // "*" unchanged.
         // https://docs.rs/http/1/http/uri/struct.PathAndQuery.html
         uri: parts
             .uri
             .path_and_query()
             .map(|pq| pq.to_string())
             .unwrap_or_else(|| "/".to_owned()),
-        // Reconstructs the request target because hyper provides only the parsed URI.
-        target: Some(parts.uri.to_string().into_bytes()),
+        // Reconstructed request-target for the absolute and authority forms. hyper hands out only the parsed Uri, not the raw bytes.
+        // For the origin and asterisk forms the target equals `uri`, which PHP uses when this is None.
+        target: parts
+            .uri
+            .authority()
+            .map(|_| parts.uri.to_string().into_bytes()),
         authority,
         https: peer.https,
         protocol,
-        remote: peer.remote.clone(),
-        server: peer.server.clone(),
+        remote: peer.remote,
+        server: peer.server,
         server_name: cfg.server_name.clone(),
         server_port: cfg.server_port,
         tls: None,
-        received_at: Some(peer.received_at),
-        headers: parts
-            .headers
-            .iter()
-            .map(|(n, v)| (n.as_str().to_owned(), v.as_bytes().to_vec()))
-            .collect(),
-        body,
+        received_at: peer.received_at,
+        content_type: headers
+            .get(http::header::CONTENT_TYPE)
+            .map(|v| v.as_bytes().to_vec()),
+        content_length: body.len() as i64,
+        body: Body::Raw(std::io::Cursor::new(body)),
+        headers,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use extension_api::Addr;
+    use rapira_sapi::Addr;
+
+    /// build() reads only the server name and port.
+    fn config() -> Config {
+        Config {
+            listen: rapira_net::ListenAddr::Tcp(([127, 0, 0, 1], 8000).into()),
+            server_name: "localhost".to_owned(),
+            server_port: 8000,
+            max_body_size: 0,
+            unsafe_field_names: crate::UnsafeFieldNames::Drop,
+            superglobals: true,
+            entrypoint: String::new(),
+            write_timeout: std::time::Duration::ZERO,
+            keepalive_timeout: std::time::Duration::ZERO,
+            middleware: Vec::new(),
+            uploads: None,
+            sendfile_root: std::path::PathBuf::new(),
+        }
+    }
 
     fn peer() -> Peer {
         Peer {
@@ -57,9 +85,8 @@ mod tests {
         }
     }
 
-    /// One `FieldLines` entry for each field line. Values use message order for each name, and names use lowercase.
     #[test]
-    fn headers_arrive_per_line_in_per_name_order() {
+    fn headers_keep_the_per_name_wire_order() {
         let req = http::Request::builder()
             .method("GET")
             .uri("/a/b?x=1")
@@ -68,26 +95,21 @@ mod tests {
             .header("x-probe", "two")
             .body(())
             .unwrap();
-        let (parts, ()) = req.into_parts();
+        let (mut parts, ()) = req.into_parts();
         let built = build(
-            &parts,
+            &mut parts,
             Some(b"e2e".to_vec()),
             Vec::new(),
-            &peer(),
-            &Config::default(),
+            peer(),
+            &config(),
         );
-        let probes: Vec<_> = built
-            .headers
-            .iter()
-            .filter(|(n, _)| n == "x-probe")
-            .map(|(_, v)| v.as_slice())
-            .collect();
-        assert_eq!(probes, [b"one".as_slice(), b"two".as_slice()]);
+        let probes: Vec<_> = built.headers.get_all("x-probe").iter().collect();
+        assert_eq!(probes, ["one", "two"]);
         assert_eq!(built.uri, "/a/b?x=1");
-        assert_eq!(built.target.as_deref(), Some(&b"/a/b?x=1"[..]));
+        assert_eq!(built.target, None);
         assert_eq!(built.protocol, "HTTP/1.1");
         assert_eq!(built.authority.as_deref(), Some(&b"e2e"[..]));
-        assert_eq!(built.received_at, Some(1.5));
+        assert_eq!(built.received_at, 1.5);
     }
 
     fn built(uri: &str, method: &str) -> Request {
@@ -96,11 +118,11 @@ mod tests {
             .uri(uri)
             .body(())
             .unwrap();
-        let (parts, ()) = req.into_parts();
-        build(&parts, None, Vec::new(), &peer(), &Config::default())
+        let (mut parts, ()) = req.into_parts();
+        build(&mut parts, None, Vec::new(), peer(), &config())
     }
 
-    /// For an absolute-form target, RFC 9112 section 3.2.2 requires PHP to receive the origin form while the target retains the complete form.
+    /// RFC 9112 §3.2.2 absolute-form: PHP gets the origin-form view; the target keeps the full form.
     /// https://www.rfc-editor.org/rfc/rfc9112#section-3.2.2
     #[test]
     fn absolute_form_yields_an_origin_form_uri() {
@@ -112,18 +134,18 @@ mod tests {
         );
     }
 
-    /// An absolute-form target without a path produces a URI that starts with `/`.
+    /// An absolute-form target with no path still yields a rooted uri.
     #[test]
     fn empty_path_absolute_form_roots_the_uri() {
         let b = built("http://h.example?x=1", "GET");
         assert_eq!(b.uri, "/?x=1");
     }
 
-    /// An asterisk-form target remains unchanged for server-wide OPTIONS.
+    /// Asterisk-form passes through unchanged (server-wide OPTIONS).
     #[test]
     fn asterisk_form_is_preserved() {
         let b = built("*", "OPTIONS");
         assert_eq!(b.uri, "*");
-        assert_eq!(b.target.as_deref(), Some(&b"*"[..]));
+        assert_eq!(b.target, None);
     }
 }

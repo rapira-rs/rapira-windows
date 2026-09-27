@@ -1,6 +1,6 @@
 <?php
 $handler = static function (): void {
-	// The unset-path checks do not need a system browscap file. Skip them when the system has one.
+	// the unset-path assertions need no system browscap; skip when one is configured
 	if ((string) ini_get('browscap') !== '') {
 		echo 'skip';
 		return;

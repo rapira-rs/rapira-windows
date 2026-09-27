@@ -35,7 +35,7 @@ class ArrayHandler implements \SessionHandlerInterface
 		return 0;
 	}
 
-	// PHP discovers these optional session ID methods by name. https://github.com/php/php-src/blob/dab13a022a54f8bc03302f93ccb6484907ec1245/ext/session/session.c#L2153-L2188
+	// PHP 8.6 deprecates save handlers without create_sid()/validateId() (required in 9.0)
 	public function create_sid(): string
 	{
 		return bin2hex(random_bytes(8));
@@ -57,7 +57,7 @@ $handler = static function (): void {
 		echo "REGISTERED save_handler=", ini_get('session.save_handler');
 		return;
 	}
-	// Do not register a handler here. The handler from request 1 must remain installed.
+	// no registration here: request 1's handler must still be installed
 	$err = '';
 	set_error_handler(static function (int $no, string $msg) use (&$err): bool {
 		$err .= $msg;

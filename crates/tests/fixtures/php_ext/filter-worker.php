@@ -6,7 +6,7 @@ $handler = static function (): void {
 	}
 	if (($_GET['boom'] ?? '') === '1') {
 		ini_set('display_errors', '0');
-		// An unknown filter ID causes a warning. A non-integer filter causes an exception.
+		// an unknown filter id only warns; a non-int filter throws
 		filter_var('x', []);
 		return;
 	}

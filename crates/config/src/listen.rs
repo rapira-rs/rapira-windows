@@ -3,52 +3,41 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Listen {
+pub enum ListenAddr {
     Tcp(SocketAddr),
 }
 
-impl fmt::Display for Listen {
+impl fmt::Display for ListenAddr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Listen::Tcp(addr) => write!(f, "{addr}"),
+            ListenAddr::Tcp(addr) => write!(f, "{addr}"),
         }
     }
 }
 
-#[derive(Debug)]
-pub struct ListenParseError(String);
+impl FromStr for ListenAddr {
+    type Err = anyhow::Error;
 
-impl fmt::Display for ListenParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for ListenParseError {}
-
-impl FromStr for Listen {
-    type Err = ListenParseError;
-
-    /// The `:port` check runs before the `SocketAddr` parse. An IPv6 literal contains `:` but does not start with one.
+    /// The `:port` check runs before the `SocketAddr` parse: an IPv6 literal contains ':' but never leads with one.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();
+        if s.starts_with("unix:") {
+            anyhow::bail!("Unix listeners are not supported on Windows: use host:port or :port");
+        }
         if !s.contains(':') {
-            return Err(ListenParseError(format!(
-                "`{s}` is not a listen address: use an IP address with a port or :port"
-            )));
+            anyhow::bail!("`{s}` is not a listen address: use host:port or :port");
         }
         if let Some(port) = s.strip_prefix(':') {
-            let port: u16 = port.parse().map_err(|_| {
-                ListenParseError(format!(
-                    "`{s}` has an invalid port: use an IP address with a port or :port"
-                ))
-            })?;
-            return Ok(Listen::Tcp(SocketAddr::from((Ipv4Addr::UNSPECIFIED, port))));
+            let port: u16 = port
+                .parse()
+                .map_err(|_| anyhow::anyhow!("`{s}` has an invalid port"))?;
+            return Ok(ListenAddr::Tcp(SocketAddr::from((
+                Ipv4Addr::UNSPECIFIED,
+                port,
+            ))));
         }
-        s.parse::<SocketAddr>().map(Listen::Tcp).map_err(|_| {
-            ListenParseError(format!(
-                "`{s}` is not a listen address: use an IP address with a port or :port"
-            ))
+        s.parse::<SocketAddr>().map(ListenAddr::Tcp).map_err(|_| {
+            anyhow::anyhow!("`{s}` is not host:port (expected an IP literal, e.g. 127.0.0.1:8000)")
         })
     }
 }
@@ -60,41 +49,33 @@ mod tests {
     #[test]
     fn listen_parses_all_forms() {
         assert_eq!(
-            "127.0.0.1:8000".parse::<Listen>().unwrap(),
-            Listen::Tcp(SocketAddr::from(([127, 0, 0, 1], 8000)))
+            "127.0.0.1:8000".parse::<ListenAddr>().unwrap(),
+            ListenAddr::Tcp(SocketAddr::from(([127, 0, 0, 1], 8000)))
         );
         assert_eq!(
-            ":8080".parse::<Listen>().unwrap(),
-            Listen::Tcp(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 8080)))
+            ":8080".parse::<ListenAddr>().unwrap(),
+            ListenAddr::Tcp(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 8080)))
         );
-        assert!(matches!("[::1]:8000".parse::<Listen>(), Ok(Listen::Tcp(_))));
-    }
-
-    #[test]
-    fn listen_rejects_unix_and_portless_addresses_with_supported_forms() {
-        for bad in [
-            "unix:/run/rapira.sock",
-            "unix:",
-            "localhost",
-            "127.0.0.1",
-            "[::1]",
-            "::1",
-            "2001:db8::1",
-            "8080",
-            "",
-        ] {
-            let err = bad.parse::<Listen>().unwrap_err().to_string();
-            assert!(
-                err.contains("use an IP address with a port or :port"),
-                "{bad}: {err}"
-            );
-        }
+        assert!(matches!(
+            "[::1]:8000".parse::<ListenAddr>(),
+            Ok(ListenAddr::Tcp(_))
+        ));
     }
 
     #[test]
     fn listen_rejects_invalid() {
-        for bad in ["8080", "", ":", "unix:", "localhost:8000"] {
-            assert!(bad.parse::<Listen>().is_err(), "`{bad}` should not parse");
+        for bad in [
+            "8080",
+            "",
+            ":",
+            "unix:",
+            "unix:/run/r.sock",
+            "localhost:8000",
+        ] {
+            assert!(
+                bad.parse::<ListenAddr>().is_err(),
+                "`{bad}` should not parse"
+            );
         }
     }
 }

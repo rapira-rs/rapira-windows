@@ -1,6 +1,6 @@
 <?php
 $handler = static function (): void {
-	// HTTP field names cannot contain a space, and field values cannot contain 0x01. sapi_header_op rejects only CR, LF, and NUL, so the SAPI must reject these fields.
+	// a space is not a tchar and 0x01 is not a legal field-value byte, yet sapi_header_op screens only CR, LF and NUL, so both reach the SAPI and must be dropped there
 	header('Content Type: text/html');
 	header("X-Ctl: \x01");
 	header('X-Keep: kept');
