@@ -86,12 +86,14 @@ function Build-Arm64Dependencies {
     $iconv = Join-Path $sources 'libiconv'
     Msbuild (Join-Path $iconv 'MSVC17\libiconv_dll\libiconv_dll.vcxproj') @("/p:OutDir=$Root\bin\")
     Msbuild (Join-Path $iconv 'MSVC17\libiconv_static\libiconv_static.vcxproj')
-    Get-ChildItem $iconv -Recurse -Filter 'libiconv_a.lib' | Copy-Item -Destination (Join-Path $Root 'lib')
+    Copy-Item (Join-Path $iconv 'MSVC17\ARM64\lib\libiconv_a.lib') (Join-Path $Root 'lib')
     Copy-Item (Join-Path $iconv 'source\include\iconv.h') (Join-Path $Root 'include')
     $gettext = Join-Path $sources 'gettext'
+    Replace-RequiredText (Join-Path $gettext 'source\gettext-runtime\config.h') `
+        '#define uintmax_t unsigned __int64' '#include <stdint.h>' 'gettext standard integer type'
     Msbuild (Join-Path $gettext 'MSVC17\libintl_dll\libintl_dll.vcxproj')
-    Get-ChildItem $gettext -Recurse -Filter 'libintl.dll' | Copy-Item -Destination (Join-Path $Root 'bin')
-    Get-ChildItem $gettext -Recurse -Filter 'libintl.lib' | Copy-Item -Destination (Join-Path $Root 'lib')
+    Copy-Item (Join-Path $gettext 'MSVC17\libintl_dll\ARM64\Release\libintl.dll') (Join-Path $Root 'bin')
+    Copy-Item (Join-Path $gettext 'MSVC17\libintl_dll\ARM64\Release\libintl.lib') (Join-Path $Root 'lib')
     Copy-Item (Join-Path $gettext 'source\gettext-runtime\intl\libgnuintl.h') (Join-Path $Root 'include\libintl.h')
 
     Cmake libxml2 @('-DBUILD_SHARED_LIBS=OFF', '-DLIBXML2_WITH_PROGRAMS=OFF', '-DLIBXML2_WITH_TESTS=OFF',
