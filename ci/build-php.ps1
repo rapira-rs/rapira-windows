@@ -622,6 +622,11 @@ try {
         Replace-RequiredText -Path (Join-Path $sourceRoot 'ext\exif\config.w32') -Before $exifBefore -After $exifAfter -Description 'PHP 8.4 optional mbstring dependency'
     }
 
+    if ($architecture.Name -eq 'arm64') {
+        Replace-RequiredText (Join-Path $sourceRoot 'ext\ffi\config.w32') `
+            '/DZEND_ENABLE_STATIC_TSRMLS_CACHE=1' '/DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 /DFFI_STATIC_BUILD' 'static ARM64 libffi linkage'
+    }
+
     $env:RAPIRA_VCVARS = $vcVars
     $env:RAPIRA_VCVARS_ARCH = $architecture.VcVars
     $env:RAPIRA_PHP_SOURCE = $sourceRoot

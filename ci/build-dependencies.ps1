@@ -153,7 +153,7 @@ function Build-Arm64Dependencies {
     } finally { Pop-Location }
 
     $icu = Join-Path $sources 'ICU'
-    Msbuild (Join-Path $icu 'source\data\makedata.vcxproj')
+    Msbuild (Join-Path $icu 'source\allinone\allinone.sln') @('/t:makedata')
     Copy-Item (Join-Path $icu 'binARM64\icu*.dll') (Join-Path $Root 'bin')
     Copy-Item (Join-Path $icu 'libARM64\icu*.lib') (Join-Path $Root 'lib')
     Copy-Item (Join-Path $icu 'include\*') (Join-Path $Root 'include') -Recurse -Force

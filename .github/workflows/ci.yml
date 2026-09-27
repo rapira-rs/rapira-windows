@@ -1,6 +1,6 @@
 name: CI
 on:
-  push: { branches: [main, 'sync/**'] }
+  push: { branches: [main] }
   pull_request:
   workflow_dispatch:
 
