@@ -396,6 +396,11 @@ try {
     if ($architecture.Name -eq 'arm64') {
         Replace-RequiredText (Join-Path $sourceRoot 'ext\ffi\config.w32') `
             '/DZEND_ENABLE_STATIC_TSRMLS_CACHE=1' '/DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 /DFFI_STATIC_BUILD' 'static ARM64 libffi linkage'
+        # The ARM64 OpenSSL target does not use the Applink adapter.
+        # https://docs.openssl.org/3.5/man3/OPENSSL_Applink/
+        Replace-RequiredText (Join-Path $sourceRoot 'sapi\cli\php_cli.c') `
+            '#if defined(PHP_WIN32) && defined(HAVE_OPENSSL_EXT)' `
+            '#if defined(PHP_WIN32) && defined(HAVE_OPENSSL_EXT) && !defined(_M_ARM64)' 'ARM64 OpenSSL CLI include'
     }
 
     $env:RAPIRA_VCVARS = $vcVars
