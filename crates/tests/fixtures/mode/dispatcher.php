@@ -2,8 +2,8 @@
 
 $mode = \Rapira\get_mode();
 
-// No response is available. Write the results to the application log.
-// json_encode cannot encode a pure enum. The context contains only the name and comparison results.
+// No response to write into here, so the results travel out through the app log.
+// A pure enum is not json-encodable, so the context carries the name and the comparisons only.
 \Rapira\log('mode', context: [
     'name' => $mode->name,
     'case' => $mode === \Rapira\Mode::Dispatcher,

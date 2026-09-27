@@ -5,7 +5,7 @@ class Counter
 }
 $handler = static function (): void {
     Counter::$n++;
-    register_shutdown_function(static fn() => error_log("[shutdown] ran")); // The embedded SAPI does not define STDERR.
+    register_shutdown_function(static fn() => error_log("[shutdown] ran")); // STDERR is undefined in embed SAPI
     header('Content-Type: text/plain');
     echo "counter=" . Counter::$n . " session=" . (isset($_SESSION['seen']) ? 'leaked' : 'clean');
     $_SESSION['seen'] = true;

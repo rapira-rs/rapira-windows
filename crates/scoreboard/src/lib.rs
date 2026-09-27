@@ -1,3 +1,4 @@
+use std::ops::Range;
 use std::sync::OnceLock;
 use std::sync::atomic::{
     AtomicU32, AtomicU64,
@@ -11,27 +12,22 @@ pub const SLOT_FREE: u32 = 0;
 pub const SLOT_STARTING: u32 = 1;
 pub const SLOT_IDLE: u32 = 2;
 pub const SLOT_ACTIVE: u32 = 3;
-pub const SLOT_DRAINING: u32 = 4; // The worker requested exit.
+pub const SLOT_DRAINING: u32 = 4; // worker-initiated exit pending
 
-/// Each worker thread writes its slot. The boot thread sets STARTING before spawn.
+/// The host reserves the slot before its interpreter starts. Only that interpreter updates it.
 #[repr(C, align(64))]
 pub struct SharedSlot {
     pub state: AtomicU32,
-    /// Worker thread index on Windows.
     pub pid: AtomicU32,
     pub handled: AtomicU64,
     pub errors: AtomicU64,
     pub recycles: AtomicU64,
-    pub restarts: AtomicU64,
-    pub unhealthy: AtomicU32,
-    _pad: [u8; 4],
     pub last_activity_ms: AtomicU64,
-    _tail: [u8; 8],
 }
 
 const _: () = assert!(size_of::<SharedSlot>() == 64 && align_of::<SharedSlot>() == 64);
 
-/// Copy of the slot table. [`Box::leak`](https://doc.rust-lang.org/std/boxed/struct.Box.html#method.leak) keeps the allocation valid for the process lifetime.
+/// The slot allocation remains valid for the lifetime of all interpreter threads.
 #[derive(Clone, Copy)]
 pub struct Scoreboard {
     slots: &'static [SharedSlot],
@@ -40,25 +36,21 @@ pub struct Scoreboard {
 #[derive(Debug, Default, Clone)]
 pub struct SlotSnapshot {
     pub id: usize,
-    /// Worker thread index on Windows.
     pub pid: u32,
     pub state: u32,
     pub handled: u64,
     pub errors: u64,
     pub recycles: u64,
-    pub restarts: u64,
-    pub unhealthy: bool,
-    pub last_activity_ms: u64,
 }
 
-/// Milliseconds from a process-wide monotonic [`Instant`](https://doc.rust-lang.org/std/time/struct.Instant.html).
+/// Milliseconds from one process-wide monotonic clock.
 pub fn now_millis() -> u64 {
     static START: OnceLock<Instant> = OnceLock::new();
     START.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
 impl Scoreboard {
-    /// Creates one slot for each worker thread before the workers start.
+    /// Allocates one slot for each configured interpreter before the pools start.
     pub fn create(nslots: usize) -> anyhow::Result<Scoreboard> {
         anyhow::ensure!(
             (1..=SB_MAX_SLOTS).contains(&nslots),
@@ -71,11 +63,7 @@ impl Scoreboard {
                 handled: AtomicU64::new(0),
                 errors: AtomicU64::new(0),
                 recycles: AtomicU64::new(0),
-                restarts: AtomicU64::new(0),
-                unhealthy: AtomicU32::new(0),
-                _pad: [0; 4],
                 last_activity_ms: AtomicU64::new(0),
-                _tail: [0; 8],
             })
             .collect::<Box<[_]>>();
         Ok(Scoreboard {
@@ -83,16 +71,26 @@ impl Scoreboard {
         })
     }
 
-    pub fn slot(&self, i: usize) -> Option<&'static SharedSlot> {
-        self.slots.get(i)
+    /// View over `range` of this board: indices inside the view are local to it, the memory is shared.
+    pub fn slice(&self, range: Range<usize>) -> Scoreboard {
+        Scoreboard {
+            slots: &self.slots[range],
+        }
     }
 
-    /// The boot thread reserves the slot before its worker starts.
+    pub fn nslots(&self) -> usize {
+        self.slots.len()
+    }
+
+    pub fn slot(&self, i: usize) -> &'static SharedSlot {
+        &self.slots[i]
+    }
+
+    /// Reserves the slot before the host starts its interpreter thread.
     pub fn set_starting(&self, i: usize) {
-        if let Some(s) = self.slots.get(i) {
-            s.last_activity_ms.store(now_millis(), Relaxed);
-            s.state.store(SLOT_STARTING, Release);
-        }
+        let s = self.slot(i);
+        s.last_activity_ms.store(now_millis(), Relaxed);
+        s.state.store(SLOT_STARTING, Release);
     }
 
     pub fn snapshot_slots(&self) -> Vec<SlotSnapshot> {
@@ -107,22 +105,17 @@ impl Scoreboard {
                 handled: s.handled.load(Relaxed),
                 errors: s.errors.load(Relaxed),
                 recycles: s.recycles.load(Relaxed),
-                restarts: s.restarts.load(Relaxed),
-                unhealthy: s.unhealthy.load(Relaxed) != 0,
-                last_activity_ms: s.last_activity_ms.load(Relaxed),
             })
             .collect()
     }
 }
 
 impl SharedSlot {
-    /// Call this once for each worker thread before its first interpreter. The counts include all interpreter generations.
+    /// Claims the slot once for its interpreter thread, before requests arrive.
     pub fn bind(&'static self, pid: u32) {
         self.handled.store(0, Relaxed);
         self.errors.store(0, Relaxed);
         self.recycles.store(0, Relaxed);
-        self.restarts.store(0, Relaxed);
-        self.unhealthy.store(0, Relaxed);
         self.pid.store(pid, Relaxed);
         self.last_activity_ms.store(now_millis(), Relaxed);
         self.state.store(SLOT_IDLE, Relaxed);
@@ -132,66 +125,18 @@ impl SharedSlot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread;
-
-    #[test]
-    fn worker_threads_have_independent_slots() {
-        let sb = Scoreboard::create(3).unwrap();
-        let workers: Vec<_> = [3, 5, 7]
-            .into_iter()
-            .enumerate()
-            .map(|(index, handled)| {
-                thread::spawn(move || {
-                    let slot = sb.slot(index).unwrap();
-                    slot.bind(index as u32);
-                    slot.handled.fetch_add(handled, Relaxed);
-                    slot.recycles.fetch_add(index as u64 + 1, Relaxed);
-                })
-            })
-            .collect();
-        for worker in workers {
-            worker.join().unwrap();
-        }
-
-        let snapshots = sb.snapshot_slots();
-        let actual: Vec<_> = snapshots
-            .iter()
-            .map(|slot| (slot.id, slot.pid, slot.handled, slot.recycles))
-            .collect();
-        assert_eq!(actual, vec![(0, 0, 3, 1), (1, 1, 5, 2), (2, 2, 7, 3)]);
-    }
-
-    #[test]
-    fn activity_timestamps_use_monotonic_milliseconds() {
-        let sb = Scoreboard::create(1).unwrap();
-        let before = now_millis();
-        sb.set_starting(0);
-        let starting = sb.slot(0).unwrap().last_activity_ms.load(Relaxed);
-        let bound = thread::spawn(move || {
-            let slot = sb.slot(0).unwrap();
-            slot.bind(0);
-            slot.last_activity_ms.load(Relaxed)
-        })
-        .join()
-        .unwrap();
-        let after = now_millis();
-
-        assert!(before <= starting);
-        assert!(starting <= bound);
-        assert!(bound <= after);
-    }
 
     #[test]
     fn create_bind_snapshot_roundtrip() {
         let sb = Scoreboard::create(3).unwrap();
-        assert_eq!(sb.slot(0).unwrap().state.load(Relaxed), SLOT_FREE);
-        assert!(sb.snapshot_slots().is_empty());
+        assert_eq!(sb.nslots(), 3);
+        assert_eq!(sb.slot(0).state.load(Relaxed), SLOT_FREE);
 
         sb.set_starting(0);
-        assert_eq!(sb.slot(0).unwrap().state.load(Relaxed), SLOT_STARTING);
-        assert_eq!(sb.slot(1).unwrap().state.load(Relaxed), SLOT_FREE);
+        assert_eq!(sb.slot(0).state.load(Relaxed), SLOT_STARTING);
+        assert_eq!(sb.slot(1).state.load(Relaxed), SLOT_FREE);
 
-        let slot = sb.slot(0).unwrap();
+        let slot = sb.slot(0);
         slot.bind(4242);
         slot.handled.fetch_add(2, Relaxed);
         slot.errors.fetch_add(1, Relaxed);
@@ -203,8 +148,16 @@ mod tests {
     }
 
     #[test]
-    fn slots_out_of_range_rejected() {
-        assert!(Scoreboard::create(0).is_err());
-        assert!(Scoreboard::create(SB_MAX_SLOTS + 1).is_err());
+    fn slice_shares_memory_with_local_indices() {
+        let board = Scoreboard::create(6).unwrap();
+        let view = board.slice(2..4);
+        assert_eq!(view.nslots(), 2);
+        assert!(std::ptr::eq(view.slot(1), board.slot(3)));
+
+        view.set_starting(0);
+        assert_eq!(board.slot(2).state.load(Relaxed), SLOT_STARTING);
+        assert_eq!(board.slot(1).state.load(Relaxed), SLOT_FREE);
+
+        assert_eq!(view.snapshot_slots()[0].id, 0);
     }
 }

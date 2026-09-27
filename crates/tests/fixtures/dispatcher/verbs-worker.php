@@ -1,6 +1,6 @@
 <?php
 
-// Select each test with the request target because dispatcher mode has no superglobals.
+// Probe toggles ride on the request target: this mode has no superglobals.
 
 use Rapira\Exception\AlreadyFinalizedError;
 use Rapira\Http\Exception\HeadAlreadyWrittenError;
@@ -79,7 +79,7 @@ try {
             continue;
         }
         if ($probe === 'empty-chunk') {
-            $ex->writeBody('', eos: false); // An empty body does not commit the response headers.
+            $ex->writeBody('', eos: false); // does nothing: no head commits
             $ex->writeHead(404);
             $ex->writeBody('body');
             continue;
@@ -131,7 +131,7 @@ try {
             } catch (HeadAlreadyWrittenError $e) {
                 \Rapira\log('101-locked', context: ['class' => $e::class]);
             }
-            // Accept and discard this data because a 1xx response has no body.
+            // accepted and dropped: a 1xx response has no body
             $ex->writeBody('dropped');
             continue;
         }
@@ -150,22 +150,17 @@ try {
             continue;
         }
         if ($probe === 'abandon') {
-            unset($ex); // The host must fail this unfinalized unit and continue to serve requests.
+            unset($ex); // never finalized: the plugin must fail this unit and keep serving
             continue;
         }
         if ($probe === 'abandon-mid') {
             $ex->writeHead(200);
             $ex->writeBody('partial', eos: false);
-            unset($ex); // The response headers are already sent. The host can only truncate the response.
+            unset($ex); // head already on the wire: the plugin can only truncate
             continue;
         }
         if ($probe === 'bail-with-unit') {
-            @trigger_error('bail with unit out', E_USER_ERROR); // The bailout ends the unit with the cycle.
-            continue;
-        }
-        if ($probe === 'destruct-explicit') {
-            $ex->__destruct(); // An explicit call does not change a referenced unit.
-            $ex->writeBody('explicit-destruct-ok');
+            @trigger_error('bail with unit out', E_USER_ERROR); // bailout: the unit dies with the cycle
             continue;
         }
         if ($probe === 'head204') {
@@ -175,10 +170,10 @@ try {
         }
         if ($probe === 'exit') {
             $ex->writeBody('bye');
-            exit(0); // The host must recycle this worker after it served a request.
+            exit(0); // served > 0: the SAPI must recycle and keep serving
         }
         if ($probe === 'spin') {
-            // This exchange does not finalize. The renewed unit timeout must stop it.
+            // never finalizes: the re-armed per-unit budget must kill this (timeout_tests.rs)
             while (true) {
             }
         }

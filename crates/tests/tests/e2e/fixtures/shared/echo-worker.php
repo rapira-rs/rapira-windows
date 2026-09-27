@@ -1,5 +1,5 @@
 <?php
-// This resident worker returns its process ID for each request. The value verifies process continuity.
+// Resident worker: each request echoes the serving pid, a continuity probe.
 
 use Rapira\Exception\ClosedException;
 

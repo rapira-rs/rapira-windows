@@ -1,6 +1,6 @@
 <?php
 
-// json_encode cannot represent these values. log() must preserve the record and continue to the echo without an exception.
+// Values json_encode cannot represent: none may throw or lose the record, so PHP keeps running to the echo.
 $fh = fopen('php://memory', 'rb');
 
 \Rapira\log('hostile', \Rapira\LogLevel::Error, [
@@ -9,9 +9,9 @@ $fh = fopen('php://memory', 'rb');
     'resource' => $fh,
     'nan' => NAN,
     'inf' => INF,
-    // These input bytes contain invalid UTF-8, which commonly causes json_encode to fail.
+    // Raw bytes off the wire: invalid UTF-8 is the usual json_encode failure.
     'bytes' => "\xC3\x28\xA0\xA1",
-    // A pure enum does not implement JsonSerializable and has no backing value.
+    // A pure enum is not JsonSerializable and has no backing value.
     'pure_enum' => \Rapira\LogLevel::Debug,
 ]);
 

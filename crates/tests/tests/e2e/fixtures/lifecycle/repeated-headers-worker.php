@@ -1,5 +1,5 @@
 <?php
-// Return the repeated request fields after the HTTP server combines them for PHP.
+// Echoes what repeated request fields look like to PHP once the plugin has combined them.
 $handler = static function (): void {
     header('Content-Type: text/plain');
     echo ($_COOKIE['a'] ?? '-'), ',', ($_COOKIE['b'] ?? '-'), "\n";

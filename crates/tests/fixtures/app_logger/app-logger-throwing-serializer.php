@@ -1,6 +1,6 @@
 <?php
 
-// log() must contain an exception from jsonSerialize() in a context value and continue the script.
+// An exception thrown inside a context value's jsonSerialize() must not escape log() or kill the script.
 final class Bomb implements \JsonSerializable
 {
 	public function jsonSerialize(): mixed

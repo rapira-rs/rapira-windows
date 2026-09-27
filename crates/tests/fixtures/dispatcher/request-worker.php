@@ -1,35 +1,36 @@
 <?php
 
-// Write each Request field to the response body for the field mapping tests.
+// Echoes every Request field into the response body for the field-mapping tests.
 
 $d = \Rapira\get_dispatcher();
+// the error message of a userland write to an initialized readonly property
+$denied = static function (object $o, string $prop): string {
+    try {
+        $o->$prop = 'x';
+        return 'written';
+    } catch (\Error $e) {
+        return $e->getMessage();
+    }
+};
 try {
     while (true) {
         $ex = $d->receive();
         $req = $ex->getRequest();
-        // Repeated calls return the same cached instance.
+        // the memo: repeated calls hand back the same instance
         $again = $ex->getRequest();
-        $caseKeys = [];
-        foreach ($req->headers as $k => $v) {
-            if (strcasecmp((string)$k, 'x-case') === 0) {
-                $caseKeys[] = $k;
-            }
-        }
         $lines = [
             'method=' . $req->method,
             'uri=' . $req->uri,
             'target-hex=' . bin2hex($req->target),
             'authority=' . var_export($req->authority, true),
             'protocol=' . $req->protocol,
-            // Repeated values remain separate list entries in transmission order.
+            // repeats stay separate list entries, wire order
             'x-probe=' . implode('|', $req->headers['x-probe'] ?? []),
-            // The same name with two different cases produces two keys. Grouping compares the exact bytes.
-            'x-case-keys=' . implode('|', $caseKeys),
-            // The symbol table converts an all-digit field name to an integer key.
+            // an all-digit field name must land as an integer key (symtable)
             'h123=' . implode(',', $req->headers[123] ?? []),
-            // A single-letter name remains a string key.
+            // a single-letter name must stay a string key
             'h-single=' . implode(',', $req->headers['a'] ?? []),
-            // A leading hyphen detects a one-byte overread in the symbol table prefilter.
+            // '-'-leading names pin the symtable prefilter's one-byte overread
             'h-dash=' . implode(',', $req->headers['-'] ?? []),
             'h-neg=' . implode(',', $req->headers['-1'] ?? []),
             'memo-same=' . var_export($req === $again, true),
@@ -53,6 +54,8 @@ try {
             ])),
             'received-at=' . var_export($req->receivedAt, true),
             'received-at-positive=' . var_export($req->receivedAt > 0, true),
+            'readonly-request=' . $denied($req, 'method'),
+            'readonly-remote=' . $denied($req->remote, $req->remote instanceof \Rapira\InetAddress ? 'ip' : 'path'),
         ];
         $ex->writeBody(implode("\n", $lines));
     }

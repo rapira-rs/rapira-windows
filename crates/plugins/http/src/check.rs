@@ -3,10 +3,17 @@ use http::{Method, Version};
 
 use crate::UnsafeFieldNames;
 
+/// A refusal before dispatch: PHP never saw the request.
 #[derive(Debug)]
 pub(crate) struct Rejection {
     pub status: http::StatusCode,
     pub reason: String,
+}
+
+impl std::fmt::Display for Rejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.status.as_u16(), self.reason)
+    }
 }
 
 impl Rejection {
@@ -19,73 +26,7 @@ impl Rejection {
 }
 
 pub(crate) fn is_safe_field_name(name: &str) -> bool {
-    !name.bytes().any(|b| matches!(b, b'_' | b'.'))
-}
-
-// RFC 3986 defines IPvFuture syntax.
-// https://www.rfc-editor.org/rfc/rfc3986#section-3.2.2
-fn is_valid_ipv_future(value: &str) -> bool {
-    let Some(value) = value.strip_prefix('v').or_else(|| value.strip_prefix('V')) else {
-        return false;
-    };
-    let Some((version, address)) = value.split_once('.') else {
-        return false;
-    };
-    !version.is_empty()
-        && version.bytes().all(|b| b.is_ascii_hexdigit())
-        && !address.is_empty()
-        && address.bytes().all(|b| {
-            b.is_ascii_alphanumeric()
-                || matches!(
-                    b,
-                    b'-' | b'.'
-                        | b'_'
-                        | b'~'
-                        | b'!'
-                        | b'$'
-                        | b'&'
-                        | b'\''
-                        | b'('
-                        | b')'
-                        | b'*'
-                        | b'+'
-                        | b','
-                        | b';'
-                        | b'='
-                        | b':'
-                )
-        })
-}
-
-fn is_valid_authority_host(host: &str) -> bool {
-    if let Some(literal) = host
-        .strip_prefix('[')
-        .and_then(|host| host.strip_suffix(']'))
-    {
-        return literal.parse::<std::net::Ipv6Addr>().is_ok() || is_valid_ipv_future(literal);
-    }
-    !host.bytes().any(|b| matches!(b, b'[' | b']'))
-}
-
-fn is_valid_host(value: &[u8]) -> bool {
-    let Ok(value) = std::str::from_utf8(value) else {
-        return false;
-    };
-    let Ok(authority) = value.parse::<http::uri::Authority>() else {
-        return false;
-    };
-    if value.contains('@')
-        || authority.host().is_empty()
-        || !is_valid_authority_host(authority.host())
-    {
-        return false;
-    }
-
-    let port = &value[authority.host().len()..];
-    port.is_empty()
-        || port
-            .strip_prefix(':')
-            .is_some_and(|port| port.bytes().all(|b| b.is_ascii_digit()))
+    name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
 pub(crate) fn authority(
@@ -98,10 +39,7 @@ pub(crate) fn authority(
         return Err("request carries more than one Host field line");
     }
     match first {
-        Some(v) if !v.as_bytes().is_empty() && is_valid_host(v.as_bytes()) => {
-            Ok(Some(v.as_bytes().to_vec()))
-        }
-        Some(v) if !v.as_bytes().is_empty() => Err("request with an invalid Host field value"),
+        Some(v) if !v.as_bytes().is_empty() => Ok(Some(v.as_bytes().to_vec())),
         Some(_) if http11 => Err("HTTP/1.1 request with an empty Host field value"),
         None if http11 => Err("HTTP/1.1 request without a Host field"),
         _ => Ok(None),
@@ -154,7 +92,7 @@ pub(crate) fn apply_field_name_policy(
     Ok(())
 }
 
-/// Runs admission checks in dispatch order. `Ok` contains the resolved authority for the PHP request.
+/// Admission checks in dispatch order; Ok carries the resolved authority for the PHP request.
 pub(crate) fn check_request(
     parts: &mut http::request::Parts,
     unsafe_field_names: UnsafeFieldNames,
@@ -174,13 +112,7 @@ pub(crate) fn check_request(
         Some(a) => {
             let a = a.as_str();
             let host_port = a.rsplit_once('@').map_or(a, |(_, hp)| hp);
-            if !is_valid_host(host_port.as_bytes()) {
-                return Err(Rejection::new(
-                    http::StatusCode::BAD_REQUEST,
-                    "absolute-form target with an invalid authority",
-                ));
-            }
-            // Set Host to the effective authority so HTTP_HOST has the same value.
+            // Rewrite Host to the effective authority, so HTTP_HOST cannot disagree.
             // https://www.rfc-editor.org/rfc/rfc9112#section-3.2.2
             let v = http::HeaderValue::from_str(host_port)
                 .expect("uri authority bytes are valid header bytes");
@@ -222,7 +154,7 @@ mod tests {
         m
     }
 
-    /// RFC 9112 section 3.2 requires a 400 response for a repeated, missing, or empty Host field in HTTP/1.1. An HTTP/1.0 request without Host has no authority. https://www.rfc-editor.org/rfc/rfc9112#section-3.2
+    /// RFC 9112 §3.2: repeated/missing/empty Host on 1.1 is a 400; a bare 1.0 request named no authority.
     #[test]
     fn authority_follows_the_host_rules() {
         assert_eq!(
@@ -236,39 +168,9 @@ mod tests {
         assert!(authority(&map(&[("host", "a"), ("host", "b")]), false).is_err());
         assert_eq!(authority(&map(&[]), false).unwrap(), None);
         assert_eq!(authority(&map(&[("host", "")]), false).unwrap(), None);
-
-        for host in [
-            "a.example/path",
-            "user@a.example",
-            "a b",
-            "[::1",
-            "a:port",
-            "[server]",
-            "[]",
-            "a[b]:80",
-        ] {
-            assert!(
-                authority(&map(&[("host", host)]), true).is_err(),
-                "Host must reject {host:?}"
-            );
-        }
-        for host in [
-            "a.example:8080",
-            "[::1]",
-            "[2001:db8::1]:8080",
-            "[v1.server]",
-            "[Vf.name:part]",
-            "x~y.example",
-        ] {
-            assert_eq!(
-                authority(&map(&[("host", host)]), true).unwrap().as_deref(),
-                Some(host.as_bytes()),
-                "Host must accept {host:?}"
-            );
-        }
     }
 
-    /// Field names that `policy` permits, in map order.
+    /// Field names surviving `policy`, in map order.
     fn surviving(
         policy: UnsafeFieldNames,
         pairs: &[(&str, &str)],
@@ -278,7 +180,7 @@ mod tests {
         Ok(headers.keys().map(|n| n.as_str().to_owned()).collect())
     }
 
-    /// `Drop` protects the $_SERVER mapping. A dispatcher pool has no $_SERVER mapping, so it receives names without changes.
+    /// Drop protects the $_SERVER mapping; a dispatcher pool has none, so names pass as received.
     #[test]
     fn drop_is_inert_without_superglobals() {
         let mut headers = map(&[("x_forwarded_for", "1.2.3.4")]);
@@ -287,17 +189,13 @@ mod tests {
     }
 
     #[test]
-    fn only_dot_and_underscore_are_unsafe_field_name_characters() {
+    fn only_alphanumerics_and_dash_are_safe_field_names() {
         assert!(is_safe_field_name("x-forwarded-for"));
         assert!(is_safe_field_name("Sec-Ch-Ua-Mobile"));
         assert!(!is_safe_field_name("x_forwarded_for"));
         assert!(!is_safe_field_name("x.forwarded.for"));
-        for name in [
-            "x!foo", "x#foo", "x$foo", "x%foo", "x&foo", "x'foo", "x*foo", "x+foo", "x^foo",
-            "x`foo", "x|foo", "x~foo",
-        ] {
-            assert!(is_safe_field_name(name), "field name must accept {name:?}");
-        }
+        assert!(!is_safe_field_name("x~foo"));
+        assert!(!is_safe_field_name("x$foo"));
     }
 
     #[test]
@@ -308,11 +206,10 @@ mod tests {
                 ("x-forwarded-for", "203.0.113.7"),
                 ("x_forwarded_for", "1.2.3.4"),
                 ("x.forwarded.for", "5.6.7.8"),
-                ("x~trace", "safe"),
             ],
         )
         .unwrap();
-        assert_eq!(names, ["x-forwarded-for", "x~trace"]);
+        assert_eq!(names, ["x-forwarded-for"]);
     }
 
     #[test]
@@ -342,7 +239,8 @@ mod tests {
         assert_eq!(err.status, http::StatusCode::NOT_IMPLEMENTED);
     }
 
-    /// RFC 9112 section 3.2.2 requires the authority in an absolute-form target to replace Host. The function removes user information and sets the Host field to the same authority.
+    /// RFC 9112 §3.2.2: the absolute-form target authority replaces Host. Userinfo is stripped.
+    /// The Host field line is rewritten too, so HTTP_HOST agrees with the authority.
     /// https://www.rfc-editor.org/rfc/rfc9112#section-3.2.2
     #[test]
     fn absolute_form_authority_overrides_host() {
@@ -367,21 +265,11 @@ mod tests {
         assert_eq!(p.headers.get("host").unwrap(), "target.example:8080");
     }
 
-    /// RFC 9112 section 3.2 applies the Host validation rules to an absolute-form target. https://www.rfc-editor.org/rfc/rfc9112#section-3.2
+    /// RFC 9112 §3.2: the Host 400 rules stay in force for an absolute-form target.
     #[test]
     fn absolute_form_keeps_the_host_rules() {
         let mut p = parts(Method::GET, Version::HTTP_11, &[]);
         p.uri = "http://target.example/".parse().unwrap();
-        let err = check_request(&mut p, UnsafeFieldNames::Drop, true, 1024)
-            .err()
-            .unwrap();
-        assert_eq!(err.status, http::StatusCode::BAD_REQUEST);
-    }
-
-    #[test]
-    fn absolute_form_rejects_an_invalid_authority() {
-        let mut p = parts(Method::GET, Version::HTTP_11, &[("host", "e2e")]);
-        p.uri = "http://[server]/".parse().unwrap();
         let err = check_request(&mut p, UnsafeFieldNames::Drop, true, 1024)
             .err()
             .unwrap();

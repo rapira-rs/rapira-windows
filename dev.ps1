@@ -4,12 +4,15 @@
 # .\dev.ps1 -Runtime C:\php\php-runtime -Task stubs -PhpSrc C:\src\php-src
 # .\dev.ps1 -Devel C:\php\php-devel -Task clangd
 param(
-    [ValidateSet('build', 'test', 'test_e2e', 'coverage', 'stubs', 'clangd')]
+    [ValidateSet('build', 'clippy', 'test', 'test_e2e', 'coverage', 'stubs', 'grpc_fixtures', 'clangd')]
     [string]$Task = 'build',
     [string]$Devel,
     [string]$Runtime,
     [string]$Llvm = 'C:\Program Files\LLVM\bin',
-    [string]$PhpSrc
+    [string]$PhpSrc,
+    [string]$TestFilter,
+    [switch]$NoRun,
+    [switch]$Release
 )
 $ErrorActionPreference = 'Stop'
 
@@ -114,6 +117,20 @@ function Find-NativeVisualStudio {
     return $selected.Path
 }
 
+if ($Task -eq 'grpc_fixtures') {
+    $go = (Get-Command go -CommandType Application).Source
+    $expected = if ($osArchitecture -eq 'Arm64') { 'arm64' } else { 'amd64' }
+    if ((& $go env GOHOSTARCH) -ne $expected) { throw "Go must run natively on $expected." }
+    Push-Location (Join-Path $PSScriptRoot 'crates\tests')
+    try {
+        $buf = @('run', 'github.com/bufbuild/buf/cmd/buf@v1.73.0', 'build')
+        Invoke-Tool $go ($buf + @('fixtures/grpc', '--as-file-descriptor-set', '-o', 'fixtures/grpc/echo.binpb'))
+        Invoke-Tool $go ($buf + @('fixtures/grpc', '--as-file-descriptor-set', '--exclude-imports', '-o', 'fixtures/grpc/echo-no-imports.binpb'))
+        Invoke-Tool $go ($buf + @('fixtures/grpc_options', '--as-file-descriptor-set', '--path', 'fixtures/grpc_options/ping.proto', '--exclude-imports', '-o', 'fixtures/grpc_options/ping-no-imports.binpb'))
+    } finally { Pop-Location }
+    exit 0
+}
+
 if ($Task -ne 'stubs') {
     if ([string]::IsNullOrWhiteSpace($Devel)) {
         throw 'Pass -Devel with a PHP devel pack that contains a ZTS import library.'
@@ -160,9 +177,9 @@ if ($Task -eq 'stubs') {
     $generator = Join-Path $PhpSrc 'build\gen_stub.php'
     Assert-File $generator
     $generator = (Resolve-Path -LiteralPath $generator).ProviderPath
-    $stubFiles = @(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'crates\php_sys') -Filter '*.stub.php' -File)
+    $stubFiles = @(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'crates') -Filter '*.stub.php' -File -Recurse)
     if ($stubFiles.Count -eq 0) {
-        throw 'No .stub.php files found in crates\php_sys.'
+        throw 'No .stub.php files found in crates.'
     }
 } else {
     Assert-File (Join-Path $Llvm 'libclang.dll')
@@ -228,10 +245,10 @@ try {
         New-Item -ItemType Directory -Path $databaseDir -Force | Out-Null
         $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
-        $manifest = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'crates\php_sys\Cargo.toml') -Raw
+        $manifest = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'crates\sapi\Cargo.toml') -Raw
         $versionMatch = [regex]::Match($manifest, '(?m)^version\s*=\s*"([^"]+)"')
         if (-not $versionMatch.Success) {
-            throw 'Could not read php_sys package version from crates\php_sys\Cargo.toml.'
+            throw 'Could not read sapi package version from crates\sapi\Cargo.toml.'
         }
         $phpSysVersion = $versionMatch.Groups[1].Value
 
@@ -274,17 +291,10 @@ try {
             $commonArguments += "/imsvc$((Resolve-Path -LiteralPath $includeDir).ProviderPath)"
         }
 
-        $sources = @(
-            'wrapper.c',
-            'module.c',
-            'rapira_classes.c',
-            'rapira_http.c',
-            'rapira_dispatcher.c',
-            'rapira_exchange.c'
-        )
-        $commands = foreach ($sourceName in $sources) {
-            $source = Join-Path $PSScriptRoot "crates\php_sys\$sourceName"
-            Assert-File $source
+        $commonArguments += "/I$(Join-Path $PSScriptRoot 'crates\sapi')"
+        $sources = Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'crates') -Filter '*.c' -File -Recurse
+        $commands = foreach ($sourceFile in $sources) {
+            $source = $sourceFile.FullName
             [ordered]@{
                 directory = $PSScriptRoot
                 file = $source
@@ -303,19 +313,27 @@ try {
             $env:PATH = "$(Join-Path $cargoHome 'bin');$env:PATH"
             $cargo = Get-Command cargo -CommandType Application
         }
+        $profile = if ($Release) { @('--release') } else { @() }
+        $testOptions = @()
+        if ($NoRun) { $testOptions += '--no-run' }
+        if ($TestFilter) { $testOptions += $TestFilter }
         switch ($Task) {
+            'clippy' {
+                Invoke-Tool -Command $cargo.Source -Arguments @('clippy', '--locked', '--workspace', '--all-targets', '--target', $target, '--', '-D', 'warnings')
+                Invoke-Tool -Command $cargo.Source -Arguments @('clippy', '--locked', '-p', 'tests', '--features', 'e2e', '--tests', '--target', $target, '--', '-D', 'warnings')
+            }
             'build' {
-                Invoke-Tool -Command $cargo.Source -Arguments @('build', '--locked', '--target', $target)
+                Invoke-Tool -Command $cargo.Source -Arguments (@('build', '--locked', '--target', $target) + $profile)
             }
             'test' {
-                Invoke-Tool -Command $cargo.Source -Arguments @('test', '--locked', '--workspace', '--target', $target)
+                Invoke-Tool -Command $cargo.Source -Arguments (@('test', '--locked', '--workspace', '--target', $target) + $profile + $testOptions)
             }
             'test_e2e' {
-                Invoke-Tool -Command $cargo.Source -Arguments @('build', '--locked', '--bin', 'rapira', '--target', $target)
-                Invoke-Tool -Command $cargo.Source -Arguments @('test', '--locked', '-p', 'tests', '--test', 'e2e', '--features', 'e2e', '--target', $target, '--', '--test-threads=1')
+                Invoke-Tool -Command $cargo.Source -Arguments (@('build', '--locked', '--bin', 'rapira', '--target', $target) + $profile)
+                Invoke-Tool -Command $cargo.Source -Arguments (@('test', '--locked', '-p', 'tests', '--test', 'e2e', '--features', 'e2e', '--target', $target) + $profile + $testOptions + @('--', '--test-threads=1'))
             }
             'coverage' {
-                Invoke-Tool -Command $cargo.Source -Arguments @('llvm-cov', '--locked', '--workspace', '--target', $target, '--lcov', '--output-path', 'lcov.info', '--ignore-filename-regex', '(crates[/\\]tests[/\\]|bindings\.rs$|[/\\]src[/\\]main\.rs$)')
+                Invoke-Tool -Command (Join-Path $PSHOME 'pwsh.exe') -Arguments @('-NoProfile', '-File', 'ci/coverage.ps1', '-Target', $target)
             }
         }
     }

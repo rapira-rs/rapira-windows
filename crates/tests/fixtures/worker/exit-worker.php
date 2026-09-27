@@ -1,5 +1,5 @@
 <?php
-// exit() in a handler finishes the response. The worker loop and its state remain active.
+// exit() inside a handler finishes that response and keeps the resident loop and its state alive: it is not a recycle.
 $n = 0;
 $handler = static function () use (&$n): void {
     $n++;

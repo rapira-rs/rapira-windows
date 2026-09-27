@@ -7,7 +7,7 @@ $handler = static function (): void {
 	Counter::$n++;
 	if (($_GET['boom'] ?? '') === '1') {
 		register_shutdown_function(static function (): void {
-			trigger_error('shutdown bomb', E_USER_ERROR); // php_call_shutdown_functions contains the error with zend_try.
+			trigger_error('shutdown bomb', E_USER_ERROR); // absorbed by php_call_shutdown_functions' zend_try
 		});
 	}
 	header('Content-Type: text/plain');

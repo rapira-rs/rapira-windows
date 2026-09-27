@@ -6,7 +6,7 @@ $handler = static function (): void {
 	}
 	if (($_GET['boom'] ?? '') === '1') {
 		ini_set('display_errors', '0');
-		// An invalid encoding causes a warning. A non-string argument causes an exception.
+		// a bogus encoding only warns; a non-string arg throws
 		iconv('UTF-8', 'UTF-8', []);
 		return;
 	}

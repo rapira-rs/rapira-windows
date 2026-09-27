@@ -1,5 +1,5 @@
 <?php
-// The Fiber dispatcher completes each exchange before it receives the next request.
+// Asynchronous dispatcher: a fiber per request; tryReceive() polls while fibers are in flight, and a blocking receive() parks the loop once none are left.
 
 use Rapira\Exception\ClosedException;
 use Rapira\Exception\RapiraThrowable;
@@ -44,7 +44,7 @@ $serve = static function (Exchange $ex): void {
             $ex->writeBody($body);
         }
     } catch (RapiraThrowable) {
-        // The host closed the exchange. Do not send a response.
+        // The http plugin closed the exchange first - nothing to answer.
     } catch (PageNotFound $e) {
         try {
             $ex->writeHead(404, ['content-type' => ['text/plain']]);
@@ -62,15 +62,37 @@ $serve = static function (Exchange $ex): void {
 
 $d = \Rapira\get_dispatcher();
 
+$fibers = [];
+$max = 100;
+
 try {
     while (true) {
-        $fiber = new Fiber($serve);
-        $fiber->start($d->receive());
+        $ex = match (count($fibers)) {
+            $max => null,
+            0 => $d->receive(),
+            default => $d->tryReceive(),
+        };
 
-        while (!$fiber->isTerminated()) {
+        if ($ex !== null) {
+            $fiber = new Fiber($serve);
+            $fiber->start($ex);
+            $fiber->isTerminated() or $fibers[] = $fiber;
+        }
+
+        foreach ($fibers as $i => $fiber) {
             $fiber->resume();
+            if ($fiber->isTerminated()) {
+                unset($fibers[$i]);
+            }
         }
     }
 } catch (ClosedException) {
-    // The dispatcher is drained. No more work will arrive.
+    do {
+        foreach ($fibers as $i => $fiber) {
+            $fiber->resume();
+            if ($fiber->isTerminated()) {
+                unset($fibers[$i]);
+            }
+        }
+    } while (count($fibers) > 0);
 }

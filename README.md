@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/rapira-rs/rapira-windows/actions/workflows/ci.yml/badge.svg)](https://github.com/rapira-rs/rapira-windows/actions/workflows/ci.yml) [![codecov](https://codecov.io/gh/rapira-rs/rapira-windows/graph/badge.svg)](https://app.codecov.io/gh/rapira-rs/rapira-windows) [![Release](https://img.shields.io/github/v/release/rapira-rs/rapira-windows)](https://github.com/rapira-rs/rapira-windows/releases)
 
-This repository provides the Windows build of [Rapira](https://github.com/rapira-rs/rapira). See the [Rapira documentation](https://rapira.rs/docs/intro/) for shared behavior, modes, configuration, and PHP APIs. This README lists the Windows differences.
+This repository provides the Windows build of [Rapira](https://github.com/rapira-rs/rapira). It serves HTTP and unary gRPC, gRPC-Web, and Connect through embedded PHP. See [UPSTREAM.md](UPSTREAM.md) for the pinned core and contract revisions.
 
 ## Platform and release packages
 
@@ -17,16 +17,22 @@ This repository provides the Windows build of [Rapira](https://github.com/rapira
 
 Download the archive for your PHP minor and architecture from [GitHub Releases](https://github.com/rapira-rs/rapira-windows/releases). Extract the archive. Run `rapira.exe` from that directory.
 
+```powershell
+.\rapira.exe serve C:\app\rapira.toml
+```
+
+See [examples/rapira.toml](examples/rapira.toml) for HTTP and gRPC pool configuration. HTTP supports classic, worker, and dispatcher modes. gRPC supports dispatcher mode.
+
 ## Process model and control
 
-- Rapira starts one server process with a static pool of PHP interpreter threads.
+- Rapira starts one process. Each plugin has a fixed pool of PHP interpreter threads and its own work queue.
 - MINIT runs once before the interpreter threads start.
-- `pool.processes` and `--processes` set the interpreter thread count.
+- `<plugin>.pool.processes` sets the interpreter thread count for that plugin.
 - The Windows build supports only a static pool. It rejects the main build's scaling settings. It does not support reload or status requests.
-- `pool.max_requests` rebuilds an interpreter on the same thread.
+- `<plugin>.pool.max_requests` recycles an interpreter after a request quota with jitter.
 - `getmypid()` returns the same process ID in every interpreter.
 - A native crash in one interpreter thread stops the server process.
-- `--listen` and `http.listen` accept TCP addresses. They do not accept Unix socket paths.
+- `http.listen` and `grpc.listen` accept TCP addresses.
 - The first Ctrl+C or Ctrl+Break event drains active work. A second event forces exit code 130.
 - Closing the console window does not start a drain.
 - A forced exit can leave the pidfile. Remove a stale pidfile before the next start.

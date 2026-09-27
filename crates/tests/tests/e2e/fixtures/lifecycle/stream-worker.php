@@ -1,6 +1,6 @@
 <?php
 
-// Select each test with the request target because dispatcher mode has no superglobals.
+// Probe toggles ride on the request target: this mode has no superglobals.
 
 use Rapira\Exception\ClosedException;
 use Rapira\Exception\WorkDiscardedException;
@@ -51,7 +51,7 @@ try {
 		}
 		if ($probe === "discard") {
 			$ex->writeHead(200);
-			$ex->flush(); // The test reads these response headers and then disconnects.
+			$ex->flush(); // the test reads this head, then walks away
 			usleep(300_000);
 			try {
 				$ex->writeBody("x", eos: false);

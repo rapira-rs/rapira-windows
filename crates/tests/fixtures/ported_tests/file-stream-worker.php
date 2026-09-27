@@ -5,7 +5,7 @@ $fileStream = fopen($path, 'r');
 $input = fopen('php://input', 'r');
 $handler = static function () use ($fileStream, $input): void {
 	echo fread($fileStream, 5);
-	stream_is_local($input); // A stream handle from before the request loop would add a warning to the body.
+	stream_is_local($input); // a dangling pre-loop handle would warn into the body
 };
 while (\Rapira\handle_request($handler)) {
 	gc_collect_cycles();

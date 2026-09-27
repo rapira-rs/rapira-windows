@@ -1,153 +1,190 @@
+use std::convert::Infallible;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use anyhow::anyhow;
-use extension_api::{Addr, ListenAddr, Php, PreparedListener, Result};
+use anyhow::{Result, anyhow};
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
-use tokio::net::TcpListener;
-use tokio::sync::watch::{self, channel};
+use rapira_net::{Acceptor, ListenAddr, PreparedListener, Serve};
+use rapira_sapi::Addr;
+use rapira_sapi::plugin::Worker;
+use rapira_sapi::work::Intake;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::watch::{Sender, channel};
 
-use crate::Config;
-use crate::handler::{RapiraService, Shared};
+use crate::bridge::ConnectionState;
+use crate::handler::{Conn, Shared, respond};
+use crate::{Config, Exchange, multipart};
 
-pub(crate) async fn serve(
-    php: Php,
-    config: Config,
-    prepared: PreparedListener,
-    mut shutdown: watch::Receiver<bool>,
-) -> Result<()> {
-    let listener = TcpListener::from_std(prepared.into_listener())?;
-    match &config.listen {
-        ListenAddr::Tcp(a) => tracing::info!(target: "http", "listening on http://{a}"),
-    }
+/// Everything the accept loop hands to a connection, and the drain that follows it.
+struct Serving {
+    shared: Arc<Shared>,
+    graceful: GracefulShutdown,
+    builder: http1::Builder,
+}
 
-    let chain: Arc<[_]> = config.middleware.clone().into();
-    let cfg = Arc::new(config);
-    let inflight: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
-    let shared = Arc::new(Shared {
-        cfg: Arc::clone(&cfg),
-        php,
-        chain,
-        inflight: Arc::clone(&inflight),
-    });
-    let graceful = GracefulShutdown::new();
-
-    let mut builder = http1::Builder::new();
-    builder
-        .timer(TokioTimer::new())
-        .header_read_timeout(cfg.keepalive_timeout)
-        .preserve_header_case(false)
-        .half_close(false)
-        .keep_alive(true);
-
-    let mut fatal: Option<anyhow::Error> = None;
-    loop {
-        tokio::select! {
-            biased;
-            _ = shutdown.wait_for(|stop| *stop) => break,
-            res = accept_connection(&listener, &cfg.listen, &builder, &graceful, &shared) => match res {
-                Ok(()) => {}
-                Err(e) if is_fatal_accept(&e) => {
-                    fatal = Some(anyhow!("listener failed: {e}"));
-                    break;
-                }
-                Err(e) if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::ConnectionAborted
-                        | std::io::ErrorKind::ConnectionReset
-                        | std::io::ErrorKind::Interrupted
-                ) => {
-                    tracing::debug!(target: "http", "accept skipped: {e}");
-                }
-                Err(e) => {
-                    tracing::warn!(target: "http", "accept failed: {e}");
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-            }
+impl Serving {
+    fn start(
+        intake: Intake<Exchange>,
+        uploads: Option<Arc<multipart::Limits>>,
+        config: Config,
+    ) -> Self {
+        match &config.listen {
+            ListenAddr::Tcp(a) => tracing::info!(target: "http", "listening on http://{a}"),
+        }
+        let shared = Arc::new(Shared {
+            cfg: config,
+            intake,
+            uploads,
+            inflight: Arc::new(AtomicUsize::new(0)),
+        });
+        let mut builder = http1::Builder::new();
+        builder
+            .timer(TokioTimer::new())
+            .header_read_timeout(shared.cfg.keepalive_timeout);
+        Self {
+            shared,
+            graceful: GracefulShutdown::new(),
+            builder,
         }
     }
 
-    drop(listener);
-    let deadline = tokio::time::Instant::now() + cfg.drain_grace;
-    if tokio::time::timeout_at(deadline, graceful.shutdown())
-        .await
-        .is_err()
+    fn spawn_conn<S>(&self, stream: S, remote: Addr, server: Addr)
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        tracing::warn!(
-            target: "http",
-            "graceful connection shutdown did not finish within {:?}",
-            cfg.drain_grace
+        let (closed_tx, closed_rx) = channel(ConnectionState::default());
+        let handler = Conn::new(Arc::clone(&self.shared), remote, server, closed_rx);
+        let io = crate::bridge::TimedIo::new(
+            TokioIo::new(stream),
+            self.shared.cfg.write_timeout,
+            closed_tx.clone(),
         );
+        spawn_connection(&self.builder, &self.graceful, io, handler, closed_tx);
     }
-    while inflight.load(Ordering::Acquire) > 0 && tokio::time::Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    let stranded = inflight.load(Ordering::Acquire);
-    if let Some(e) = fatal {
-        if stranded > 0 {
+
+    /// Waits out the connections in flight. The acceptor is already gone.
+    async fn drain(self, fatal: Option<anyhow::Error>, grace: Duration) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + grace;
+        if tokio::time::timeout_at(deadline, self.graceful.shutdown())
+            .await
+            .is_err()
+        {
             tracing::warn!(
                 target: "http",
-                "{stranded} request(s) still in flight when the listener failed"
+                "graceful connection shutdown did not finish within {grace:?}"
             );
         }
-        return Err(e);
+        while self.shared.inflight.load(Ordering::Acquire) > 0
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let stranded = self.shared.inflight.load(Ordering::Acquire);
+        if let Some(e) = fatal {
+            if stranded > 0 {
+                tracing::warn!(
+                    target: "http",
+                    "{stranded} request(s) still in flight when the listener failed"
+                );
+            }
+            return Err(e);
+        }
+        if stranded > 0 {
+            return Err(anyhow!(
+                "http drain timed out after {grace:?} with {stranded} request(s) in flight; \
+                 their responses were cut short"
+            ));
+        }
+        tracing::info!(target: "http", "drained cleanly; accept loop stopped");
+        Ok(())
     }
-    if stranded > 0 {
-        return Err(anyhow!(
-            "http drain timed out after {:?} with {stranded} request(s) in flight; \
-             their responses were cut short",
-            cfg.drain_grace
-        ));
-    }
-    tracing::info!(target: "http", "drained cleanly; accept loop stopped");
-    Ok(())
 }
 
-// WSAENOTSOCK, WSAEINVAL, and WSAEOPNOTSUPP identify a failed listener. Windows reports WSAENOTSOCK when a listener closes during accept.
-fn is_fatal_accept(e: &std::io::Error) -> bool {
-    matches!(e.raw_os_error(), Some(10038 | 10022 | 10045))
+impl Serve for Serving {
+    fn spawn_tcp(&self, stream: tokio::net::TcpStream, peer: std::net::SocketAddr) {
+        let server = stream
+            .local_addr()
+            .map(Addr::Inet)
+            .unwrap_or_else(|_| listen_addr(&self.shared.cfg.listen));
+        self.spawn_conn(stream, Addr::Inet(peer), server);
+    }
 }
 
-async fn accept_connection(
-    listener: &TcpListener,
-    listen: &ListenAddr,
+/// Serves one connection under `graceful` on its own task and marks `closed_tx` closed when it ends.
+pub(crate) fn spawn_connection<I>(
     builder: &http1::Builder,
     graceful: &GracefulShutdown,
-    shared: &Arc<Shared>,
-) -> std::io::Result<()> {
-    let (stream, peer) = listener.accept().await?;
-    let _ = stream.set_nodelay(true);
-    let ListenAddr::Tcp(configured_addr) = *listen;
-    let server = Addr::Inet(stream.local_addr().unwrap_or(configured_addr));
-    let (closed_tx, closed_rx) = channel(false);
-    let svc = RapiraService::new(Arc::clone(shared), Addr::Inet(peer), server, closed_rx);
-    let io = crate::bridge::TimedIo::new(TokioIo::new(stream), shared.cfg.write_timeout);
-    let connection = builder.serve_connection(io, svc);
-    let watched = graceful.watch(connection);
+    io: I,
+    handler: Arc<Conn>,
+    closed_tx: Sender<ConnectionState>,
+) where
+    I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+{
+    let chain = handler.chain();
+    // `BoxCloneService` polls and calls through `&mut`, so each request takes its own clone.
+    let service = hyper::service::service_fn(move |req| {
+        let handler = Arc::clone(&handler);
+        let chain = chain.clone();
+        async move { Ok::<_, Infallible>(respond(handler, chain, req).await) }
+    });
+    spawn_watched(
+        graceful.watch(builder.serve_connection(io, service)),
+        closed_tx,
+    );
+}
+
+fn spawn_watched(
+    watched: impl Future<Output = hyper::Result<()>> + Send + 'static,
+    closed_tx: Sender<ConnectionState>,
+) {
     tokio::spawn(async move {
         if let Err(e) = watched.await {
             tracing::debug!(target: "http", "connection ended with error: {e}");
         }
-        let _ = closed_tx.send(true);
+        closed_tx.send_modify(|s| s.closed = true);
     });
-    Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Runs the accept loop on the calling thread until the stop flag, then drains the connections.
+pub(crate) fn serve(
+    intake: Intake<Exchange>,
+    config: Config,
+    prepared: PreparedListener,
+    worker: Worker,
+) -> Result<()> {
+    let acceptor = Acceptor::adopt(prepared, worker.stop.clone(), &worker.handle)?;
+    // Each worker spools in its own dir under the configured one.
+    let uploads: Option<Arc<multipart::Limits>> = config
+        .uploads
+        .as_ref()
+        .map(|limits| {
+            anyhow::Ok(Arc::new(multipart::Limits {
+                dir: multipart::create_worker_spool_dir(&limits.dir)?,
+                ..limits.clone()
+            }))
+        })
+        .transpose()?;
+    let spool_dir: Option<PathBuf> = uploads.as_ref().map(|limits| limits.dir.clone());
+    let serving = Serving::start(intake, uploads, config);
+    let fatal = acceptor.run(&worker.handle, &serving);
+    let drained = worker
+        .handle
+        .block_on(serving.drain(fatal, worker.drain_grace));
+    // The dir goes when the plugin drain ends. A spooled file of an exchange that still runs past the drain is lost with it.
+    if let Some(dir) = &spool_dir
+        && let Err(e) = std::fs::remove_dir_all(dir)
+    {
+        tracing::warn!(target: "rapira", "removing spool dir {}: {e}", dir.display());
+    }
+    drained
+}
 
-    #[test]
-    fn fatal_accept_errors_identify_a_failed_listener() {
-        for code in [10038, 10022, 10045] {
-            assert!(is_fatal_accept(&std::io::Error::from_raw_os_error(code)));
-        }
-        for code in [10004, 10024, 10035, 10053, 10054] {
-            assert!(!is_fatal_accept(&std::io::Error::from_raw_os_error(code)));
-        }
-        assert!(!is_fatal_accept(&std::io::Error::other("accept failed")));
+fn listen_addr(listen: &ListenAddr) -> Addr {
+    match listen {
+        ListenAddr::Tcp(a) => Addr::Inet(*a),
     }
 }

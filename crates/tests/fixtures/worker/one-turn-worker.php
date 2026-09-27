@@ -1,5 +1,5 @@
 <?php
-// The script ends while the channel remains open. The cycle must return Recycle and start the worker again.
+// bounded worker: the script ends with the channel still open, so the cycle must classify Recycle and re-bootstrap.
 \Rapira\handle_request(static function (): void {
     echo 'once';
 });

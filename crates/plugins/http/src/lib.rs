@@ -1,139 +1,99 @@
-use std::sync::Arc;
-use std::thread::JoinHandle;
+use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::anyhow;
-use extension_api::{Extension, ListenAddr, Middleware, Php, PrepareCtx, PreparedListener, Result};
-use tokio::runtime::Builder;
-use tokio::sync::watch;
+use anyhow::{Result, anyhow};
+use rapira_net::{ListenAddr, PrepareCtx, PreparedListener};
+use rapira_sapi::plugin::{Mode, PhpPart, Plugin, Worker};
+use rapira_sapi::work::Intake;
+
+use exchange::Exchange;
 
 mod bridge;
 mod check;
+pub mod config;
+mod exchange;
 mod handler;
+pub mod middleware;
+pub mod multipart;
+mod php;
 mod request;
 mod response;
 mod serve;
 
+pub use php::PHP_PART;
+
 #[derive(Clone)]
-pub struct Config {
+pub(crate) struct Config {
     pub listen: ListenAddr,
     pub server_name: String,
     pub server_port: u16,
     pub max_body_size: usize,
     pub unsafe_field_names: UnsafeFieldNames,
     pub superglobals: bool,
+    pub entrypoint: String,
     pub write_timeout: Duration,
-    pub drain_grace: Duration,
     pub keepalive_timeout: Duration,
-    pub middleware: Vec<Arc<dyn Middleware>>,
+    /// `[http].middleware` in config order, the first listed outermost.
+    pub middleware: Vec<middleware::Layer>,
+    /// Multipart limits of a dispatcher pool; None in the other modes, which feed php-src's own rfc1867 through read_post. Each worker spools in its own dir under `dir`, which `serve` creates.
+    pub uploads: Option<multipart::Limits>,
+    /// sendFile() containment root.
+    pub sendfile_root: PathBuf,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The `HTTP_*` mapping rewrites `-` to `_` and PHP rewrites `.` to `_`, so `X_Forwarded_For` and `X.Forwarded.For` both land on `HTTP_X_FORWARDED_FOR`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum UnsafeFieldNames {
+    #[default]
     Drop,
     Reject,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            listen: ListenAddr::Tcp(std::net::SocketAddr::from(([127, 0, 0, 1], 8000))),
-            server_name: "localhost".to_owned(),
-            server_port: 8000,
-            max_body_size: 8 * 1024 * 1024,
-            unsafe_field_names: UnsafeFieldNames::Drop,
-            superglobals: true,
-            write_timeout: Duration::from_secs(30),
-            drain_grace: Duration::from_secs(25),
-            keepalive_timeout: Duration::from_secs(60),
-            middleware: Vec::new(),
-        }
-    }
 }
 
 pub struct Server {
     config: Config,
     prepared: Option<PreparedListener>,
-    shutdown: Option<watch::Sender<bool>>,
-    join: Option<tokio::task::JoinHandle<Result<()>>>,
 }
 
-impl Extension for Server {
-    type Config = Config;
-
-    fn init(config: Config) -> Self {
+impl Server {
+    pub(crate) fn init(config: Config) -> Self {
         Self {
             config,
             prepared: None,
-            shutdown: None,
-            join: None,
         }
     }
+}
 
-    fn name(&self) -> &str {
-        "rapira-http"
+impl Plugin for Server {
+    fn name(&self) -> &'static str {
+        "http"
+    }
+
+    fn modes(&self) -> &'static [Mode] {
+        &[Mode::Classic, Mode::Worker, Mode::Dispatcher]
+    }
+
+    fn php(&self) -> PhpPart {
+        PHP_PART
     }
 
     fn prepare(&mut self, ctx: &mut PrepareCtx) -> Result<()> {
-        let prepared = match &self.config.listen {
-            ListenAddr::Tcp(addr) => ctx.bind_tcp(*addr)?,
-        };
-        match prepared.addr() {
-            ListenAddr::Tcp(a) => tracing::info!(target: "http", "prepared listener on {a}"),
+        if let Some(uploads) = &self.config.uploads {
+            multipart::sweep_spool_dirs(&uploads.dir);
         }
+        let prepared = ctx.bind(&self.config.listen)?;
+        tracing::info!(target: "http", "prepared listener on {}", prepared.addr());
         self.prepared = Some(prepared);
         Ok(())
     }
 
-    async fn run(&mut self, php: Php) -> Result<()> {
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let config = self.config.clone();
-        let Some(prepared) = self.prepared.take() else {
+    fn serve(self: Box<Self>, worker: Worker) -> Result<()> {
+        let Self { config, prepared } = *self;
+        let Some(prepared) = prepared else {
             return Err(anyhow!("http listener was not prepared"));
         };
-
-        let thread = std::thread::Builder::new()
-            .name("rapira-http".into())
-            .spawn(move || {
-                let rt = Builder::new_multi_thread()
-                    .enable_all()
-                    .worker_threads(2)
-                    .thread_name("rapira-http-io")
-                    .build()
-                    .map_err(|e| anyhow!("building the http runtime: {e}"))?;
-                rt.block_on(serve::serve(php, config, prepared, shutdown_rx))
-            })?;
-
-        self.shutdown = Some(shutdown_tx);
-        let join = self
-            .join
-            .insert(tokio::task::spawn_blocking(move || join_thread(thread)));
-        let result = join
-            .await
-            .map_err(|e| anyhow!("http join task failed: {e}"));
-        self.join = None;
-        result?
+        php::set_sendfile_root(config.sendfile_root.clone());
+        let intake = Intake::new(worker.sink.clone());
+        serve::serve(intake, config, prepared, worker)
     }
-
-    async fn shutdown(&mut self) -> Result<()> {
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(true);
-        }
-        if let Some(join) = self.join.take() {
-            join.await
-                .map_err(|e| anyhow!("http join task failed: {e}"))??;
-        }
-        Ok(())
-    }
-}
-
-fn join_thread(thread: JoinHandle<Result<()>>) -> Result<()> {
-    thread.join().map_err(|payload| {
-        let msg = payload
-            .downcast_ref::<&str>()
-            .copied()
-            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-            .unwrap_or("unknown panic");
-        anyhow!("http server thread panicked: {msg}")
-    })?
 }

@@ -1,5 +1,5 @@
 <?php
-// A shutdown function that bootstrap registers runs once at the end of the cycle.
+// A boot-registered shutdown function runs once, at cycle end.
 $fired = 0;
 register_shutdown_function(static function () use (&$fired): void {
     $fired++;

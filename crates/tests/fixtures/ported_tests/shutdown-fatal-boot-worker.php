@@ -1,7 +1,7 @@
 <?php
-// A fatal error in a bootstrap shutdown function must let the worker exit correctly.
+// A fatal inside a boot shutdown function must leave the worker's exit path clean.
 register_shutdown_function(static function (): void {
-    trigger_error('boot shutdown bomb', E_USER_ERROR); // php_call_shutdown_functions contains the error with zend_try.
+    trigger_error('boot shutdown bomb', E_USER_ERROR); // absorbed by php_call_shutdown_functions' zend_try
 });
 $handler = static function (): void {
     echo 'ok';

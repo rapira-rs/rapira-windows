@@ -1,5 +1,5 @@
 <?php
-// A reference-counted object in a bootstrap global remains in the symbol table between jobs. Its destructor runs once at the end of the cycle.
+// A refcount-1 object in a bare boot global stays in the symbol table across jobs. Its destructor runs once, at cycle end.
 class Kernel
 {
     public int $calls = 0;

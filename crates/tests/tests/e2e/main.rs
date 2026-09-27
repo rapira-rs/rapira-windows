@@ -1,14 +1,36 @@
+mod app_logger;
+mod async_tests;
+mod basic_tests;
+mod classic;
 mod concurrency;
-mod examples;
+mod console;
+mod dispatcher;
+mod dispatcher_loop;
+mod extensions;
+mod failboot_worker_tests;
+mod general_tests;
+mod grpc;
+mod grpc_dispatcher;
+mod grpc_schema;
+mod grpc_server;
+mod grpc_values;
 mod harness;
+mod http_values;
+mod imap_tests;
 mod ini;
 mod lifecycle;
+mod listeners;
 mod logging;
+mod mode;
+mod multi_pool;
+mod observer_teardown_tests;
+mod observer_tests;
+mod php_ext_tests;
+mod plugin_tests;
+mod ported_tests;
+mod registry;
 mod static_files;
 mod streaming;
-mod timeout;
-
-#[test]
-fn a_console_control_event_reaches_the_child_process_group() {
-    harness::assert_console_delivery();
-}
+mod timeout_tests;
+mod windows_lifecycle;
+mod worker_mode;

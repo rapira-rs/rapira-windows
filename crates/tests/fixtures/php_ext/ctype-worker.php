@@ -6,7 +6,7 @@ $handler = static function (): void {
 	}
 	if (($_GET['boom'] ?? '') === '1') {
 		ini_set('display_errors', '0');
-		// ctype_* accepts mixed values. Only a missing argument throws an exception.
+		// ctype_* take mixed, so only a missing arg throws
 		ctype_digit();
 		return;
 	}

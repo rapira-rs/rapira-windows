@@ -1,6 +1,6 @@
 <?php
 
-// Select each test with the request target because dispatcher mode has no superglobals.
+// Probe toggles ride on the request target: this mode has no superglobals.
 
 use Rapira\Exception\ClosedException;
 use Rapira\Exception\WorkDiscardedException;
@@ -39,7 +39,7 @@ try {
             continue;
         }
         if ($probe === 'discard') {
-            \Rapira\log('discard-held'); // The test can drop the receiver while this code holds the unit.
+            \Rapira\log('discard-held'); // the unit is out; the test may drop the receiver
             usleep(200_000);
             try {
                 $ex->writeBody('into the void', eos: false);
@@ -62,11 +62,33 @@ try {
             $ex->sendFile($req->headers['x-path'][0] ?? '', 2, 3);
             continue;
         }
+        if ($probe === 'sendfile-range') {
+            $length = isset($q['length']) ? (int) $q['length'] : null;
+            try {
+                $ex->sendFile($req->headers['x-path'][0] ?? '', (int) ($q['offset'] ?? 0), $length);
+            } catch (FileNotSendableException) {
+                $ex->writeHead(403);
+                $ex->writeBody('denied');
+            }
+            continue;
+        }
+        if ($probe === 'sendfile-shrink') {
+            // The flushed head has no content-length, so the body is chunked and only a cut body lacks the last chunk.
+            // The marker tells the test that the file is cut.
+            $path = $req->headers['x-path'][0] ?? '';
+            $ex->flush();
+            $ex->sendFile($path);
+            $f = fopen($path, 'r+');
+            ftruncate($f, (int) ($q['to'] ?? 0));
+            fclose($f);
+            touch($path . '.shrunk');
+            continue;
+        }
         if ($probe === 'sendfile-missing') {
             try {
                 $ex->sendFile('/definitely/not/here');
             } catch (FileNotSendableException) {
-                // The exception occurs before a write, so the handler can return status 404.
+                // raised before anything was written: a 404 is still possible
                 $ex->writeHead(404);
                 $ex->writeBody('nope');
             }
@@ -111,7 +133,7 @@ try {
         }
         if ($probe === 'declared-cl') {
             $ex->writeHead(200, ['content-length' => ['10']]);
-            // The HTTP server permits this short body and closes the connection.
+            // under-run: legal here, the plugin closes the connection
             $ex->writeBody('abc');
             continue;
         }

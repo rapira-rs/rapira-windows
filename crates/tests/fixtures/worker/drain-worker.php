@@ -1,5 +1,5 @@
 <?php
-// handle_request() returns false when the host closes the input. The loop exits, and the script completes.
+// draining-false contract: the loop exits when the SAPI closes the intake, and the script still runs to completion.
 $served = 0;
 $handler = static function () use (&$served): void {
     $served++;

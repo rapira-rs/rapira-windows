@@ -1,5 +1,5 @@
 <?php
-// Bootstrap registers two shutdown functions, and code after the loop registers one. PHP runs the bootstrap functions first at the end of the cycle.
+// Two boot registrations, one post-loop registration: cycle end runs the boot entries first, then the late one.
 register_shutdown_function(static function (): void {
     \Rapira\log('sd boot-a');
 });

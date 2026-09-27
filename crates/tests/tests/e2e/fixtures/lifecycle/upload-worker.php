@@ -1,5 +1,5 @@
 <?php
-// Report the parsed upload. The response contains 'NO FILE' if the multipart boundary is invalid.
+// Reports the parsed upload, so a mangled multipart boundary shows up as 'NO FILE'.
 $handler = static function (): void {
     $f = $_FILES['file'] ?? null;
     if ($f === null) {

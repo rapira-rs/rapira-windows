@@ -1,3 +1,3 @@
 <?php
-// An uncaught exception occurs before the request loop. Each worker fails to start, and the generation 0 pool becomes unhealthy.
+// Uncaught exception before the request loop: the worker fails to boot every time and the gen-0 pool dies unhealthy.
 throw new RuntimeException('fatal-worker: intentional bootstrap failure');
