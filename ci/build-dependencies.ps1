@@ -1,16 +1,28 @@
-# Loaded by build-php.ps1. The PHP SDK has no ARM64 dependency packages.
+#Requires -Version 7.0
+param([Parameter(Mandatory)] [string] $InstallDirectory)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'build-common.ps1')
+
+# The PHP SDK has no ARM64 dependency packages.
 # https://downloads.php.net/~windows/php-sdk/deps/
 function Build-Arm64Dependencies {
-    param([Parameter(Mandatory)] [string] $Root)
+    param(
+        [Parameter(Mandatory)] [string] $Root,
+        [Parameter(Mandatory)] [string] $Sources
+    )
 
     function Run {
         param([string] $Command, [string[]] $Arguments)
         $executable = @(Get-Command $Command -CommandType Application)[0].Source
+        $timer = [Diagnostics.Stopwatch]::StartNew()
+        Write-Host "Running $Command $($Arguments -join ' ')"
         & $executable @Arguments
         if ($LASTEXITCODE) { throw "$Command failed with exit code $LASTEXITCODE." }
+        Write-Host "$Command completed in $([int]$timer.Elapsed.TotalSeconds) seconds."
     }
 
-    $sources = Join-Path (Split-Path $Root -Parent) 'dependency-source'
     $manifest = Get-Content (Join-Path $PSScriptRoot 'php-dependencies-arm64.json') -Raw | ConvertFrom-Json -AsHashtable
     foreach ($entry in $manifest.GetEnumerator()) {
         $archive = Join-Path $archiveDirectory "$($entry.Key)-$($entry.Value.sha256).tar"
@@ -59,7 +71,7 @@ function Build-Arm64Dependencies {
     Push-Location (Join-Path $sources 'perl\win32')
     try {
         Run nmake @('/nologo', 'CCTYPE=MSVC143', "INST_TOP=$perlInstall")
-        Run nmake @('/nologo', 'CCTYPE=MSVC143', "INST_TOP=$perlInstall", 'install')
+        Run nmake @('/nologo', 'CCTYPE=MSVC143', "INST_TOP=$perlInstall", 'installbare')
     } finally { Pop-Location }
     $env:PATH = "$perlInstall\bin;$env:PATH"
     Assert-PeMachine -Path (Get-Command perl.exe).Source -Expected 0xaa64
@@ -69,8 +81,10 @@ function Build-Arm64Dependencies {
     Copy-Item (Join-Path $Root 'lib\zs.lib') (Join-Path $Root 'lib\zlib.lib')
     Push-Location (Join-Path $sources 'openssl')
     try {
-        Run perl @('Configure', 'VC-WIN64-ARM', 'shared', 'no-tests', 'no-asm', "--prefix=$Root", '--libdir=lib')
-        Run nmake @('/nologo')
+        Replace-RequiredText (Join-Path $sources 'openssl\Configurations\windows-makefile.tmpl') `
+            '( platform->sharedlib_import($_), platform->staticlib($_) )' `
+            '( platform->sharedlib_import($_) // platform->staticlib($_) )' 'OpenSSL shared library selection'
+        Run perl @('Configure', 'VC-WIN64-ARM', 'shared', 'no-apps', 'no-docs', 'no-asm', "--prefix=$Root", '--libdir=lib')
         Run nmake @('/nologo', 'install_sw')
     } finally { Pop-Location }
 
@@ -154,6 +168,14 @@ function Build-Arm64Dependencies {
     } finally { Pop-Location }
 
     $icu = Join-Path $sources 'ICU'
+    $dataProject = Join-Path $icu 'source\data\makedata.vcxproj'
+    [xml]$project = Get-Content $dataProject -Raw
+    $testReferences = @($project.SelectNodes("//*[local-name()='ProjectReference']") |
+        Where-Object { $_.GetAttribute('Include').StartsWith('..\test\', [StringComparison]::Ordinal) })
+    foreach ($reference in $testReferences) {
+        $null = $reference.ParentNode.RemoveChild($reference)
+    }
+    $project.Save($dataProject)
     Msbuild (Join-Path $icu 'source\allinone\allinone.sln') @('/t:makedata')
     Copy-Item (Join-Path $icu 'binARM64\icu*.dll') (Join-Path $Root 'bin')
     Copy-Item (Join-Path $icu 'libARM64\icu*.lib') (Join-Path $Root 'lib')
@@ -173,3 +195,43 @@ function Build-Arm64Dependencies {
     }
     Copy-Item (Join-Path $PSScriptRoot 'php-dependencies-arm64.json') (Join-Path $Root 'share\sources.json')
 }
+
+$architecture = Get-Architecture
+if ($architecture.Name -ne 'arm64') {
+    throw 'Build the ARM64 dependencies on a native ARM64 host.'
+}
+$tempRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [IO.Path]::GetTempPath() }
+$InstallDirectory = Assert-ManagedPath -Path $InstallDirectory -Root $tempRoot -Name 'InstallDirectory'
+$inputs = @($PSCommandPath, (Join-Path $PSScriptRoot 'build-common.ps1'), (Join-Path $PSScriptRoot 'php-dependencies-arm64.json'))
+$fingerprint = ((Get-FileHash -LiteralPath $inputs -Algorithm SHA256).Hash -join '').ToLowerInvariant()
+$marker = Join-Path $InstallDirectory '.rapira-dependencies'
+if ((Test-Path $marker) -and (Get-Content $marker -Raw).Trim() -eq $fingerprint) {
+    Write-Host "Using cached ARM64 dependencies at '$InstallDirectory'."
+    return
+}
+
+Remove-ManagedDirectory -Path $InstallDirectory -Root $tempRoot
+New-Item -ItemType Directory $InstallDirectory -Force | Out-Null
+$nativeCmd = Get-NativeSystemExecutable -Name 'cmd.exe' -ExpectedMachine $architecture.PeMachine
+$nativeTar = Get-NativeSystemExecutable -Name 'tar.exe' -ExpectedMachine $architecture.PeMachine
+$vcVars = Find-VisualStudio
+$sourceRoot = Join-Path $tempRoot 'rapira-php-source'
+$archiveDirectory = Join-Path $sourceRoot 'archives'
+$workRoot = Join-Path $sourceRoot "work\dependencies-arm64-$([Guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory $archiveDirectory, $workRoot -Force | Out-Null
+$buildSucceeded = $false
+try {
+    Build-Arm64Dependencies -Root $InstallDirectory -Sources (Join-Path $workRoot 'source')
+    foreach ($dll in Get-ChildItem (Join-Path $InstallDirectory 'bin') -File -Filter '*.dll') {
+        Assert-PeMachine -Path $dll.FullName -Expected $architecture.PeMachine
+    }
+    $fingerprint | Set-Content $marker -Encoding ascii
+    $buildSucceeded = $true
+} finally {
+    if ($buildSucceeded) {
+        Remove-ManagedDirectory -Path $workRoot -Root $tempRoot
+    } else {
+        Write-Warning "Dependency build files remain at '$workRoot'."
+    }
+}
+Write-Host "Built ARM64 dependencies at '$InstallDirectory'."

@@ -30,6 +30,8 @@ $install = Join-Path $tempRoot "rapira-php-$($php.php_version)-$architecture"
 
 The PHP helper verifies source hashes, native tools and output binaries, ZTS headers, PHP identity, and required modules. It reuses a valid install at the same path. The profile is in `ci/php-configure-flags.txt`. x64 uses pinned PHP SDK dependencies. ARM64 builds its dependencies from pinned source with native tools, including a native Perl build. Pass `-Llvm` to `dev.ps1` when LLVM is outside `C:\Program Files\LLVM\bin`.
 
+ARM64 dependencies have a separate cache below the temporary directory. Both PHP versions use the same dependency profile. CI saves this cache before PHP compilation, so a PHP build failure retains the completed dependencies. The source manifest and dependency build scripts determine the cache key.
+
 ## Tests
 
 Run the workspace unit tests and the binary-driven end-to-end tests:
