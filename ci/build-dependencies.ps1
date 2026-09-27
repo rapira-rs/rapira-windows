@@ -5,7 +5,8 @@ function Build-Arm64Dependencies {
 
     function Run {
         param([string] $Command, [string[]] $Arguments)
-        & (Get-Command $Command -CommandType Application).Source @Arguments
+        $executable = @(Get-Command $Command -CommandType Application)[0].Source
+        & $executable @Arguments
         if ($LASTEXITCODE) { throw "$Command failed with exit code $LASTEXITCODE." }
     }
 
@@ -65,6 +66,7 @@ function Build-Arm64Dependencies {
 
     Cmake zlib @('-DZLIB_BUILD_SHARED=OFF', '-DZLIB_BUILD_TESTING=OFF')
     Copy-Item (Join-Path $Root 'lib\zs.lib') (Join-Path $Root 'lib\zlib_a.lib')
+    Copy-Item (Join-Path $Root 'lib\zs.lib') (Join-Path $Root 'lib\zlib.lib')
     Push-Location (Join-Path $sources 'openssl')
     try {
         Run perl @('Configure', 'VC-WIN64-ARM', 'shared', 'no-tests', 'no-asm', "--prefix=$Root", '--libdir=lib')
@@ -75,7 +77,7 @@ function Build-Arm64Dependencies {
     Cmake libonig @('-DBUILD_SHARED_LIBS=OFF', '-DBUILD_TEST=OFF', '-DINSTALL_DOCUMENTATION=OFF')
     Copy-Item (Join-Path $Root 'lib\onig.lib') (Join-Path $Root 'lib\onig_a.lib')
     Cmake libssh2 @('-DCRYPTO_BACKEND=OpenSSL', '-DBUILD_EXAMPLES=OFF', '-DBUILD_TESTING=OFF')
-    Cmake nghttp2 @('-DENABLE_LIB_ONLY=ON', '-DENABLE_STATIC_LIB=OFF', '-DBUILD_TESTING=OFF')
+    Cmake nghttp2 @('-DENABLE_LIB_ONLY=ON', '-DBUILD_STATIC_LIBS=OFF', '-DBUILD_TESTING=OFF')
     Cmake libcurl @('-DBUILD_CURL_EXE=OFF', '-DBUILD_TESTING=OFF', '-DCURL_USE_OPENSSL=ON',
         '-DCURL_USE_SCHANNEL=OFF', '-DCURL_USE_LIBSSH2=ON', '-DUSE_NGHTTP2=ON', '-DCURL_BROTLI=OFF', '-DCURL_ZSTD=OFF')
     Copy-Item (Join-Path $Root 'lib\libcurl_imp.lib') (Join-Path $Root 'lib\libcurl.lib')
@@ -93,7 +95,7 @@ function Build-Arm64Dependencies {
 
     Cmake libxml2 @('-DBUILD_SHARED_LIBS=OFF', '-DLIBXML2_WITH_PROGRAMS=OFF', '-DLIBXML2_WITH_TESTS=OFF',
         '-DLIBXML2_WITH_PYTHON=OFF', '-DLIBXML2_WITH_LZMA=OFF', '-DLIBXML2_WITH_LEGACY=ON', "-DIconv_LIBRARY=$Root\lib\libiconv_a.lib")
-    Copy-Item (Join-Path $Root 'lib\xml2.lib') (Join-Path $Root 'lib\libxml2_a.lib')
+    Copy-Item (Join-Path $Root 'lib\libxml2.lib') (Join-Path $Root 'lib\libxml2_a.lib')
 
     Push-Location (Join-Path $sources 'sqlite3')
     try {
