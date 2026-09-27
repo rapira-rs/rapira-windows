@@ -1,3 +1,15 @@
 # Both native builds require these shared extensions. The release includes each extension DLL that the build produces.
 fileinfo
 mbstring
+exif
+openssl
+curl
+sqlite3
+pdo_sqlite
+pgsql
+pdo_pgsql
+ffi
+gettext
+intl
+igbinary
+redis

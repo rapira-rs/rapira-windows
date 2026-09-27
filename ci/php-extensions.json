@@ -1,0 +1,10 @@
+{
+  "igbinary": {
+    "version": "3.2.17RC1",
+    "sha256": "91da821443db125282a6aea039f24588dd28ff5d71e8187f6ecc41165bceafbc"
+  },
+  "redis": {
+    "version": "6.3.0",
+    "sha256": "0d5141f634bd1db6c1ddcda053d25ecf2c4fc1c395430d534fd3f8d51dd7f0b5"
+  }
+}

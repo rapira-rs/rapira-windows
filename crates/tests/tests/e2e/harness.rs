@@ -242,14 +242,17 @@ fn spawn_attempt(
             "curl",
             "fileinfo",
             "mbstring",
+            "exif",
+            "ffi",
+            "gettext",
             "openssl",
             "pdo_sqlite",
             "sqlite3",
             "intl",
             "pdo_pgsql",
             "pgsql",
-            "redis",
             "igbinary",
+            "redis",
             "imap",
         ] {
             let dll = ext.join(format!("php_{name}.dll"));

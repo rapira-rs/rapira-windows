@@ -12,20 +12,34 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $requiredModules = @(
+    'bcmath',
     'calendar',
     'ctype',
     'exif',
     'fileinfo',
     'filter',
     'ftp',
+    'iconv',
+    'libxml',
     'mbstring',
+    'PDO',
+    'Phar',
+    'dom',
+    'SimpleXML',
+    'xml',
+    'xmlreader',
+    'xmlwriter',
+    'zlib',
     'session',
+    'shmop',
     'sockets',
     'tokenizer',
     'Zend OPcache'
 )
-$requiredExtensionModules = @('fileinfo', 'mbstring')
-$requiredExtensions = $requiredExtensionModules -join ','
+$requiredExtensionModules = @(Get-Content (Join-Path $PSScriptRoot 'windows-extensions.txt') |
+    ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -notmatch '^#' })
+$requiredModules += $requiredExtensionModules
+$requiredExtensions = (($requiredModules | ForEach-Object { $_.ToLowerInvariant().Replace('zend opcache', 'opcache') } | Sort-Object -Unique) -join ',')
 
 if ($PhpVersion -notmatch '^8\.(4|5)\.\d+$') {
     throw "Unsupported PHP version '$PhpVersion'; expected an exact 8.4.x or 8.5.x version."
@@ -184,7 +198,7 @@ function Get-VerifiedSource {
 
     if (Test-Path -LiteralPath $Path -PathType Leaf) {
         if (Test-FileHash -Path $Path -ExpectedSha256 $ExpectedSha256) {
-            Write-Host "Using verified PHP source archive '$Path'."
+            Write-Host "Using verified archive '$Path'."
             return
         }
         Remove-Item -LiteralPath $Path -Force
@@ -195,7 +209,7 @@ function Get-VerifiedSource {
         Invoke-WebRequest -Uri $Uri -OutFile $downloadPath -MaximumRetryCount 3 -RetryIntervalSec 2 | Out-Null
         if (-not (Test-FileHash -Path $downloadPath -ExpectedSha256 $ExpectedSha256)) {
             $actual = (Get-FileHash -LiteralPath $downloadPath -Algorithm SHA256).Hash.ToLowerInvariant()
-            throw "PHP source SHA256 mismatch: expected $ExpectedSha256, got $actual."
+            throw "Archive SHA256 mismatch: expected $ExpectedSha256, got $actual."
         }
         Move-Item -LiteralPath $downloadPath -Destination $Path
     }
@@ -406,8 +420,8 @@ function Assert-PhpInstall {
     }
     $modules = @($modulesResult.Stdout -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     foreach ($module in $requiredModules) {
-        if (-not ($modules -ccontains $module)) {
-            throw "The native PHP build is missing required module '$module'."
+        if (-not ($modules -contains $module)) {
+            throw "The native PHP build is missing required module '$module'.`n$($modulesResult.Stdout)`n$($modulesResult.Stderr)"
         }
     }
     foreach ($coverageDriver in @('xdebug', 'pcov')) {
@@ -505,7 +519,10 @@ else {
 $tempRoot = [IO.Path]::GetFullPath($tempRoot).TrimEnd('\', '/')
 $InstallDirectory = Assert-ManagedPath -Path $InstallDirectory -Root $tempRoot -Name 'InstallDirectory'
 $flagFile = Join-Path $PSScriptRoot 'php-configure-flags.txt'
-$buildScriptSha256 = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$buildInputs = @(Get-Item $PSCommandPath) + @(Get-ChildItem $PSScriptRoot -File |
+    Where-Object { $_.Name -like 'php-*' -or $_.Name -like '*dependencies*' -or $_.Name -eq 'windows-extensions.txt' } |
+    Sort-Object Name)
+$buildScriptSha256 = (($buildInputs | Get-FileHash -Algorithm SHA256).Hash -join '').ToLowerInvariant()
 $configureFlagsSha256 = (Get-FileHash -LiteralPath $flagFile -Algorithm SHA256).Hash.ToLowerInvariant()
 
 if (Test-Path -LiteralPath $InstallDirectory) {
@@ -539,6 +556,18 @@ New-Item -ItemType Directory -Path $extractRoot, $dependencyRoot, $stageRoot -Fo
 $buildSucceeded = $false
 
 try {
+    if ($architecture.Name -eq 'x86_64') {
+        $dependencies = Get-Content (Join-Path $PSScriptRoot 'php-dependencies-x64.json') -Raw | ConvertFrom-Json -AsHashtable
+        foreach ($entry in $dependencies.GetEnumerator()) {
+            $archive = Join-Path $archiveDirectory $entry.Key
+            Get-VerifiedSource -Uri "https://downloads.php.net/~windows/php-sdk/deps/vs17/x64/$($entry.Key)" -Path $archive -ExpectedSha256 $entry.Value
+            & $nativeTar -xf $archive -C $dependencyRoot
+            if ($LASTEXITCODE) { throw "Cannot extract $archive" }
+        }
+    } else {
+        . (Join-Path $PSScriptRoot 'build-dependencies.ps1')
+        Build-Arm64Dependencies -Root $dependencyRoot
+    }
     Write-Host "Extracting PHP $PhpVersion source with native $($architecture.Name) tar."
     & $nativeTar -xf $sourceArchive -C $extractRoot
     if ($LASTEXITCODE -ne 0) {
@@ -547,6 +576,18 @@ try {
     $sourceRoot = Join-Path $extractRoot "php-$PhpVersion"
     if (-not (Test-Path -LiteralPath $sourceRoot -PathType Container)) {
         throw "PHP source archive did not contain 'php-$PhpVersion'."
+    }
+
+    $extensions = Get-Content (Join-Path $PSScriptRoot 'php-extensions.json') -Raw | ConvertFrom-Json -AsHashtable
+    foreach ($entry in $extensions.GetEnumerator()) {
+        $stem = "$($entry.Key)-$($entry.Value.version)"
+        $archive = Join-Path $archiveDirectory "$stem.tgz"
+        Get-VerifiedSource -Uri "https://pecl.php.net/get/$stem.tgz" -Path $archive -ExpectedSha256 $entry.Value.sha256
+        $extensionRoot = Join-Path $workRoot $entry.Key
+        New-Item -ItemType Directory $extensionRoot | Out-Null
+        & $nativeTar -xf $archive -C $extensionRoot
+        if ($LASTEXITCODE) { throw "Cannot extract $archive" }
+        Move-Item (Join-Path $extensionRoot $stem) (Join-Path $sourceRoot "ext\$($entry.Key)")
     }
 
     $confUtils = Join-Path $sourceRoot 'win32\build\confutils.js'
@@ -704,8 +745,19 @@ try {
         $destination = if ($dll.Name -like 'php_*.dll') { $runtimeExtStage } else { $runtimeStage }
         Copy-Item -LiteralPath $dll.FullName -Destination $destination
     }
+    Get-ChildItem (Join-Path $dependencyRoot 'bin') -File -Filter '*.dll' | Copy-Item -Destination $runtimeStage
+    Copy-Item (Join-Path $dependencyRoot 'share') (Join-Path $stageRoot 'share') -Recurse
     Get-ChildItem -LiteralPath $develRoots[0].FullName -Force |
         Copy-Item -Destination $develStage -Recurse -Force
+    New-Item -ItemType Directory (Join-Path $develStage 'build') -Force | Out-Null
+    Copy-Item (Join-Path $sourceRoot 'build\gen_stub.php') (Join-Path $develStage 'build\gen_stub.php')
+    foreach ($name in $extensions.Keys) {
+        $licenses = Join-Path $stageRoot "share\licenses\$name"
+        New-Item -ItemType Directory $licenses -Force | Out-Null
+        Get-ChildItem (Join-Path $sourceRoot "ext\$name") -File |
+            Where-Object { $_.Name -match '^(COPYING|LICENSE)' } |
+            Copy-Item -Destination $licenses
+    }
     Copy-Item -LiteralPath (Join-Path $sourceRoot 'LICENSE') -Destination (Join-Path $stageRoot 'PHP-LICENSE.txt')
     [pscustomobject] @{
         php_version = $PhpVersion
