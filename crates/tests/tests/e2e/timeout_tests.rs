@@ -62,7 +62,7 @@ fn rearmed_budget_kills_a_spinning_unit() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Pins that the per-job re-arm with reset_signals=0 still delivers SIGRTMIN: a spin on a later job in the same cycle is killed, not left running.
+/// The per-job Windows timer interrupts a spin on a later job in the same interpreter cycle.
 #[test]
 fn max_execution_time_fires_on_rearmed_jobs() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("timeout_tests/timeout-worker.php"))

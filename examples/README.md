@@ -1,11 +1,11 @@
 # Examples
 
-One file per run mode - two for the dispatcher. Use an installed `rapira`, or build one with `cargo build` and take `target/debug/rapira`.
+Use an installed `rapira.exe`, or build one with `dev.ps1 -Task build`. Each file shows one HTTP mode. The dispatcher has synchronous and asynchronous examples.
 
 The shipped file runs `dispatcher-sync.php`. To run another example, set `http.pool.entrypoint` and `http.pool.mode` in `examples/rapira.toml` or in a copy of it:
 
-```sh
-rapira serve examples/rapira.toml
+```powershell
+.\rapira.exe serve examples\rapira.toml
 ```
 
 | Entrypoint             | Mode         | What it shows                                                            |
@@ -17,10 +17,10 @@ rapira serve examples/rapira.toml
 
 All of them listen on 127.0.0.1:8000 by default. Classic and worker answer any path; the dispatcher examples route:
 
-```sh
-curl http://127.0.0.1:8000/                # hello
-curl -d 'ping' http://127.0.0.1:8000/echo  # echoes the request body back
-curl http://127.0.0.1:8000/boom            # 500 from a handler failure
-curl http://127.0.0.1:8000/nope            # 404 for anything unrouted
-curl http://127.0.0.1:8000/stream          # chunked streaming
+```powershell
+curl.exe http://127.0.0.1:8000/                # hello
+curl.exe -d 'ping' http://127.0.0.1:8000/echo   # request body
+curl.exe http://127.0.0.1:8000/boom            # handler failure: 500
+curl.exe http://127.0.0.1:8000/nope            # unknown route: 404
+curl.exe http://127.0.0.1:8000/stream          # chunked streaming
 ```

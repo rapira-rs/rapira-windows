@@ -76,7 +76,7 @@ fn browscap_probe(srv: &Server, ua: &str) -> String {
     String::from_utf8_lossy(&body).into_owned()
 }
 
-/// The `browscap` ini is PHP_INI_SYSTEM: MINIT parses the file once into persistent memory, in the master before the fork.
+/// MINIT parses `browscap` once into persistent memory before the interpreter threads start.
 #[test]
 fn get_browser_uses_browscap_and_isolates_user_agent_requests() {
     let srv = spawn_with_phprc_and_config(
@@ -139,7 +139,7 @@ fn table_and_pid(body: &str) -> (String, String) {
     (table.to_owned(), pid.to_owned())
 }
 
-/// One MINIT parse in the master serves every worker: identical answers from distinct pids, request after request.
+/// One MINIT parse serves every interpreter with the same data on each request.
 #[test]
 fn browscap_table_is_shared_and_stable_across_workers() {
     let srv = spawn_with_phprc_and_config(

@@ -220,7 +220,7 @@ try {
         $localGenerator = Join-Path $stubgenDir 'gen_stub.php'
         Copy-Item -LiteralPath $generator -Destination $localGenerator -Force
         foreach ($stubFile in $stubFiles) {
-            Invoke-Tool -Command $phpExe -Arguments @($localGenerator, $stubFile.FullName)
+            Invoke-Tool -Command $phpExe -Arguments @('-n', $localGenerator, '--force-regeneration', $stubFile.FullName)
         }
     } elseif ($Task -eq 'clangd') {
         $clangCl = Join-Path $llvmDirectory 'clang-cl.exe'

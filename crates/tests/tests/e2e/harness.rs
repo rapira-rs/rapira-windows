@@ -47,7 +47,7 @@ impl Server {
         self.dir.join("server.log")
     }
 
-    /// Stops the master gracefully and waits for its exit, so the log holds the last record of every worker. The scratch dir stays until the drop.
+    /// Waits for clean shutdown and the final scoreboard records. Drop removes the scratch directory.
     pub fn stop(&mut self) {
         send_ctrl_break(self.pid());
         let status = self.wait_exit(STOP_BUDGET);
@@ -75,7 +75,7 @@ impl Server {
 }
 
 impl Drop for Server {
-    /// Signals and snapshots only while the master is unreaped: a reaped pid can be reused.
+    /// Sends a control event only while the server is alive. An exited PID can be reused.
     fn drop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
             send_ctrl_break(self.child.id());
@@ -176,7 +176,7 @@ fn tcp(port: u16) -> String {
     format!("127.0.0.1:{port}")
 }
 
-/// Spawns until a listener accepts a connection, on a fresh port each time: the port that `render` gets, or `unix` when no pool listens on TCP.
+/// Starts the server on a fresh port and waits for the selected listener.
 fn spawn_ready(
     dir: PathBuf,
     render: &dyn Fn(u16) -> String,
@@ -381,7 +381,7 @@ fn render_grpc(
     )
 }
 
-/// A master with only a `[grpc]` pool over the echo fixture; `addr` is the gRPC listener.
+/// A server with a gRPC echo pool. `addr` is the gRPC listener.
 pub fn spawn_grpc(processes: usize) -> Server {
     let dir = scratch_dir();
     stage_grpc(&dir);
@@ -400,8 +400,7 @@ pub fn spawn_grpc(processes: usize) -> Server {
     srv
 }
 
-/// A master with an `[http]` pool over `http_fixture` and a `[grpc]` pool over the echo fixture, one process each.
-/// Returns the master, whose `addr` is the gRPC listener, and the HTTP listener.
+/// Starts HTTP and gRPC pools with one interpreter each. Returns the server and the HTTP address.
 pub fn spawn_grpc_with_http(http_fixture: &str) -> (Server, SocketAddr) {
     let (dir, entrypoint) = stage_fixture(http_fixture);
     stage_grpc(&dir);
@@ -582,19 +581,19 @@ impl Spawn {
         self
     }
 
-    /// An environment variable of the master and its workers.
+    /// An environment variable of the server.
     pub fn env(mut self, key: &str, value: &str) -> Spawn {
         self.env.push((key.to_owned(), value.to_owned()));
         self
     }
 
-    /// The RUST_LOG filter of the master and its workers; `info` when not set.
+    /// The server's RUST_LOG filter. Defaults to `info`.
     pub fn rust_log(mut self, filter: &str) -> Spawn {
         filter.clone_into(&mut self.rust_log);
         self
     }
 
-    /// Spawns the master and returns when its first listener accepts a connection.
+    /// Starts the server and waits for its first listener.
     pub fn spawn(self) -> Server {
         let grpc_port = Cell::new(0);
         let (dir, render) = self.stage(&grpc_port);
@@ -628,7 +627,7 @@ impl Spawn {
             .find_map(Option::as_ref)
     }
 
-    /// Spawns a master that must fail its boot: returns the exit status with the whole log.
+    /// Starts a server that must fail at boot. Returns its exit status and full log.
     pub fn boot_failure(self) -> (ExitStatus, String) {
         let grpc_port = Cell::new(0);
         let (dir, render) = self.stage(&grpc_port);
@@ -732,7 +731,7 @@ fn stage_dir(dir: &Path, sub: &str, fixture: &Path) -> String {
     format!("{sub}/{name}")
 }
 
-/// Connect-only readiness: the master binds the listen socket before forking, so a successful connect means it booted far enough to serve.
+/// Waits for the prepared listener to accept a connection.
 fn wait_for_listener(listen: &ListenAddr, child: &mut Child, timeout: Duration) -> bool {
     let end = Instant::now() + timeout;
     while Instant::now() < end {
@@ -1194,7 +1193,7 @@ pub fn calls(srv: &Server) -> Vec<Value> {
         .collect()
 }
 
-/// The `remote` that PHP reports for a client at `peer`. `Conn::open` connects from an unnamed unix socket, which PHP reports as `unix:NULL`.
+/// The remote TCP address that PHP reports for a client at `peer`.
 pub fn logged_remote(peer: &Addr) -> String {
     match peer {
         Addr::Inet(addr) => addr.to_string(),

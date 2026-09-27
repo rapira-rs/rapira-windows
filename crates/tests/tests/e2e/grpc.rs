@@ -149,7 +149,7 @@ fn grpc_pool_serves_from_rapira_toml() {
             reply: r#"{"status":"SERVING"}"#,
         },
         Case {
-            name: "a forked worker reads the services that prepare set",
+            name: "an interpreter reads the services that prepare set",
             path: ECHO,
             body: r#"{"text":"services"}"#,
             reply: r#"{"text":"rapira.test.v1.EchoService:3,rapira.test.v1.OtherService:1"}"#,
@@ -192,9 +192,9 @@ fn http_and_grpc_pools_run_side_by_side() {
     );
 }
 
-/// The master loads the schema before the fork. `main` returns the error, so the process exits 1.
+/// The host loads the schema before PHP starts. A schema error exits with code 1.
 #[test]
-fn grpc_boot_fails_before_the_fork() {
+fn grpc_boot_fails_before_php_starts() {
     struct Case {
         name: &'static str,
         descriptor_set: &'static str,
@@ -222,9 +222,9 @@ fn grpc_boot_fails_before_the_fork() {
     }
 }
 
-/// SIGQUIT is a graceful stop: the worker finishes the call it holds, then the master exits clean.
+/// Ctrl+Break lets the interpreter finish its call before the server exits.
 #[test]
-fn sigquit_drains_an_in_flight_grpc_call() {
+fn ctrl_break_drains_an_in_flight_grpc_call() {
     let mut srv = spawn_grpc(1);
     let addr = srv.addr;
     let call = std::thread::spawn(move || connect_json(addr, ECHO, r#"{"text":"slow-ok"}"#));

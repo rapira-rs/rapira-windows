@@ -75,7 +75,7 @@ protoc --include_imports --descriptor_set_out=api.binpb -I proto proto/billing/v
 
 `buf build` includes the imported files by default. `protoc` includes them only with `--include_imports`.
 
-By default, the pool serves the services of the files that no other file of the set imports, in descriptor order. A file that another file imports is a dependency, for example `google/longrunning/operations.proto`, so its services are not served. The plugin answers `grpc.health.v1.Health` and the reflection services itself, so the pool never serves them. `services` sets the list of fully qualified names, for example `["billing.v1.InvoiceService"]`. Use it when several rapira instances share one set, or to serve a service of an imported file. The master loads the set before the fork, so each of these fails the boot once, with exit code 1:
+By default, the pool serves services from files that no other file in the set imports. It uses descriptor order. The plugin handles health and reflection itself. Set `services` to select fully qualified names, such as `["billing.v1.InvoiceService"]`. The host loads the set before PHP starts. Each of these errors stops boot with exit code 1:
 
 - a set that rapira cannot read or decode;
 - a set without its imports, for example with `unresolved type name ".google.protobuf.Timestamp"`;
@@ -138,7 +138,7 @@ The listener sends an HTTP/2 keepalive PING to a connection that sends no reques
 - One interpreter serves one call at a time. Concurrent calls share the pool queue, including calls on one HTTP/2 connection.
 - The message size limit is 4 MiB, and no key changes it. A larger request answers RESOURCE_EXHAUSTED.
 - The listener does not terminate TLS. `Context::$tls` is always null. Put a TLS proxy between the clients and the listener when clients need TLS.
-- The JSON decoder has no element memory limit. A 4 MiB JSON request with many small elements can use several hundred MiB of memory for repeated or map fields, and more than 1 GiB of memory and more than 1 s of CPU for `Struct` or `ListValue` fields, in the worker process. The 4 MiB limit applies after decompression, so a proxy between untrusted clients and the listener must limit the decompressed request size.
+- The JSON decoder has no element memory limit. A 4 MiB JSON request with many small elements can use several hundred MiB of memory for repeated or map fields. `Struct` or `ListValue` fields can use more than 1 GiB of memory and more than 1 s of CPU in the server process. The 4 MiB limit applies after decompression. A proxy must limit the decompressed request size.
 - A JSON reply decodes the payload of each `google.protobuf.Any` again, under the default element memory limit of buffa (32 MiB). This limit holds about 524,000 repeated elements or 381,000 map entries in one payload. A larger payload answers INTERNAL to a JSON client, and the log names the limit. A proto client is not affected.
 
 ## Config

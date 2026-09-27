@@ -10,6 +10,33 @@ use super::harness::{
 const T: Duration = Duration::from_secs(10);
 const DRAINING: &str = "shutdown requested; draining plugins";
 
+#[test]
+fn servers_have_separate_opcode_caches() {
+    let target = fixture("opcache_isolation/target.php");
+    let spawn = || {
+        Spawn::http(Mode::Worker, fixture("opcache_isolation/worker.php"))
+            .php_ini("opcache.file_update_protection=0")
+            .env("RAPIRA_CACHE_FILE", target.to_str().unwrap())
+            .spawn()
+    };
+    let first = spawn();
+    let response = http_get(first.addr, "/compile", T).unwrap();
+    if response.1 == b"skip" {
+        tests::assert_skip_allowed("opcache");
+        return;
+    }
+    assert_eq!(response, (200, b"cached".to_vec()));
+    let second = spawn();
+    assert_eq!(
+        http_get(second.addr, "/", T).unwrap(),
+        (200, b"missing".to_vec())
+    );
+    assert_eq!(
+        http_get(first.addr, "/", T).unwrap(),
+        (200, b"cached".to_vec())
+    );
+}
+
 fn server(budget: u64) -> super::harness::Server {
     Spawn::http(Mode::Worker, fixture("windows_lifecycle/http.php"))
         .toml(&format!(

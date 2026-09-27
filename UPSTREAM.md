@@ -19,6 +19,7 @@ The source follows the core plugin architecture and its final binary-driven test
 
 - One process initializes ZTS PHP once. Each plugin has a fixed interpreter thread pool and a bounded work queue. The `processes` key sets its thread count.
 - The interpreter keeps its mode, entrypoint, dispatcher, virtual working directory, timer, and request state in thread-local storage. Interpreter recycling retains the pool size.
+- The default OPcache cache ID is unique to the server process. All its interpreters share the cache.
 - The boot thread runs module teardown after all interpreters stop. A shutdown timer covers plugin drain, interpreter teardown, and module teardown with one deadline.
 - Ctrl+C or Ctrl+Break starts shutdown. A second control event forces exit. `TerminateProcess` handles forced exit while PHP threads can still be active.
 - A locked pidfile identifies the process. Clean shutdown removes it. Forced termination can leave it on disk.

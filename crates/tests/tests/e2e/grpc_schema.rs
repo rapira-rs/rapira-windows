@@ -76,7 +76,7 @@ fn services_report_every_configured_method() {
     );
 }
 
-/// The master loads the schema before the fork, and `main` returns the error, so the process exits 1.
+/// The host loads the schema before PHP starts. A schema error exits with code 1.
 #[test]
 fn load_rejects_a_set_it_cannot_serve() {
     struct Case {

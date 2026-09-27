@@ -7,7 +7,14 @@ use std::{
 
 /// Runs before php.ini is parsed (main/php_ini.c:420) so an explicit user value still wins; startup-stage interned strings are permanent, so config_zval_dtor's release is a no-op.
 unsafe extern "C" fn ini_defaults(configuration_hash: *mut HashTable) {
-    for (name, value) in [(c"display_errors", c"0"), (c"log_errors", c"1")] {
+    // Separate processes can load PHP at different addresses. Their opcode caches cannot be shared.
+    // https://www.php.net/manual/en/opcache.configuration.php#ini.opcache.cache-id
+    let cache_id = std::ffi::CString::new(format!("rapira-{}", std::process::id())).unwrap();
+    for (name, value) in [
+        (c"display_errors", c"0"),
+        (c"log_errors", c"1"),
+        (c"opcache.cache_id", cache_id.as_c_str()),
+    ] {
         unsafe {
             let intern = zend_string_init_interned.expect("set by zend_startup");
             let mut v: zval = std::mem::zeroed();

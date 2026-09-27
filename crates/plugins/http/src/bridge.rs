@@ -241,6 +241,8 @@ pub(crate) struct TimedIo<T> {
     io: T,
     timeout: Duration,
     deadline: Option<Pin<Box<tokio::time::Sleep>>>,
+    // Hyper can flush between shutdown polls. A flush must not restart this deadline.
+    close_deadline: Option<Pin<Box<tokio::time::Sleep>>>,
     state: watch::Sender<ConnectionState>,
 }
 
@@ -250,6 +252,7 @@ impl<T> TimedIo<T> {
             io,
             timeout,
             deadline: None,
+            close_deadline: None,
             state,
         }
     }
@@ -296,7 +299,7 @@ impl<T: hyper::rt::Read + Unpin> hyper::rt::Read for TimedIo<T> {
     }
 }
 
-impl<T: hyper::rt::Write + Unpin> hyper::rt::Write for TimedIo<T> {
+impl<T: hyper::rt::Read + hyper::rt::Write + Unpin> hyper::rt::Write for TimedIo<T> {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -322,7 +325,31 @@ impl<T: hyper::rt::Write + Unpin> hyper::rt::Write for TimedIo<T> {
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.io).poll_shutdown(cx)
+        // Read after the send-side shutdown so an unread upload cannot reset the response. Bound this wait to one second.
+        // https://learn.microsoft.com/en-us/windows/win32/winsock/graceful-shutdown-linger-options-and-socket-closure-2
+        if self.close_deadline.is_none() {
+            std::task::ready!(Pin::new(&mut self.io).poll_shutdown(cx))?;
+            self.close_deadline = Some(Box::pin(tokio::time::sleep(Duration::from_secs(1))));
+        }
+        if self
+            .close_deadline
+            .as_mut()
+            .unwrap()
+            .as_mut()
+            .poll(cx)
+            .is_ready()
+        {
+            return Poll::Ready(Ok(()));
+        }
+        let mut bytes = [0; 8192];
+        let mut buf = hyper::rt::ReadBuf::new(&mut bytes);
+        std::task::ready!(Pin::new(&mut self.io).poll_read(cx, buf.unfilled()))?;
+        if buf.filled().is_empty() {
+            Poll::Ready(Ok(()))
+        } else {
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
     }
 
     fn is_write_vectored(&self) -> bool {
@@ -483,6 +510,15 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn stalled_write_times_out_and_errors_the_connection() {
         struct Stuck;
+        impl hyper::rt::Read for Stuck {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+                _buf: hyper::rt::ReadBufCursor<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                Poll::Pending
+            }
+        }
         impl hyper::rt::Write for Stuck {
             fn poll_write(
                 self: Pin<&mut Self>,

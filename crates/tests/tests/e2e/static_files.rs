@@ -482,9 +482,7 @@ fn the_forbid_list_decides_which_sources_reach_php() {
     }
 }
 
-/// Each check deletes or rewrites the file after the first request, so only the cache can
-/// give the old answer. The cache belongs to the one worker process. The entries go stale
-/// after one second, so one wait covers every check that needs a stale entry.
+/// Each check deletes or rewrites a file after the first request. The HTTP plugin shares one cache. Entries expire after one second, so one wait covers all checks.
 #[test]
 fn cached_entries_answer_until_they_go_stale() {
     let big = "x".repeat(262_145);

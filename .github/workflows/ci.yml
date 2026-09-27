@@ -97,6 +97,11 @@ jobs:
         run: ./dev.ps1 -Task test -Devel $env:PHP_DEVEL_DIR -Runtime $env:PHP_RUNTIME
       - name: End-to-end tests
         run: ./dev.ps1 -Task test_e2e -Devel $env:PHP_DEVEL_DIR -Runtime $env:PHP_RUNTIME
+      - name: Release bundle
+        run: |
+          ./dev.ps1 -Task build -Release -Devel $env:PHP_DEVEL_DIR -Runtime $env:PHP_RUNTIME
+          $target = if ('${{ matrix.arch }}' -eq 'arm64') { 'aarch64-pc-windows-msvc' } else { 'x86_64-pc-windows-msvc' }
+          ./ci/package.ps1 -Binary "target\$target\release\rapira.exe" -PhpInstall $env:PHP_INSTALL_DIR -Destination "$env:RUNNER_TEMP\bundle"
 
   coverage:
     needs: prepare
@@ -107,15 +112,22 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
-      - name: Provision PHP 8.5
+      - name: Set PHP install path
+        run: |
+          "PHP_INSTALL_DIR=$env:RUNNER_TEMP\php-x86_64\${{ fromJSON(needs.prepare.outputs.php85).php_version }}" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Restore native PHP
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.PHP_INSTALL_DIR }}
+          key: ${{ fromJSON(needs.prepare.outputs.php85).source_cache_key }}-x86_64-${{ hashFiles('ci/build-php.ps1', 'ci/php-*', 'ci/*dependencies*', 'ci/windows-extensions.txt') }}
+      - name: Build native PHP 8.5
         shell: pwsh
         run: |
-          ./ci/provision-php.ps1 `
+          ./ci/build-php.ps1 `
             -PhpVersion '${{ fromJSON(needs.prepare.outputs.php85).php_version }}' `
-            -DevelUrl '${{ fromJSON(needs.prepare.outputs.php85).devel_url }}' `
-            -DevelSha256 '${{ fromJSON(needs.prepare.outputs.php85).devel_sha256 }}' `
-            -RuntimeUrl '${{ fromJSON(needs.prepare.outputs.php85).runtime_url }}' `
-            -RuntimeSha256 '${{ fromJSON(needs.prepare.outputs.php85).runtime_sha256 }}'
+            -SourceUrl '${{ fromJSON(needs.prepare.outputs.php85).source_url }}' `
+            -SourceSha256 '${{ fromJSON(needs.prepare.outputs.php85).source_sha256 }}' `
+            -InstallDirectory $env:PHP_INSTALL_DIR
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: llvm-tools-preview

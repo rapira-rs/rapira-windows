@@ -1,28 +1,17 @@
-//! A file cache for one worker process.
+//! One file cache shared by the HTTP plugin.
 //!
-//! `ServeDir` sends every filesystem operation through the `Backend` trait. This module
-//! implements that trait. `ServeDir` builds the ETag, evaluates the preconditions, applies
-//! Range, and sets the headers. This module supplies only the bytes and the metadata.
+//! `ServeDir` uses the `Backend` trait for filesystem operations. It builds the ETag, checks preconditions, applies ranges, and sets headers. This module supplies file bytes and metadata.
 //! https://docs.rs/tower-http/0.7.1/tower_http/services/fs/trait.Backend.html
 //!
-//! An entry is a snapshot of one file at one instant. It holds the bytes and the metadata
-//! together. The cache therefore holds no entry for a miss, for a directory, or for a file
-//! above the size cap. `ServeDir` reads the validators of a `HEAD` and of a `GET` from the
-//! same entry, so the two methods always agree.
+//! Each entry holds file bytes and metadata from the same read. The cache excludes missing files, directories, and files above the size limit. `HEAD` and `GET` use the same entry for validators.
 //!
-//! An entry is fresh for one second. Each forked worker has its own cache. Only a change to a
-//! cached file can give stale data.
+//! An entry is fresh for one second. All HTTP interpreters share this cache. A changed file can return cached data until this time expires.
 //!
-//! The cache treats a file as changed when the mtime or the length is different. The ETag
-//! encodes the same two values.
+//! The cache checks the modification time and file length for changes. The ETag encodes the same two values.
 //!
-//! A change of permissions does not stop the cache from serving a file. `stat` needs search
-//! permission on the parent directory, not read permission on the file. To stop the cache
-//! from serving a file, delete the file or replace it.
-//! https://pubs.opengroup.org/onlinepubs/9799919799/functions/stat.html
+//! Permission changes do not invalidate cached bytes. Delete the file to stop serving it after the cache entry expires.
 //!
-//! The backend runs `stat` and `open` on a runtime thread. A slow filesystem therefore
-//! blocks the runtime. The root must be on local storage.
+//! File metadata checks and reads run on a runtime thread. A slow filesystem blocks that thread. The root must be on local storage.
 
 use std::collections::HashMap;
 use std::future::{Ready, ready};
@@ -39,7 +28,7 @@ use tower_http::services::fs::{Backend, File, Metadata};
 
 /// The cache does not store a larger file. `ServeDir` streams it from disk.
 const MAX_FILE: u64 = 256 * 1024;
-/// The memory limit for one worker process. Forked workers do not share the cache.
+/// The memory limit for the HTTP plugin's shared cache.
 const MAX_TOTAL: usize = 16 * 1024 * 1024;
 /// An entry stays fresh for this time. A stat then revalidates it, so a change to a cached
 /// file reaches the client after one second.

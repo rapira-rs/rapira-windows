@@ -282,7 +282,7 @@ fn check_uploads_dir(dir: &Path) -> Result<()> {
 }
 
 impl Server {
-    /// Builds the middleware layers in list order. Runs in the master after the logger starts, so the diagnostics here reach the log.
+    /// Builds the middleware layers in list order after the logger starts.
     pub fn from_settings(settings: Settings) -> Self {
         let mut middleware: Vec<crate::middleware::Layer> = Vec::new();
         for mw in settings.middleware {
@@ -295,8 +295,7 @@ impl Server {
             }
         }
 
-        // sendFile() root: a boot-time diagnostic so a bad path is caught before the first request,
-        // even under ondemand scaling where no worker forks at boot.
+        // Check the sendFile() root before any request reaches an interpreter.
         if let Err(e) = std::fs::metadata(&settings.sendfile_root) {
             tracing::warn!(
                 target: "rapira",

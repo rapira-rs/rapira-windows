@@ -4,7 +4,7 @@ use tests::{assert_skip_allowed, drain, fixture, req};
 
 use crate::harness::Spawn;
 
-/// One worker process serves every uri in order.
+/// One interpreter serves every URI in order.
 fn run(name: &str, uris: &[&str]) -> anyhow::Result<Vec<(u16, String)>> {
     let srv = Spawn::http(Mode::Worker, fixture(name)).spawn();
     uris.iter()

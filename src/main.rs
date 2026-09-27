@@ -21,7 +21,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start PHP, prepare the plugins, and serve requests.
+    /// Prepare the plugins, start PHP, and serve requests.
     Serve(ServeArgs),
 }
 

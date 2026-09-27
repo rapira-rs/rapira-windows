@@ -183,7 +183,7 @@ static void rapira_request_init(void) {
     // init_compiler clears this per cycle (zend_compile.c:461), not per job
     CG(unclean_shutdown) = false;
 
-    // reset_signals=0: the cycle's php_request_startup installed the SIGPROF handler
+    // Disarm the Windows timer before restoring this job's execution budget.
     if (rapira_job_timeout < 0) {
         rapira_job_timeout = EG(timeout_seconds);
     }
@@ -195,16 +195,9 @@ static void rapira_request_init(void) {
                         sizeof(SAPI_PHP_VERSION_HEADER) - 1, 1);
     }
 
-    // 8.6: output_handler is a zend_string*, empty is NULL (php-src e0221be8)
-#if PHP_VERSION_ID >= 80600
-    if (PG(output_handler)) {
-        zval oh;
-        ZVAL_STR_COPY(&oh, PG(output_handler));
-#else
     if (PG(output_handler) && PG(output_handler)[0]) {
         zval oh;
         ZVAL_STRING(&oh, PG(output_handler));
-#endif
         php_output_start_user(&oh, 0, PHP_OUTPUT_HANDLER_STDFLAGS);
         zval_ptr_dtor(&oh);
     } else if (PG(output_buffering)) {
@@ -372,17 +365,10 @@ int rapira_request_activate(void) {
 
 // sapi_activate resets the slot without releasing (SAPI.c), so it leaks per job
 static void rapira_release_header_callback(void) {
-#if PHP_VERSION_ID >= 80600
-    if (ZEND_FCC_INITIALIZED(SG(send_header_fcc))) {
-        zend_fcc_dtor(
-            &SG(send_header_fcc)); // self-resets to empty_fcall_info_cache
-    }
-#else
     if (!Z_ISUNDEF(SG(callback_func))) {
         zval_ptr_dtor(&SG(callback_func));
         ZVAL_UNDEF(&SG(callback_func));
     }
-#endif
 }
 
 // per-request sapi teardown (main/main.c:1985,2002,2031)

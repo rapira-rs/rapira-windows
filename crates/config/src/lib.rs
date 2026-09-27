@@ -47,7 +47,7 @@ pub fn nonzero_timeout(table: &str, key: &str, secs: u64) -> anyhow::Result<Dura
     capped_timeout(table, key, secs)
 }
 
-/// Caps every `*_secs` key so the master's deadline arithmetic can't overflow.
+/// Caps every `*_secs` key so the host's deadline arithmetic cannot overflow.
 const MAX_TIMEOUT_SECS: u64 = 86_400;
 
 pub fn capped_timeout(table: &str, key: &str, secs: u64) -> anyhow::Result<Duration> {

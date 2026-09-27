@@ -102,7 +102,7 @@ fn dispatcher_identity_and_services() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The gRPC service list stays with its own worker: the master sets it for the `[grpc]` pool before the fork, and the worker of the `[http]` pool still gets the HTTP dispatcher.
+/// The gRPC service list stays with its pool. HTTP interpreters get the HTTP dispatcher.
 #[test]
 fn an_http_worker_after_a_grpc_worker_keeps_the_http_dispatcher() {
     let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/worker-singleton.php"))

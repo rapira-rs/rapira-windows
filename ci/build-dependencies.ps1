@@ -79,7 +79,8 @@ function Build-Arm64Dependencies {
     Cmake libssh2 @('-DCRYPTO_BACKEND=OpenSSL', '-DBUILD_EXAMPLES=OFF', '-DBUILD_TESTING=OFF')
     Cmake nghttp2 @('-DENABLE_LIB_ONLY=ON', '-DBUILD_STATIC_LIBS=OFF', '-DBUILD_TESTING=OFF')
     Cmake libcurl @('-DBUILD_CURL_EXE=OFF', '-DBUILD_TESTING=OFF', '-DCURL_USE_OPENSSL=ON',
-        '-DCURL_USE_SCHANNEL=OFF', '-DCURL_USE_LIBSSH2=ON', '-DUSE_NGHTTP2=ON', '-DCURL_BROTLI=OFF', '-DCURL_ZSTD=OFF')
+        '-DCURL_USE_SCHANNEL=OFF', '-DCURL_USE_LIBSSH2=ON', '-DUSE_NGHTTP2=ON',
+        '-DCURL_USE_LIBPSL=OFF', '-DCURL_BROTLI=OFF', '-DCURL_ZSTD=OFF')
     Copy-Item (Join-Path $Root 'lib\libcurl_imp.lib') (Join-Path $Root 'lib\libcurl.lib')
 
     $iconv = Join-Path $sources 'libiconv'

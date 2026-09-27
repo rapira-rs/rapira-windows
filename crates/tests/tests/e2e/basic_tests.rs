@@ -244,7 +244,7 @@ struct Slot {
     recycles: u64,
 }
 
-/// On SIGUSR1 the master logs one `slot {id} pid {pid} state {state} handled {n} errors {n} recycles {n}` line per slot; the server logs in the plain format, so the line ends with the counters.
+/// Shutdown logs one scoreboard record for each interpreter. The plain format ends with the counters.
 fn slot(srv: &Server) -> Slot {
     let line = slot_line(srv, "");
     let count = |name: &str| -> u64 {

@@ -33,7 +33,7 @@
 - New tests use worker or dispatcher mode, not classic.
 - Check PHP behavior against php-src or a short script rather than guessing.
 
-Use `dev.ps1` for `build`, `test`, `test_e2e`, `coverage`, `stubs`, `grpc_fixtures`, and `clangd`. Pass matching native PHP runtime and development directories. The `clangd` task writes below ignored `target/clangd`.
+Use `dev.ps1` for `build`, `clippy`, `test`, `test_e2e`, `coverage`, `stubs`, `grpc_fixtures`, and `clangd`. Pass matching native PHP runtime and development directories. The `clangd` task writes below ignored `target/clangd`.
 
 ## Dependencies
 
@@ -46,6 +46,6 @@ Prefer `windows-sys` platform APIs over unnecessary wrappers.
 ## Known false positives, do not "fix"
 
 - rust-analyzer `E0277: Arguments<'_>: Sync` on `Box::pin` over a `tokio::select!`, while `cargo check` is clean. Cargo is authoritative.
-- PHP 8.5 warns that `--enable-opcache` is unrecognized. The flag stays for the 8.4 CI leg.
+- `ci/build-php.ps1` removes `--enable-opcache` for PHP 8.5. The flag is required for PHP 8.4.
 - Extension visibility differs per CI leg; that is what the `extension_loaded` skip guards are for. Do not edit the test `php.ini`.
 - `.clang-tidy` runs in survey mode, so Zend macro signatures trip `bugprone-*`. No CI job runs it.

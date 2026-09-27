@@ -1,6 +1,6 @@
 # Contributing to Rapira for Windows
 
-This repository contains the Windows server: the PHP SAPI in `crates/php_sys`, the extension runtime, the HTTP front, the fixed interpreter thread pool, and the `rapira` binary. General product documentation lives in [rapira-rs/rapira-rs.github.io](https://github.com/rapira-rs/rapira-rs.github.io). Keep Windows-specific documentation in this repository.
+This repository contains the Windows server, the PHP SAPI, and the HTTP and gRPC plugins. Each plugin has a fixed interpreter thread pool. General product documentation lives in [rapira-rs/rapira-rs.github.io](https://github.com/rapira-rs/rapira-rs.github.io). Keep Windows-specific documentation in this repository.
 
 ## Prerequisites
 
@@ -8,6 +8,7 @@ This repository contains the Windows server: the PHP SAPI in `crates/php_sys`, t
 - Native PowerShell 7
 - Visual Studio C++ Build Tools with the native x64 or ARM64 MSVC toolset and a Windows SDK
 - Native LLVM with `clang.exe` and `libclang.dll`
+- Native CMake for ARM64 dependency builds
 - Rust stable; `rust-toolchain.toml` selects the stable channel
 - Network access to the official PHP 8.4 or 8.5 release source
 - The [latest supported Microsoft Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist) for the native architecture
@@ -27,11 +28,11 @@ $install = Join-Path $tempRoot "rapira-php-$($php.php_version)-$architecture"
 .\dev.ps1 -Devel $env:PHP_DEVEL_DIR -Runtime $env:PHP_RUNTIME -Task build
 ```
 
-The PHP helper verifies the source SHA-256, native build tools, native output binaries, ZTS headers, PHP identity, and required modules. It reuses a valid install at the same path. The dependency-free profile provides fileinfo and mbstring as shared extensions and includes OPcache with JIT disabled. Pass `-Llvm` to `dev.ps1` when LLVM is outside `C:\Program Files\LLVM\bin`.
+The PHP helper verifies source hashes, native tools and output binaries, ZTS headers, PHP identity, and required modules. It reuses a valid install at the same path. The profile is in `ci/php-configure-flags.txt`. x64 uses pinned PHP SDK dependencies. ARM64 builds its dependencies from pinned source with native tools, including a native Perl build. Pass `-Llvm` to `dev.ps1` when LLVM is outside `C:\Program Files\LLVM\bin`.
 
 ## Tests
 
-Run the in-process suite and the end-to-end suite as separate tasks:
+Run the workspace unit tests and the binary-driven end-to-end tests:
 
 ```powershell
 .\dev.ps1 -Devel $env:PHP_DEVEL_DIR -Runtime $env:PHP_RUNTIME -Task test
@@ -42,6 +43,10 @@ Run the in-process suite and the end-to-end suite as separate tasks:
 - `test_e2e` builds `rapira.exe` and runs the end-to-end suite with one Rust test thread.
 - `coverage` runs `cargo llvm-cov` and writes `lcov.info`. Install `cargo-llvm-cov` and the `llvm-tools-preview` Rust component first.
 - `stubs` regenerates every `*_arginfo.h` file from its `.stub.php` source. Pass `-Runtime` and `-PhpSrc` with a matching php-src checkout. Do not edit a generated header directly.
+- `grpc_fixtures` rebuilds the protobuf descriptor sets. It requires native Go and uses the pinned Buf version.
+- `-Release` selects optimized builds. `-TestFilter` selects tests by name. `-NoRun` builds the tests without executing them.
+
+Use a separate `CARGO_TARGET_DIR` for each PHP minor. The PHP build helper sets `RAPIRA_REQUIRE_EXTS`, which makes a test fail if a required extension is missing.
 
 Run every test task with PHP 8.4 and PHP 8.5 on your native architecture before release-sensitive changes. CI runs both PHP versions on native x64 and ARM64 hosts.
 
@@ -50,14 +55,11 @@ Run every test task with PHP 8.4 and PHP 8.5 on your native architecture before 
 Run these commands in a PowerShell environment configured by `dev.ps1` or with the equivalent PHP and LLVM variables:
 
 ```powershell
-$target = @{ X64 = 'x86_64-pc-windows-msvc'; Arm64 = 'aarch64-pc-windows-msvc' }[[Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()]
-if (-not $target) { throw 'Unsupported native Windows architecture.' }
 cargo fmt --all --check
-cargo clippy --locked --workspace --all-targets --target $target -- -D warnings
-cargo clippy --locked -p tests --features e2e --tests --target $target -- -D warnings
+.\dev.ps1 -Devel $env:PHP_DEVEL_DIR -Runtime $env:PHP_RUNTIME -Task clippy
 ```
 
-C sources in `crates/php_sys` follow `.clang-format`.
+C sources in `crates/sapi` and `crates/plugins` follow `.clang-format`.
 
 Generate the clangd compilation database after you select a native PHP development tree:
 
@@ -72,14 +74,15 @@ clangd reads the generated commands from the ignored `target/clangd` directory. 
 | Path | Contents |
 | --- | --- |
 | `src/` | CLI, configuration boot, logging, pidfile, and interpreter pool startup |
-| `crates/php_sys` | PHP SAPI, C glue, bindgen bindings, request loops, and PHP stubs |
-| `crates/runtime` | Extension runtime and Windows console control handling |
-| `crates/config` | `rapira.toml` and CLI configuration |
-| `crates/api` | Native extension contract |
+| `crates/sapi` | PHP SAPI, interpreter pools, C glue, bindings, request loops, and base PHP stubs |
+| `crates/php_build` | Native PHP discovery, C compilation, and linking |
+| `crates/config` | Shared configuration types |
+| `crates/net` | Prepared TCP listeners |
 | `crates/scoreboard` | Per-thread counters |
-| `crates/plugins/http` | HTTP front |
+| `crates/plugins/http` | HTTP server and PHP API |
+| `crates/plugins/grpc` | Unary gRPC, gRPC-Web, Connect, and PHP API |
 | `crates/middleware` | Built-in HTTP middleware |
-| `crates/tests` | Integration and end-to-end suites |
+| `crates/tests` | Binary-driven tests, clients, and fixtures |
 
 ## Pull requests
 
@@ -89,4 +92,8 @@ Pull request titles follow [Conventional Commits](https://www.conventionalcommit
 
 ## Releases
 
+Release Please uses the core Rust workspace configuration. It updates the root package, workspace crates, lockfile, changelog, and release manifest together. The manifest records the last Windows release.
+
 Release Please updates the release pull request after each merge to `main`. Merging that pull request creates the tag and starts four native Windows builds: PHP 8.4 and 8.5 on x64 and ARM64. Each build creates the matching PHP runtime from official release source before it builds Rapira. The release stays in draft state until all four archives and the two architecture checksum files are ready. Re-run failed jobs when a release pipeline fails.
+
+If Release Please creates a tag but the binary workflow does not start, run `build-binaries.yml` with that tag as `ref` and `upload_to`. Set `version` to the tag without `v`. Publish the draft after all assets upload.
