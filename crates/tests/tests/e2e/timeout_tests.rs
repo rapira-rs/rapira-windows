@@ -114,8 +114,8 @@ fn queued_unit_gets_a_fresh_budget() -> anyhow::Result<()> {
         Case {
             name: "queued unit gets a full budget",
             fixture: "timeout_tests/timeout-dispatcher.php",
-            first: "/?burn=600",
-            queued: "/?burn=600",
+            first: "/?burn=1800",
+            queued: "/?burn=1800",
             killed: false,
         },
         Case {
@@ -127,7 +127,8 @@ fn queued_unit_gets_a_fresh_budget() -> anyhow::Result<()> {
         },
     ];
 
-    let ini = timeout_ini();
+    // Each valid unit fits the budget with scheduling margin. Together they exceed it.
+    let ini = format!("{}\nmax_execution_time=3\n", timeout_ini());
     for c in cases {
         let srv = Spawn::http(Mode::Dispatcher, fixture(c.fixture))
             .php_ini(&ini)

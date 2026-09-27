@@ -16,7 +16,7 @@ try {
         if (isset($q['limit'])) {
             set_time_limit((int) $q['limit']);
         }
-        // burn=N uses N ms of CPU, which ITIMER_PROF counts against the budget
+        // burn=N runs for N ms of wall time, which the Windows timer counts against the budget.
         $end = hrtime(true) + (int) ($q['burn'] ?? 0) * 1_000_000;
         while (hrtime(true) < $end) {
         }

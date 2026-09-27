@@ -111,7 +111,9 @@ function Build-Arm64Dependencies {
     Copy-Item (Join-Path $gettext 'MSVC17\libintl_dll\ARM64\Release\libintl.lib') (Join-Path $Root 'lib')
     Copy-Item (Join-Path $gettext 'source\gettext-runtime\intl\libgnuintl.h') (Join-Path $Root 'include\libintl.h')
 
-    Cmake libxml2 @('-DBUILD_SHARED_LIBS=OFF', '-DLIBXML2_WITH_PROGRAMS=OFF', '-DLIBXML2_WITH_TESTS=OFF',
+    # PHP calls xmlDllMain to release libxml2 state when an interpreter thread exits.
+    Cmake libxml2 @('-DBUILD_SHARED_LIBS=OFF', '-DCMAKE_C_FLAGS=/DLIBXML_STATIC_FOR_DLL',
+        '-DLIBXML2_WITH_PROGRAMS=OFF', '-DLIBXML2_WITH_TESTS=OFF',
         '-DLIBXML2_WITH_PYTHON=OFF', '-DLIBXML2_WITH_LZMA=OFF', '-DLIBXML2_WITH_LEGACY=ON',
         '-DLIBXML2_WITH_FTP=ON', "-DIconv_LIBRARY=$Root\lib\libiconv_a.lib")
     Copy-Item (Join-Path $Root 'lib\libxml2s.lib') (Join-Path $Root 'lib\libxml2_a.lib')
