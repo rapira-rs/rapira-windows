@@ -47,6 +47,8 @@ try {
 				continue;
 			}
 			$u = $b->files[0];
+			// Chunked framing puts the response end after upload cleanup.
+			$ex->flush();
 			$ex->writeBody(
 				implode("\n", [
 					"field=" . $b->fields[0]->name . "=" . $b->fields[0]->value,

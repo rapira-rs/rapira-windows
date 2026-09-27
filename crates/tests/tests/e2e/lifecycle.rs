@@ -706,7 +706,7 @@ fn dispatcher_multipart_over_the_wire() {
         .expect("tmp line");
     assert!(
         !std::path::Path::new(tmp).exists(),
-        "spool file must be gone once the response arrived"
+        "spool file must be gone when the chunked response ends"
     );
 
     let (code, _) = http_post(

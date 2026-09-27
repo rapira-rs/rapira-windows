@@ -1,6 +1,6 @@
 <?php
 
-// Echoes the parsed Multipart shape; seal unlinks the spool file, so the test asserts it is gone by the response frame.
+// Chunked framing puts the response end after upload cleanup.
 
 $d = \Rapira\get_dispatcher();
 try {
@@ -27,6 +27,7 @@ try {
             $lines[] = "file$i-type=" . var_export($u->clientMediaType, true);
             $lines[] = "file$i-cd=" . var_export(isset($u->headers['content-disposition']), true);
         }
+        $ex->flush();
         $ex->writeBody(implode("\n", $lines));
     }
 } catch (\Rapira\Exception\ClosedException) {
