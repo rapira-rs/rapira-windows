@@ -1,6 +1,7 @@
 mod app_logger;
 mod async_tests;
 mod basic_tests;
+mod boot_server;
 mod classic;
 mod concurrency;
 mod console;

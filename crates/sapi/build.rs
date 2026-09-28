@@ -64,6 +64,10 @@ fn main() -> anyhow::Result<()> {
         .raw_line(format!(
             "#[link(name = {:?}, kind = \"dylib\")] unsafe extern \"C\" {{ pub static mut zend_ce_throwable: *mut zend_class_entry; }}",
             php.lib_name))
+        .blocklist_var("php_import_environment_variables")
+        .raw_line(format!(
+            "#[link(name = {:?}, kind = \"dylib\")] unsafe extern \"C\" {{ pub static mut php_import_environment_variables: Option<unsafe extern \"C\" fn(*mut zval)>; }}",
+            php.lib_name))
         .clang_args(php.includes.iter().map(|d| format!("-I{d}")))
         .clang_args(php.defines().iter().map(|(k, v)| format!("-D{k}={v}")))
         .clang_arg("-DRAPIRA_BINDGEN=1")
