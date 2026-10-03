@@ -1,10 +1,8 @@
 use std::ops::Range;
-use std::sync::OnceLock;
 use std::sync::atomic::{
     AtomicU32, AtomicU64,
     Ordering::{Relaxed, Release},
 };
-use std::time::Instant;
 
 pub const SB_MAX_SLOTS: usize = 4096;
 
@@ -22,7 +20,6 @@ pub struct SharedSlot {
     pub handled: AtomicU64,
     pub errors: AtomicU64,
     pub recycles: AtomicU64,
-    pub last_activity_ms: AtomicU64,
 }
 
 const _: () = assert!(size_of::<SharedSlot>() == 64 && align_of::<SharedSlot>() == 64);
@@ -43,12 +40,6 @@ pub struct SlotSnapshot {
     pub recycles: u64,
 }
 
-/// Milliseconds from one process-wide monotonic clock.
-pub fn now_millis() -> u64 {
-    static START: OnceLock<Instant> = OnceLock::new();
-    START.get_or_init(Instant::now).elapsed().as_millis() as u64
-}
-
 impl Scoreboard {
     /// Allocates one slot for each configured interpreter before the pools start.
     pub fn create(nslots: usize) -> anyhow::Result<Scoreboard> {
@@ -63,7 +54,6 @@ impl Scoreboard {
                 handled: AtomicU64::new(0),
                 errors: AtomicU64::new(0),
                 recycles: AtomicU64::new(0),
-                last_activity_ms: AtomicU64::new(0),
             })
             .collect::<Box<[_]>>();
         Ok(Scoreboard {
@@ -89,7 +79,6 @@ impl Scoreboard {
     /// Reserves the slot before the host starts its interpreter thread.
     pub fn set_starting(&self, i: usize) {
         let s = self.slot(i);
-        s.last_activity_ms.store(now_millis(), Relaxed);
         s.state.store(SLOT_STARTING, Release);
     }
 
@@ -117,7 +106,6 @@ impl SharedSlot {
         self.errors.store(0, Relaxed);
         self.recycles.store(0, Relaxed);
         self.pid.store(pid, Relaxed);
-        self.last_activity_ms.store(now_millis(), Relaxed);
         self.state.store(SLOT_IDLE, Relaxed);
     }
 }

@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail, ensure};
 use rapira_config::{
-    ConfigCtx, ListenAddr, Mode, PoolSection, PoolSettings, check_entrypoint, nonzero_timeout,
-    parse_listen, resolve_pool,
+    ConfigCtx, Mode, PoolSection, PoolSettings, check_entrypoint, nonzero_timeout, parse_listen,
+    resolve_pool,
 };
 use serde::Deserialize;
 
@@ -55,7 +55,7 @@ pub struct UploadsSection {
 
 #[derive(Debug)]
 pub struct Settings {
-    pub listen: ListenAddr,
+    pub listen: SocketAddr,
     pub server_name: String,
     pub server_port: u16,
     pub max_body_size: usize,
@@ -66,27 +66,16 @@ pub struct Settings {
     pub uploads: Option<Limits>,
     /// sendFile() containment root; falls back to the entrypoint directory.
     pub sendfile_root: PathBuf,
-    // [http].middleware list order
-    pub middleware: Vec<Middleware>,
+    pub static_files: Option<rapira_static_files::Settings>,
     pub pool: PoolSettings,
 }
-
-// ------------ middleware stuff ---------------
-// add new middleware here, with settings if needed
-#[derive(Debug)]
-pub enum Middleware {
-    Static(rapira_static_files::Settings),
-}
-// ---------------------------------------------
 
 /// Boot checks run here: entrypoint file, uploads dir, static root, middleware names.
 pub fn resolve(section: Section, ctx: &ConfigCtx) -> Result<Settings> {
     let settings = settings(section, ctx)?;
     check_entrypoint("http.pool", &settings.pool.entrypoint)?;
-    for mw in &settings.middleware {
-        match mw {
-            Middleware::Static(st) => check_static_root(&st.root)?,
-        }
+    if let Some(st) = &settings.static_files {
+        check_static_root(&st.root)?;
     }
     if let Some(uploads) = &settings.uploads {
         check_uploads_dir(&uploads.dir)?;
@@ -99,14 +88,12 @@ fn settings(section: Section, ctx: &ConfigCtx) -> Result<Settings> {
     let listen = parse_listen(
         "http",
         section.listen.as_deref(),
-        ListenAddr::Tcp(SocketAddr::from((Ipv4Addr::LOCALHOST, 8000))),
+        SocketAddr::from((Ipv4Addr::LOCALHOST, 8000)),
     )?;
 
     let server_port = match section.server_port {
         Some(p) => p,
-        None => match &listen {
-            ListenAddr::Tcp(addr) => addr.port(),
-        },
+        None => listen.port(),
     };
 
     let max_body_size_mb = section.max_body_size_mb.unwrap_or(8);
@@ -153,7 +140,7 @@ fn settings(section: Section, ctx: &ConfigCtx) -> Result<Settings> {
         .r#static
         .map(|s| rapira_static_files::resolve(s, ctx))
         .transpose()?;
-    let middleware = resolve_middleware(section.middleware, static_files)?;
+    let static_files = resolve_static_files(section.middleware, static_files)?;
 
     Ok(Settings {
         listen,
@@ -167,47 +154,38 @@ fn settings(section: Section, ctx: &ConfigCtx) -> Result<Settings> {
         unsafe_field_names: section.unsafe_field_names.unwrap_or_default(),
         uploads,
         sendfile_root,
-        middleware,
+        static_files,
         pool,
     })
 }
 
-// resolve all existing vs requested middlewares
-// TODO: think about some container, like endure in RR
-fn resolve_middleware(
+fn resolve_static_files(
     list: Vec<String>,
-    mut static_files: Option<rapira_static_files::Settings>,
-) -> Result<Vec<Middleware>> {
+    static_files: Option<rapira_static_files::Settings>,
+) -> Result<Option<rapira_static_files::Settings>> {
     for (i, name) in list.iter().enumerate() {
         if list[..i].contains(name) {
             bail!("http.middleware lists \"{name}\" twice")
         }
     }
 
-    let mut middleware: Vec<Middleware> = Vec::new();
     for name in &list {
         match name.as_str() {
-            // check new middleware here
-            "static" => match static_files.take() {
-                Some(settings) => middleware.push(Middleware::Static(settings)),
-                None => {
-                    bail!("http.middleware lists \"static\" but [http.static] is missing")
-                }
-            },
+            "static" if static_files.is_none() => {
+                bail!("http.middleware lists \"static\" but [http.static] is missing")
+            }
+            "static" => {}
             other => {
                 bail!("http.middleware entry \"{other}\" is unknown; known middleware: \"static\"")
             }
         }
     }
 
-    // check for the configured, but not listed
-    // TODO: worth double checking
-    // some people requested some kind of enabled=false/true
-    if static_files.is_some() {
+    if static_files.is_some() && list.is_empty() {
         bail!("[http.static] is configured but http.middleware does not list \"static\"");
     }
 
-    Ok(middleware)
+    Ok(static_files)
 }
 
 fn resolve_uploads(section: UploadsSection, ctx: &ConfigCtx) -> Result<Limits> {
@@ -282,18 +260,12 @@ fn check_uploads_dir(dir: &Path) -> Result<()> {
 }
 
 impl Server {
-    /// Builds the middleware layers in list order after the logger starts.
+    /// Builds the static-file handler after the logger starts.
     pub fn from_settings(settings: Settings) -> Self {
-        let mut middleware: Vec<crate::middleware::Layer> = Vec::new();
-        for mw in settings.middleware {
-            match mw {
-                Middleware::Static(st) => {
-                    tracing::info!(target: "rapira", "static files from {}, forbid {:?}", st.root.display(), st.forbid);
-                    middleware
-                        .push(rapira_static_files::StaticFiles::new(st.root, st.forbid).layer());
-                }
-            }
-        }
+        let static_files = settings.static_files.map(|st| {
+            tracing::info!(target: "rapira", "static files from {}, forbid {:?}", st.root.display(), st.forbid);
+            rapira_static_files::StaticFiles::new(st.root, st.forbid)
+        });
 
         // Check the sendFile() root before any request reaches an interpreter.
         if let Err(e) = std::fs::metadata(&settings.sendfile_root) {
@@ -314,7 +286,7 @@ impl Server {
             superglobals: settings.pool.mode != Mode::Dispatcher,
             entrypoint: settings.pool.entrypoint.to_string_lossy().into_owned(),
             keepalive_timeout: settings.keepalive_timeout,
-            middleware,
+            static_files,
             uploads: settings.uploads,
             sendfile_root: settings.sendfile_root,
         })
@@ -670,23 +642,13 @@ mod tests {
         ];
         for case in cases {
             let got = settings_of(case.toml).unwrap_or_else(|e| panic!("{}: {e}", case.name));
-            let got: Vec<(PathBuf, Vec<String>)> = got
-                .middleware
-                .into_iter()
-                .map(|mw| match mw {
-                    Middleware::Static(st) => (st.root, st.forbid),
-                })
-                .collect();
-            let want: Vec<(PathBuf, Vec<String>)> = case
-                .want
-                .into_iter()
-                .map(|(root, forbid)| {
-                    (
-                        PathBuf::from(root),
-                        forbid.iter().map(|s| (*s).to_owned()).collect(),
-                    )
-                })
-                .collect();
+            let got = got.static_files.map(|st| (st.root, st.forbid));
+            let want = case.want.map(|(root, forbid)| {
+                (
+                    PathBuf::from(root),
+                    forbid.iter().map(|s| (*s).to_owned()).collect(),
+                )
+            });
             assert_eq!(got, want, "{}", case.name);
         }
     }

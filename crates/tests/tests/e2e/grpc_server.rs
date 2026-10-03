@@ -7,7 +7,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use http::Method;
 use http_body_util::BodyExt;
-use rapira_net::ListenAddr;
 use serde_json::{Value, json};
 use tests::grpc::{
     Conn, ECHO_PATH, ERROR_INFO, Fields, HI, HI_FRAME, Wire, envelope, fields, status_bytes,
@@ -938,7 +937,7 @@ fn keepalive_pings_a_silent_peer_and_closes_it() {
     let srv = Spawn::grpc(wire_worker())
         .grpc_extra("keepalive_interval_secs = 1\nkeepalive_timeout_secs = 1")
         .spawn();
-    let ListenAddr::Tcp(addr) = listen(&srv);
+    let addr = listen(&srv);
     let mut stream = TcpStream::connect(addr).expect("connect");
     stream
         .set_read_timeout(Some(Duration::from_secs(4)))

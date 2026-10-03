@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use anyhow::anyhow;
@@ -7,7 +8,7 @@ use tokio::sync::watch;
 use windows_sys::Win32::Networking::WinSock::{WSAEINVAL, WSAENOTSOCK, WSAESHUTDOWN};
 
 pub mod listen;
-pub use listen::{ListenAddr, PrepareCtx, PreparedListener};
+pub use listen::{PrepareCtx, PreparedListener};
 
 /// Takes connections on the plugin's IO runtime.
 pub trait Serve {
@@ -16,7 +17,7 @@ pub trait Serve {
 
 pub struct Acceptor {
     socket: TcpListener,
-    addr: ListenAddr,
+    addr: SocketAddr,
     stop: watch::Receiver<bool>,
 }
 
@@ -26,7 +27,7 @@ impl Acceptor {
         stop: watch::Receiver<bool>,
         rt: &Handle,
     ) -> std::io::Result<Self> {
-        let addr = prepared.addr().clone();
+        let addr = *prepared.addr();
         let _guard = rt.enter();
         Ok(Self {
             socket: TcpListener::from_std(prepared.socket)?,

@@ -15,41 +15,14 @@ param(
     [switch]$Release
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'ci/build-common.ps1')
 
-$runtimeOsArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
-$processArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture
-if ($processArchitecture -ne $runtimeOsArchitecture) {
-    throw "Run dev.ps1 from native $runtimeOsArchitecture PowerShell; the current process is $processArchitecture."
-}
-
-$nativeArchitecture = $null
-try {
-    $nativeArchitecture = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment').PROCESSOR_ARCHITECTURE
-} catch {
-    $nativeArchitecture = $null
-}
-if ([string]::IsNullOrWhiteSpace($nativeArchitecture)) {
-    $nativeArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
-}
-switch ($nativeArchitecture.ToUpperInvariant()) {
-    'ARM64' {
-        $osArchitecture = 'Arm64'
-        $target = 'aarch64-pc-windows-msvc'
-        $vsArchitecture = 'arm64'
-        $phpBuildArchitecture = 'arm64'
-        $peMachine = 0xAA64
-    }
-    { $_ -in @('AMD64', 'X64') } {
-        $osArchitecture = 'X64'
-        $target = 'x86_64-pc-windows-msvc'
-        $vsArchitecture = 'amd64'
-        $phpBuildArchitecture = 'x64'
-        $peMachine = 0x8664
-    }
-    default {
-        throw "Unsupported Windows architecture: $nativeArchitecture"
-    }
-}
+$architecture = Get-Architecture
+$osArchitecture = $architecture.Name
+$target = $architecture.Target
+$vsArchitecture = if ($osArchitecture -eq 'arm64') { 'arm64' } else { 'amd64' }
+$phpBuildArchitecture = $architecture.VcVars
+$peMachine = $architecture.PeMachine
 
 function Assert-File {
     param([string]$Path)
@@ -65,56 +38,6 @@ function Invoke-Tool {
     if ($toolExitCode -ne 0) {
         exit $toolExitCode
     }
-}
-
-function Get-PeMachine {
-    param([string]$Path)
-    $stream = [System.IO.File]::OpenRead($Path)
-    $reader = New-Object System.IO.BinaryReader($stream)
-    try {
-        if ($reader.ReadUInt16() -ne 0x5A4D) {
-            throw "Not a PE file: $Path"
-        }
-        $stream.Position = 0x3C
-        $peOffset = $reader.ReadInt32()
-        $stream.Position = $peOffset
-        if ($reader.ReadUInt32() -ne 0x00004550) {
-            throw "Invalid PE signature: $Path"
-        }
-        return $reader.ReadUInt16()
-    } finally {
-        $reader.Dispose()
-        $stream.Dispose()
-    }
-}
-
-function Find-NativeVisualStudio {
-    $root = Join-Path $env:SystemDrive 'Program Files\Microsoft Visual Studio'
-    if (-not (Test-Path -LiteralPath $root -PathType Container)) {
-        throw "Visual Studio was not found below: $root"
-    }
-    $candidates = foreach ($versionDirectory in Get-ChildItem -LiteralPath $root -Directory) {
-        foreach ($editionDirectory in Get-ChildItem -LiteralPath $versionDirectory.FullName -Directory) {
-            $devShell = Join-Path $editionDirectory.FullName 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll'
-            if (Test-Path -LiteralPath $devShell -PathType Leaf) {
-                $rank = if ($versionDirectory.Name -eq '2022') {
-                    17
-                } elseif ($versionDirectory.Name -eq '2019') {
-                    16
-                } elseif ($versionDirectory.Name -match '^\d+$') {
-                    [int]$versionDirectory.Name
-                } else {
-                    0
-                }
-                [pscustomobject]@{ Path = $editionDirectory.FullName; Rank = $rank }
-            }
-        }
-    }
-    $selected = $candidates | Sort-Object Rank -Descending | Select-Object -First 1
-    if ($null -eq $selected) {
-        throw "Visual Studio developer shell was not found below: $root"
-    }
-    return $selected.Path
 }
 
 if ($Task -eq 'grpc_fixtures') {
@@ -191,7 +114,7 @@ if ($Task -eq 'stubs') {
         throw "LLVM architecture does not match native $osArchitecture tools: $llvmDirectory"
     }
     $devShellArguments = "-no_logo -arch=$vsArchitecture -host_arch=$vsArchitecture"
-    $vsInstall = Find-NativeVisualStudio
+    $vsInstall = Find-VisualStudio -RequiredPath 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll'
     $devShell = Join-Path $vsInstall 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll'
     Assert-File $devShell
     Import-Module $devShell

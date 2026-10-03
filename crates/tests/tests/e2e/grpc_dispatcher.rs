@@ -1,7 +1,7 @@
+use std::net::SocketAddr;
 use std::time::{Duration, UNIX_EPOCH};
 
 use http::{HeaderMap, Method};
-use rapira_net::ListenAddr;
 use rapira_sapi::Mode;
 use serde_json::{Value, json};
 use tests::grpc::{
@@ -28,7 +28,7 @@ fn unary_worker() -> Server {
 }
 
 /// A unary call to EchoService/Echo over h2 with `message` in the envelope, bounded at 10 s.
-async fn call(listen: ListenAddr, message: Vec<u8>, headers: Fields) -> Response {
+async fn call(listen: SocketAddr, message: Vec<u8>, headers: Fields) -> Response {
     let exchange = async {
         let mut conn = Conn::open(&listen, Wire::H2).await?;
         conn.grpc(ECHO_PATH, headers, &envelope(&message)).await

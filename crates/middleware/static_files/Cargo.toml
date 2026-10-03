@@ -19,5 +19,4 @@ http-body-util = { workspace = true }
 tracing = { workspace = true }
 percent-encoding = "2"
 tokio = { workspace = true, features = ["fs", "rt"] }
-tower = { workspace = true }
 tower-http = { version = "0.7.1", default-features = false, features = ["fs"] }

@@ -1,15 +1,13 @@
 use std::{
     ffi::{CStr, CString, c_char, c_void},
-    net::SocketAddr,
+    fmt::Write as _,
     time::Instant,
 };
 
 use bytes::Bytes;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use rapira_sapi::callbacks::{MAX_BUFFERED_BODY, guard};
-use rapira_sapi::exchange::{
-    AddrOwned, add_list, build_address, header_key, path_bytes, push_dec, push_ipv4,
-};
+use rapira_sapi::exchange::{AddrOwned, add_list, build_address, header_key, path_bytes};
 use rapira_sapi::plugin::PhpPart;
 use rapira_sapi::scoreboard::{Event, sb_update};
 use rapira_sapi::types::{
@@ -170,18 +168,10 @@ impl RequestView {
         match &req.authority {
             Some(a) => uri_abs.push_str(&String::from_utf8_lossy(a)),
             None => match &req.server {
-                Addr::Inet(SocketAddr::V4(sa)) => {
-                    push_ipv4(&mut uri_abs, *sa.ip());
-                    uri_abs.push(':');
-                    push_dec(&mut uri_abs, sa.port());
-                }
-                Addr::Inet(sa) => uri_abs.push_str(&sa.to_string()),
-                Addr::Unix(_) => {
-                    uri_abs.push_str(&req.server_name);
-                    uri_abs.push(':');
-                    push_dec(&mut uri_abs, req.server_port);
-                }
-            },
+                Addr::Inet(sa) => write!(uri_abs, "{sa}"),
+                Addr::Unix(_) => write!(uri_abs, "{}:{}", req.server_name, req.server_port),
+            }
+            .expect("writing to String"),
         }
         uri_abs.push_str(path);
         Self {

@@ -1,4 +1,5 @@
 use anyhow::{Context, bail};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -7,7 +8,6 @@ mod log;
 mod pool;
 mod supervisor;
 
-pub use listen::ListenAddr;
 pub use log::{LogFormat, LogLevel, LogSection, LogSettings, resolve_log};
 pub use pool::{Mode, PoolSection, PoolSettings, check_entrypoint, resolve_pool};
 pub use supervisor::{SupervisorSection, SupervisorSettings, resolve_supervisor};
@@ -29,12 +29,10 @@ impl ConfigCtx {
 pub fn parse_listen(
     table: &str,
     raw: Option<&str>,
-    default: ListenAddr,
-) -> anyhow::Result<ListenAddr> {
+    default: SocketAddr,
+) -> anyhow::Result<SocketAddr> {
     match raw {
-        Some(s) => s
-            .parse::<ListenAddr>()
-            .with_context(|| format!("invalid {table}.listen `{s}`")),
+        Some(s) => listen::parse(s).with_context(|| format!("invalid {table}.listen `{s}`")),
         None => Ok(default),
     }
 }

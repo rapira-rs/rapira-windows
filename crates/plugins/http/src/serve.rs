@@ -8,7 +8,7 @@ use anyhow::{Result, anyhow};
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
-use rapira_net::{Acceptor, ListenAddr, PreparedListener, Serve};
+use rapira_net::{Acceptor, PreparedListener, Serve};
 use rapira_sapi::Addr;
 use rapira_sapi::plugin::Worker;
 use rapira_sapi::work::Intake;
@@ -32,9 +32,7 @@ impl Serving {
         uploads: Option<Arc<multipart::Limits>>,
         config: Config,
     ) -> Self {
-        match &config.listen {
-            ListenAddr::Tcp(a) => tracing::info!(target: "http", "listening on http://{a}"),
-        }
+        tracing::info!(target: "http", "listening on http://{}", config.listen);
         let shared = Arc::new(Shared {
             cfg: config,
             intake,
@@ -109,7 +107,7 @@ impl Serve for Serving {
         let server = stream
             .local_addr()
             .map(Addr::Inet)
-            .unwrap_or_else(|_| listen_addr(&self.shared.cfg.listen));
+            .unwrap_or_else(|_| Addr::Inet(self.shared.cfg.listen));
         self.spawn_conn(stream, Addr::Inet(peer), server);
     }
 }
@@ -124,12 +122,9 @@ pub(crate) fn spawn_connection<I>(
 ) where
     I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
-    let chain = handler.chain();
-    // `BoxCloneService` polls and calls through `&mut`, so each request takes its own clone.
     let service = hyper::service::service_fn(move |req| {
         let handler = Arc::clone(&handler);
-        let chain = chain.clone();
-        async move { Ok::<_, Infallible>(respond(handler, chain, req).await) }
+        async move { Ok::<_, Infallible>(respond(handler, req).await) }
     });
     spawn_watched(
         graceful.watch(builder.serve_connection(io, service)),
@@ -181,10 +176,4 @@ pub(crate) fn serve(
         tracing::warn!(target: "rapira", "removing spool dir {}: {e}", dir.display());
     }
     drained
-}
-
-fn listen_addr(listen: &ListenAddr) -> Addr {
-    match listen {
-        ListenAddr::Tcp(a) => Addr::Inet(*a),
-    }
 }

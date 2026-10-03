@@ -4,7 +4,9 @@ use http::header::{
 };
 use http_body_util::BodyExt;
 
-use crate::middleware::{Body, BoxError, Response};
+pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync>;
+pub(crate) type Body = http_body_util::combinators::UnsyncBoxBody<bytes::Bytes, BoxError>;
+pub(crate) type Response = http::Response<Body>;
 
 pub(crate) fn empty_body() -> Body {
     http_body_util::Empty::<bytes::Bytes>::new()

@@ -12,7 +12,7 @@ The http plugin of the `rapira` binary. It terminates HTTP/1.1 on the configured
 - `prepare()` runs on the boot thread before PHP starts. It removes spool directories of dead processes and binds the listener with `PrepareCtx::bind`.
 - `serve()` runs on the `rapira-http` plugin thread. Its `Worker` holds a two-thread tokio runtime handle, the PHP pool sink, the stop flag, and `drain_grace`. The plugin drains within this limit after a stop.
 
-`serve()` wraps the pool sink as `Intake<Exchange>` and takes the prepared listener through `rapira_net::Acceptor`. The plugin checks each request and runs its middleware. It reads the body, builds an `Exchange`, and submits it to the interpreter queue. PHP produces response frames. The plugin writes these frames to the socket.
+`serve()` wraps the pool sink as `Intake<Exchange>` and takes the prepared listener through `rapira_net::Acceptor`. The plugin checks each request and tries the configured static-file handler. If no file matches, it reads the body, builds an `Exchange`, and submits it to the interpreter queue. PHP produces response frames. The plugin writes these frames to the socket.
 
 `Exchange` is the work unit. It implements `rapira_sapi::work::Work`:
 
@@ -36,11 +36,10 @@ The client gets 503 when the intake of the worker stays full for 30 seconds, and
 - `src/lib.rs`: `Config`, `Server` and its `Plugin` impl.
 - `src/config.rs`: `Section` (the `[http]` table), `Settings`, `resolve` with the boot checks, and `Server::from_settings`.
 - `src/serve.rs`: the accept loop, one hyper connection per accepted socket, and the drain.
-- `src/handler.rs`: the admission checks, the middleware chain, the body read, the submit to the intake and the response head.
-- `src/middleware.rs`: the chain types `Body`, `Request`, `Response`, `Service`, `Layer`, and `Peer`.
+- `src/handler.rs`: the admission checks, the static-file handler, the body read, the submit to the intake and the response head.
 - `src/check.rs`: the admission checks: `Host`, `CONNECT`, field names, declared length.
 - `src/request.rs`: builds the SAPI `Request` from the HTTP request and the `Peer`.
-- `src/response.rs`: the response fields and the error responses.
+- `src/response.rs`: the response body types, fields, and error responses.
 - `src/bridge.rs`: the reply body that streams the PHP frames and the `sendFile` slices, and the write timeout.
 - `src/exchange.rs`: the `Exchange` unit and its `Work` impl.
 - `src/multipart.rs`: the multipart parser and the spool dirs of dispatcher mode.
@@ -48,27 +47,11 @@ The client gets 503 when the intake of the worker stays full for 30 seconds, and
 
 ## Middleware
 
-`[http].middleware` lists the middleware names in chain order. The plugin builds one tower layer for each name and applies the layers around its inner service, the first listed outermost. Without middleware, hyper serves the inner service directly.
+`[http].middleware` accepts `[]` or `["static"]`. The `static` entry requires `[http.static]`. The plugin calls the static-file handler directly after the admission checks. A request that fails these checks does not reach the handler.
 
-A layer is `middleware::Layer`: a `tower::util::BoxCloneServiceLayer` over `http::Request<Body>` and `http::Response<Body>`, with the error type `Infallible`. `middleware::Body` is an `UnsyncBoxBody<Bytes, BoxError>`. A layer answers a request itself or calls the inner service.
+`rapira_static_files::StaticFiles` serves files from `[http.static].root`. It reads the request head and leaves the body for PHP on a miss. The HTTP plugin holds the connection addresses, receive time, authority, and in-flight counter for the request.
 
-`Peer` is in the request extensions: the remote address, the server address, `https` and the receive time. PHP gets these values from it. A layer can replace it. The extensions also hold private state of the plugin: the request authority and the in-flight counter of the drain. A layer that rebuilds a request must keep the extensions. A layer must not keep them after the call.
-
-The admission checks run before the chain. A request that fails them does not reach the middleware.
-
-To add a built-in middleware:
-
-- Put its layer in a new crate under `crates/middleware`.
-- In the root `Cargo.toml`, add the crate to the workspace `members` and to `[workspace.dependencies]`.
-- Add the crate to the dependencies in `crates/plugins/http/Cargo.toml`.
-- In `src/config.rs`, add its table to `Section`, as `r#static` is for `[http.static]`.
-- Resolve the table in `settings`, and give the result to `resolve_middleware` as a new argument.
-- Add a variant with its settings to `config::Middleware`.
-- In `resolve_middleware`, match its name, add the name to the known names of the unknown-name error, and refuse a configured table that the list does not name.
-- Add its boot check to `resolve`, as `check_static_root` is for `static`.
-- Build its layer in `Server::from_settings`.
-
-`rapira_static_files::StaticFiles` is the `static` middleware. It serves files from `[http.static].root`. A miss goes to the next layer, and to PHP when `static` is the last layer. A permission error or a bad file name is also a miss. Any other read failure answers 500. That request does not reach PHP.
+A permission error or a bad file name is also a miss. Any other read failure answers 500. That request does not reach PHP.
 
 `StaticFiles` holds served files in memory. An entry stays fresh for one second. The HTTP plugin shares one cache of up to 16 MiB across its pool. It stores no file above 256 KiB. A permission change does not stop a cached file from being served. Delete or replace the file to stop serving it. A restart empties the cache.
 
@@ -107,7 +90,7 @@ The `[http]` table. Unknown keys fail the boot.
 - `write_timeout_secs`: the limit for one stalled write to the client, not for the whole response. Default 30.
 - `keepalive_timeout_secs`: closes an idle keepalive connection, and limits each head read and body-frame read. Default 60.
 - `unsafe_field_names`: `"drop"` (default) or `"reject"` for header names that alias a CGI variable. In dispatcher mode no `$_SERVER` mapping exists, so `"drop"` keeps the names and `"reject"` still answers 400.
-- `middleware`: the middleware names in chain order, the first listed outermost. Default: none.
+- `middleware`: `[]` or `["static"]`. Default: none.
 - `[http.uploads]`: the multipart limits of dispatcher mode: `dir` (default: the system temp dir), `max_file_size_mb` (2), `max_field_size_kb` (256), `max_files` (20), `max_parts` (1024), `max_part_headers` (32). This table under another mode fails the boot.
 - `[http.sendfile]`: `root`, the directory that must contain each `sendFile()` path. Default: the entrypoint directory.
 - `[http.static]`: the settings of the `static` middleware: `root` (required, an existing directory) and `forbid` (the file-name suffixes it never serves, default `[".php"]`).

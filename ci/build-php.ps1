@@ -307,7 +307,7 @@ if (Test-Path -LiteralPath $InstallDirectory) {
 
 $nativeCmd = Get-NativeSystemExecutable -Name 'cmd.exe' -ExpectedMachine $architecture.PeMachine
 $nativeTar = Get-NativeSystemExecutable -Name 'tar.exe' -ExpectedMachine $architecture.PeMachine
-$vcVars = Find-VisualStudio
+$vcVars = Join-Path (Find-VisualStudio) 'VC\Auxiliary\Build\vcvarsall.bat'
 $sourceRootBase = Join-Path $tempRoot 'rapira-php-source'
 $archiveDirectory = Join-Path $sourceRootBase 'archives'
 $workParent = Join-Path $sourceRootBase 'work'

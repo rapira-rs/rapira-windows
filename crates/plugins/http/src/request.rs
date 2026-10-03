@@ -1,8 +1,15 @@
-use rapira_sapi::Request;
 use rapira_sapi::types::Body;
+use rapira_sapi::{Addr, Request};
 
 use crate::Config;
-use crate::middleware::Peer;
+
+/// The connection addresses and the time when the request arrived.
+pub(crate) struct Peer {
+    pub remote: Addr,
+    pub server: Addr,
+    pub https: bool,
+    pub received_at: f64,
+}
 
 /// Moves the header map out of `parts`. The body stays raw: the handler parses multipart.
 pub(crate) fn build(
@@ -61,7 +68,7 @@ mod tests {
     /// build() reads only the server name and port.
     fn config() -> Config {
         Config {
-            listen: rapira_net::ListenAddr::Tcp(([127, 0, 0, 1], 8000).into()),
+            listen: ([127, 0, 0, 1], 8000).into(),
             server_name: "localhost".to_owned(),
             server_port: 8000,
             max_body_size: 0,
@@ -70,7 +77,7 @@ mod tests {
             entrypoint: String::new(),
             write_timeout: std::time::Duration::ZERO,
             keepalive_timeout: std::time::Duration::ZERO,
-            middleware: Vec::new(),
+            static_files: None,
             uploads: None,
             sendfile_root: std::path::PathBuf::new(),
         }

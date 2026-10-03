@@ -3,29 +3,23 @@ mod config;
 
 pub use config::{Section, Settings, resolve};
 
-use std::convert::Infallible;
 use std::path::PathBuf;
-use std::pin::Pin;
-use std::sync::Arc;
 
 use bytes::Bytes;
 use http::{Method, StatusCode};
 use http_body_util::combinators::UnsyncBoxBody;
 use http_body_util::{BodyExt, Empty};
-use tower::util::BoxCloneServiceLayer;
-use tower::{Service, ServiceExt as _};
 use tower_http::services::ServeDir;
 use tower_http::services::fs::DefaultServeDirFallback;
 
 use cache::CachingBackend;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
-/// The body of the http plugin's middleware chain.
+/// The body of a static-file response.
 type Body = UnsyncBoxBody<Bytes, BoxError>;
 
-/// Serves files from a directory and hands every miss to the inner service.
-/// A permission error or a bad file name is also a miss. Any other read failure
-/// answers 500. That request does not reach the inner service.
+/// Serves files from a directory. The HTTP plugin sends each miss to PHP.
+/// A permission error or a bad file name is also a miss. Other read errors return 500.
 pub struct StaticFiles {
     dir: ServeDir<DefaultServeDirFallback, CachingBackend>,
     forbid: Vec<String>,
@@ -98,84 +92,41 @@ fn is_miss(e: &std::io::Error) -> bool {
 }
 
 impl StaticFiles {
-    /// The middleware as a tower layer over the http plugin's inner service.
-    pub fn layer<S>(
-        self,
-    ) -> BoxCloneServiceLayer<S, http::Request<Body>, http::Response<Body>, Infallible>
-    where
-        S: Service<http::Request<Body>, Response = http::Response<Body>, Error = Infallible>
-            + Clone
-            + Send
-            + 'static,
-        S::Future: Send + 'static,
-    {
-        let files = Arc::new(self);
-        BoxCloneServiceLayer::new(tower::layer::layer_fn(move |inner: S| {
-            let files = Arc::clone(&files);
-            tower::service_fn(move |req| {
-                let files = Arc::clone(&files);
-                let inner = inner.clone();
-                async move { Ok(files.handle(req, inner).await) }
-            })
-        }))
-    }
-
-    async fn handle<S>(&self, req: http::Request<Body>, inner: S) -> http::Response<Body>
-    where
-        S: Service<http::Request<Body>, Response = http::Response<Body>, Error = Infallible>
-            + Send
-            + 'static,
-        S::Future: Send + 'static,
-    {
-        if req.method() != Method::GET && req.method() != Method::HEAD {
-            return forward(inner, req).await;
+    /// Returns None for a miss. The caller retains the request body for PHP.
+    pub async fn serve(&self, req: &http::request::Parts) -> Option<http::Response<Body>> {
+        if req.method != Method::GET && req.method != Method::HEAD {
+            return None;
         }
-        if !self.eligible(req.uri().path()) {
-            return forward(inner, req).await;
+        if !self.eligible(req.uri.path()) {
+            return None;
         }
 
-        // The probe carries only the head. The original request stays unchanged for the
-        // miss path, so its extensions reach the inner service.
         let mut probe = http::Request::new(Empty::<Bytes>::new());
-        *probe.method_mut() = req.method().clone();
-        *probe.uri_mut() = req.uri().clone();
-        *probe.headers_mut() = req.headers().clone();
+        *probe.method_mut() = req.method.clone();
+        *probe.uri_mut() = req.uri.clone();
+        *probe.headers_mut() = req.headers.clone();
 
         let mut dir = self.dir.clone();
         match dir.try_call(probe).await {
             Ok(res) if res.status() != StatusCode::NOT_FOUND => {
-                res.map(|b| b.map_err(|e| -> BoxError { Box::new(e) }).boxed_unsync())
+                Some(res.map(|b| b.map_err(|e| -> BoxError { Box::new(e) }).boxed_unsync()))
             }
             // A directory URL answers 404 without a filesystem error. It then reaches PHP.
-            Ok(_) => forward(inner, req).await,
-            Err(e) if is_miss(&e) => forward(inner, req).await,
+            Ok(_) => None,
+            Err(e) if is_miss(&e) => None,
             // An Err outside the miss kinds is a read failure and must not reach PHP.
             // https://docs.rs/tower-http/0.7.1/tower_http/services/struct.ServeDir.html#method.try_call
             Err(e) => {
-                tracing::error!(target: "http", "static probe failed for {}: {e}", req.uri().path());
-                http::Response::builder()
-                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(Empty::<Bytes>::new().map_err(BoxError::from).boxed_unsync())
-                    .unwrap()
+                tracing::error!(target: "http", "static probe failed for {}: {e}", req.uri.path());
+                Some(
+                    http::Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .body(Empty::<Bytes>::new().map_err(BoxError::from).boxed_unsync())
+                        .unwrap(),
+                )
             }
         }
     }
-}
-
-/// Hands a miss to the inner service.
-/// The `Oneshot` is boxed as `Send` before the await: the compiler cannot prove `Send` for a held `Oneshot` over this request type.
-/// https://github.com/rust-lang/rust/issues/110338
-async fn forward<S>(inner: S, req: http::Request<Body>) -> http::Response<Body>
-where
-    S: Service<http::Request<Body>, Response = http::Response<Body>, Error = Infallible>
-        + Send
-        + 'static,
-    S::Future: Send + 'static,
-{
-    let call: Pin<Box<dyn Future<Output = Result<http::Response<Body>, Infallible>> + Send>> =
-        Box::pin(inner.oneshot(req));
-    let Ok(res) = call.await;
-    res
 }
 
 #[cfg(test)]

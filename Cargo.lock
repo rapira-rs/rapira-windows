@@ -975,7 +975,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
- "tower",
  "tracing",
  "windows-sys",
 ]
@@ -985,7 +984,6 @@ name = "rapira_net"
 version = "0.8.1"
 dependencies = [
  "anyhow",
- "rapira_config",
  "socket2",
  "tokio",
  "tracing",
@@ -1037,7 +1035,6 @@ dependencies = [
  "rapira_config",
  "serde",
  "tokio",
- "tower",
  "tower-http 0.7.1",
  "tracing",
 ]
@@ -1278,7 +1275,6 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
- "rapira_net",
  "rapira_sapi",
  "serde_json",
  "socket2",

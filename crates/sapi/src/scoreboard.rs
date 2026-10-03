@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::sync::atomic::Ordering::{Relaxed, Release};
 
-use rapira_scoreboard::{SLOT_ACTIVE, SLOT_DRAINING, SLOT_IDLE, SharedSlot, now_millis};
+use rapira_scoreboard::{SLOT_ACTIVE, SLOT_DRAINING, SLOT_IDLE, SharedSlot};
 
 thread_local! {
     pub static SB: Cell<Option<&'static SharedSlot>> = const { Cell::new(None) };
@@ -23,7 +23,6 @@ pub fn sb_set(slot: &'static SharedSlot) {
     SB.set(Some(slot));
 }
 
-/// Each Release store publishes the Relaxed write before it (errors, last_activity_ms) to the master's Acquire load.
 pub fn sb_update(event: Event) {
     let Some(s) = SB.get() else { return };
     match event {
@@ -48,11 +47,9 @@ pub fn sb_update(event: Event) {
             } else {
                 SLOT_IDLE
             };
-            s.last_activity_ms.store(now_millis(), Relaxed);
             s.state.store(state, Release);
         }
         Event::Active => {
-            s.last_activity_ms.store(now_millis(), Relaxed);
             s.state.store(SLOT_ACTIVE, Release);
         }
         Event::Draining => DRAINING.set(true),
