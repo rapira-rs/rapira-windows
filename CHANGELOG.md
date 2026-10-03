@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.9.0](https://github.com/rapira-rs/rapira-windows/compare/v0.8.0...v0.9.0) (2026-10-03)
+
+
+### ⚠ BREAKING CHANGES
+
+* align Windows plugins and release builds with core
+
+### Features
+
+* align Windows plugins and release builds with core ([a27e362](https://github.com/rapira-rs/rapira-windows/commit/a27e362d78080c21f1c5d2fe2b7821578e6ebedc))
+* align Windows plugins and release bundles with core ([9c09652](https://github.com/rapira-rs/rapira-windows/commit/9c096523fbb059c9c9e2487e878d6e736497d12e))
+* fill $_SERVER at boot in worker and dispatcher mode ([eea1103](https://github.com/rapira-rs/rapira-windows/commit/eea1103cbcfea9728ede10d2cca5fd5fe12259ed))
+* fill $_SERVER at boot in worker and dispatcher mode ([9545293](https://github.com/rapira-rs/rapira-windows/commit/95452933f337e720e95727fa0cc621761badfb72))
+
 ## [0.8.0](https://github.com/rapira-rs/rapira-windows/compare/v0.1.0...v0.8.0) (2026-09-04)
 
 
