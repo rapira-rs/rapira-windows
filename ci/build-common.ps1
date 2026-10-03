@@ -10,6 +10,7 @@ function Get-Architecture {
         'Arm64' {
             return [pscustomobject] @{
                 Name = 'arm64'
+                Target = 'aarch64-pc-windows-msvc'
                 PeMachine = [uint16] 0xaa64
                 PhpMachine = 'ARM64'
                 VcVars = 'arm64'
@@ -18,6 +19,7 @@ function Get-Architecture {
         'X64' {
             return [pscustomobject] @{
                 Name = 'x86_64'
+                Target = 'x86_64-pc-windows-msvc'
                 PeMachine = [uint16] 0x8664
                 PhpMachine = 'AMD64'
                 VcVars = 'x64'
@@ -176,6 +178,8 @@ function Replace-RequiredText {
 }
 
 function Find-VisualStudio {
+    param([string] $RequiredPath = 'VC\Auxiliary\Build\vcvarsall.bat')
+
     $visualStudioRoot = Join-Path $env:SystemDrive 'Program Files\Microsoft Visual Studio'
     if (-not (Test-Path -LiteralPath $visualStudioRoot -PathType Container)) {
         throw "Visual Studio was not found below '$visualStudioRoot'."
@@ -183,8 +187,7 @@ function Find-VisualStudio {
 
     $candidates = foreach ($versionDirectory in Get-ChildItem -LiteralPath $visualStudioRoot -Directory) {
         foreach ($editionDirectory in Get-ChildItem -LiteralPath $versionDirectory.FullName -Directory) {
-            $vcVars = Join-Path $editionDirectory.FullName 'VC\Auxiliary\Build\vcvarsall.bat'
-            if (Test-Path -LiteralPath $vcVars -PathType Leaf) {
+            if (Test-Path -LiteralPath (Join-Path $editionDirectory.FullName $RequiredPath) -PathType Leaf) {
                 $rank = if ($versionDirectory.Name -match '^\d{4}$') {
                     switch ($versionDirectory.Name) {
                         '2022' { 17 }
@@ -198,13 +201,13 @@ function Find-VisualStudio {
                 else {
                     0
                 }
-                [pscustomobject] @{ Path = $vcVars; Rank = $rank }
+                [pscustomobject] @{ Path = $editionDirectory.FullName; Rank = $rank }
             }
         }
     }
     $selected = $candidates | Sort-Object Rank -Descending | Select-Object -First 1
     if ($null -eq $selected) {
-        throw "Visual Studio vcvarsall.bat was not found below '$visualStudioRoot'."
+        throw "Visual Studio $RequiredPath was not found below '$visualStudioRoot'."
     }
     return $selected.Path
 }

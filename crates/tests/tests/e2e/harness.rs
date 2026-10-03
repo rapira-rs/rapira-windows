@@ -9,7 +9,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 pub use super::console::send_ctrl_break;
-use rapira_net::ListenAddr;
 use rapira_sapi::{Addr, Mode};
 use serde_json::Value;
 use tests::server_log;
@@ -34,7 +33,7 @@ pub struct Server {
     pub addr: SocketAddr,
     pub dir: PathBuf,
     /// The listener of the `[grpc]` pool, when the config has one.
-    pub grpc: Option<ListenAddr>,
+    pub grpc: Option<SocketAddr>,
 }
 
 impl Server {
@@ -180,7 +179,7 @@ fn tcp(port: u16) -> String {
 fn spawn_ready(
     dir: PathBuf,
     render: &dyn Fn(u16) -> String,
-    explicit: Option<&ListenAddr>,
+    explicit: Option<&SocketAddr>,
     rust_log: Option<&str>,
     cwd_ini: Option<&CwdIni<'_>>,
     env: &[(String, String)],
@@ -188,7 +187,7 @@ fn spawn_ready(
     let mut last_log = String::new();
     for _ in 0..3 {
         let (mut child, addr) = spawn_attempt(&dir, render, rust_log, cwd_ini, env);
-        let ready = explicit.cloned().unwrap_or(ListenAddr::Tcp(addr));
+        let ready = explicit.copied().unwrap_or(addr);
         if wait_for_listener(&ready, &mut child, BOOT) {
             return Server {
                 child,
@@ -396,7 +395,7 @@ pub fn spawn_grpc(processes: usize) -> Server {
         )
     };
     let mut srv = spawn_ready(dir, &render, None, Some("info"), None, &[]);
-    srv.grpc = Some(ListenAddr::Tcp(srv.addr));
+    srv.grpc = Some(srv.addr);
     srv
 }
 
@@ -411,7 +410,7 @@ pub fn spawn_grpc_with_http(http_fixture: &str) -> (Server, SocketAddr) {
             + &render_grpc(&tcp(port), 1, "grpc-worker.php", "echo.binpb", None, "")
     };
     let mut srv = spawn_ready(dir, &render, None, Some("info"), None, &[]);
-    srv.grpc = Some(ListenAddr::Tcp(srv.addr));
+    srv.grpc = Some(srv.addr);
     (srv, SocketAddr::from(([127, 0, 0, 1], http_port.get())))
 }
 
@@ -439,10 +438,10 @@ pub fn spawn_grpc_boot_failure(descriptor_set: &str, service: &str) -> (ExitStat
 pub struct Spawn {
     http: Option<(Mode, PathBuf)>,
     /// The listener of the `[http]` pool; None listens on a TCP port that the harness picks.
-    http_listen: Option<ListenAddr>,
+    http_listen: Option<SocketAddr>,
     grpc: Option<PathBuf>,
     /// The listener of the `[grpc]` pool; None listens on a TCP port that the harness picks.
-    grpc_listen: Option<ListenAddr>,
+    grpc_listen: Option<SocketAddr>,
     /// The `[grpc] services` list; None leaves the key out.
     services: Option<Vec<String>>,
     /// The `[grpc] descriptor_set`; None stages `echo.binpb`.
@@ -506,13 +505,13 @@ impl Spawn {
     }
 
     /// The `[http]` pool listens on `listen`. A TCP address here is not a readiness target: [`Spawn::spawn`] then waits for another pool.
-    pub fn http_listen(mut self, listen: ListenAddr) -> Spawn {
+    pub fn http_listen(mut self, listen: SocketAddr) -> Spawn {
         self.http_listen = Some(listen);
         self
     }
 
     /// The `[grpc]` pool listens on `listen`. A TCP address here is not a readiness target: [`Spawn::spawn`] then waits for another pool.
-    pub fn grpc_listen(mut self, listen: ListenAddr) -> Spawn {
+    pub fn grpc_listen(mut self, listen: SocketAddr) -> Spawn {
         self.grpc_listen = Some(listen);
         self
     }
@@ -608,15 +607,15 @@ impl Spawn {
         );
         if self.grpc.is_some() {
             srv.grpc = Some(match &self.grpc_listen {
-                Some(listen) => listen.clone(),
-                None => ListenAddr::Tcp(SocketAddr::from(([127, 0, 0, 1], grpc_port.get()))),
+                Some(listen) => *listen,
+                None => SocketAddr::from(([127, 0, 0, 1], grpc_port.get())),
             });
         }
         srv
     }
 
     /// The first explicit listener, when the harness does not select a port.
-    fn explicit_listener(&self) -> Option<&ListenAddr> {
+    fn explicit_listener(&self) -> Option<&SocketAddr> {
         let picked = (self.http.is_some() && self.http_listen.is_none())
             || (self.grpc.is_some() && self.grpc_listen.is_none());
         if picked {
@@ -732,17 +731,13 @@ fn stage_dir(dir: &Path, sub: &str, fixture: &Path) -> String {
 }
 
 /// Waits for the prepared listener to accept a connection.
-fn wait_for_listener(listen: &ListenAddr, child: &mut Child, timeout: Duration) -> bool {
+fn wait_for_listener(listen: &SocketAddr, child: &mut Child, timeout: Duration) -> bool {
     let end = Instant::now() + timeout;
     while Instant::now() < end {
         if child.try_wait().ok().flatten().is_some() {
             return false;
         }
-        let accepted = match listen {
-            ListenAddr::Tcp(addr) => {
-                TcpStream::connect_timeout(addr, Duration::from_millis(200)).is_ok()
-            }
-        };
+        let accepted = TcpStream::connect_timeout(listen, Duration::from_millis(200)).is_ok();
         if accepted {
             std::thread::sleep(Duration::from_millis(100));
             return child.try_wait().ok().flatten().is_none();
@@ -1181,8 +1176,8 @@ pub fn slot_line(srv: &Server, fragment: &str) -> String {
 }
 
 /// The listener of the `[grpc]` pool of `srv`.
-pub fn listen(srv: &Server) -> ListenAddr {
-    srv.grpc.clone().expect("the config has a [grpc] pool")
+pub fn listen(srv: &Server) -> SocketAddr {
+    srv.grpc.expect("the config has a [grpc] pool")
 }
 
 /// The context of each `call` record that `grpc/wire-worker.php` logged, in log order. The fixture logs before it answers, so a call that has its response is in the log.

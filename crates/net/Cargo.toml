@@ -11,7 +11,6 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-rapira_config = { workspace = true }
 tracing = { workspace = true }
 windows-sys = { workspace = true, features = ["Win32_Networking_WinSock"] }
 socket2 = { version = "0.6", features = ["all"] }

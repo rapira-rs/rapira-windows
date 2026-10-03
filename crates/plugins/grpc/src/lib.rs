@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -5,7 +6,7 @@ use anyhow::{Result, anyhow};
 use connectrpc::Router;
 use connectrpc_health::StaticChecker;
 use connectrpc_reflection::Reflector;
-use rapira_net::{ListenAddr, PrepareCtx, PreparedListener};
+use rapira_net::{PrepareCtx, PreparedListener};
 use rapira_sapi::plugin::{Mode, PhpPart, Plugin, Worker};
 use rapira_sapi::work::Intake;
 
@@ -22,7 +23,7 @@ use schema::{MethodInfo, Schema, set_services};
 
 #[derive(Clone)]
 pub(crate) struct Config {
-    pub listen: ListenAddr,
+    pub listen: SocketAddr,
     pub schema: Arc<Schema>,
     /// Serve `grpc.reflection.v1` and `v1alpha` for the configured services.
     pub reflection: bool,

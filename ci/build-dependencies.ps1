@@ -217,7 +217,7 @@ Remove-ManagedDirectory -Path $InstallDirectory -Root $tempRoot
 New-Item -ItemType Directory $InstallDirectory -Force | Out-Null
 $nativeCmd = Get-NativeSystemExecutable -Name 'cmd.exe' -ExpectedMachine $architecture.PeMachine
 $nativeTar = Get-NativeSystemExecutable -Name 'tar.exe' -ExpectedMachine $architecture.PeMachine
-$vcVars = Find-VisualStudio
+$vcVars = Join-Path (Find-VisualStudio) 'VC\Auxiliary\Build\vcvarsall.bat'
 $sourceRoot = Join-Path $tempRoot 'rapira-php-source'
 $archiveDirectory = Join-Path $sourceRoot 'archives'
 $workRoot = Join-Path $sourceRoot "work\dependencies-arm64-$([Guid]::NewGuid().ToString('N'))"

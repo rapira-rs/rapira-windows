@@ -1,8 +1,9 @@
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use rapira_net::{ListenAddr, PrepareCtx, PreparedListener};
+use rapira_net::{PrepareCtx, PreparedListener};
 use rapira_sapi::plugin::{Mode, PhpPart, Plugin, Worker};
 use rapira_sapi::work::Intake;
 
@@ -13,7 +14,6 @@ mod check;
 pub mod config;
 mod exchange;
 mod handler;
-pub mod middleware;
 pub mod multipart;
 mod php;
 mod request;
@@ -22,9 +22,8 @@ mod serve;
 
 pub use php::PHP_PART;
 
-#[derive(Clone)]
 pub(crate) struct Config {
-    pub listen: ListenAddr,
+    pub listen: SocketAddr,
     pub server_name: String,
     pub server_port: u16,
     pub max_body_size: usize,
@@ -33,8 +32,7 @@ pub(crate) struct Config {
     pub entrypoint: String,
     pub write_timeout: Duration,
     pub keepalive_timeout: Duration,
-    /// `[http].middleware` in config order, the first listed outermost.
-    pub middleware: Vec<middleware::Layer>,
+    pub static_files: Option<rapira_static_files::StaticFiles>,
     /// Multipart limits of a dispatcher pool; None in the other modes, which feed php-src's own rfc1867 through read_post. Each worker spools in its own dir under `dir`, which `serve` creates.
     pub uploads: Option<multipart::Limits>,
     /// sendFile() containment root.

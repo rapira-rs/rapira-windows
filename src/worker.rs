@@ -101,7 +101,6 @@ pub fn serve(
                 plugin,
                 sink,
                 stopper.clone(),
-                supervisor.process_control_timeout,
                 supervisor.drain_grace(),
             )?);
             stoppers.push(stopper);

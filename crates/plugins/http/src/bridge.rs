@@ -10,7 +10,7 @@ use tokio::sync::mpsc::Receiver;
 use tokio::sync::watch;
 
 use crate::handler::InflightReqCount;
-use crate::middleware::BoxError;
+use crate::response::BoxError;
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct ConnectionState {

@@ -1,4 +1,3 @@
-use std::convert::Infallible;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -11,11 +10,11 @@ use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use rapira_sapi::work::{Intake, Refused};
 use rapira_sapi::{Addr, Frame, Request};
-use tower::{Service as _, ServiceExt as _};
+use tokio::time::timeout;
 
 use crate::check::{self, Rejection};
-use crate::middleware::{self, BoxError, Layer, Peer, Service};
-use crate::response::{error_response, response_headers};
+use crate::request::Peer;
+use crate::response::{self, BoxError, error_response, response_headers};
 use crate::{Config, Exchange, bridge, multipart, request};
 
 pub(crate) struct Shared {
@@ -73,18 +72,11 @@ impl Drop for InflightReqCount {
     }
 }
 
-/// Per-request values that travel to [`Conn::serve`] through the request extensions.
-#[derive(Clone)]
-struct ReqState {
-    authority: Option<Vec<u8>>,
-    guard: Arc<InflightReqCount>,
-}
-
 pub(crate) struct RespBody {
     kind: BodyKind,
     guard: Arc<InflightReqCount>,
     /// Declared body bytes still to pass through, with the connection state that holds the flush count.
-    /// Armed by [`respond`] once every middleware has returned.
+    /// Armed by [`respond`] for the final response body.
     transport: Option<(u64, tokio::sync::watch::Receiver<bridge::ConnectionState>)>,
 }
 
@@ -95,7 +87,7 @@ pub(crate) struct RespBody {
 enum BodyKind {
     Reply(bridge::ReplyBody),
     Empty,
-    Boxed(middleware::Body),
+    Boxed(response::Body),
 }
 
 fn refused(status: http::StatusCode, req_count: Arc<InflightReqCount>) -> http::Response<RespBody> {
@@ -149,16 +141,14 @@ impl Body for RespBody {
     }
 }
 
-/// Serves one request of the connection. `chain` is [`Conn::chain`].
+/// Serves one request of the connection.
 pub(crate) async fn respond(
     handler: Arc<Conn>,
-    chain: Option<Service>,
     req: http::Request<Incoming>,
 ) -> http::Response<RespBody> {
     let closed = handler.closed.clone();
     let method = req.method().clone();
-    let mut response = handle(handler, chain, req).await;
-    // Track the body sent to hyper after all middleware has returned.
+    let mut response = handle(handler, req).await;
     if let Some(length) = framed_length(&method, &response) {
         let body = response.body_mut();
         if length == 0 {
@@ -194,15 +184,7 @@ fn framed_length(method: &http::Method, response: &http::Response<RespBody>) -> 
         .or_else(|| response.body().size_hint().exact())
 }
 
-async fn handle<B>(
-    handler: Arc<Conn>,
-    chain: Option<Service>,
-    req: http::Request<B>,
-) -> http::Response<RespBody>
-where
-    B: Body<Data = bytes::Bytes> + Unpin + Send + 'static,
-    B::Error: std::error::Error + Send + Sync + 'static,
-{
+async fn handle(handler: Arc<Conn>, req: http::Request<Incoming>) -> http::Response<RespBody> {
     let reqs_counter: Arc<InflightReqCount> =
         Arc::new(InflightReqCount::init(&handler.shared.inflight));
     let received_at: f64 = rapira_sapi::work::now_unix_f64();
@@ -221,6 +203,16 @@ where
         }
     };
 
+    if let Some(files) = &handler.shared.cfg.static_files
+        && let Some(response) = files.serve(&parts).await
+    {
+        return response.map(|body| RespBody {
+            kind: BodyKind::Boxed(body),
+            guard: reqs_counter,
+            transport: None,
+        });
+    }
+
     let peer: Peer = Peer {
         remote: handler.remote.clone(),
         server: handler.server.clone(),
@@ -228,50 +220,19 @@ where
         received_at,
     };
 
-    let Some(chain) = chain else {
-        return serve_php(
-            &handler.shared,
-            &handler.closed,
-            authority,
-            reqs_counter,
-            &mut parts,
-            incoming,
-            peer,
-        )
-        .await;
-    };
-
-    parts.extensions.insert(peer);
-    parts.extensions.insert(ReqState {
+    serve_php(
+        &handler.shared,
+        &handler.closed,
         authority,
-        guard: Arc::clone(&reqs_counter),
-    });
-    let body: middleware::Body = incoming.map_err(BoxError::from).boxed_unsync();
-    let req = middleware::Request::from_parts(parts, body);
-
-    // The awaited future is the boxed one that `call` returns: the compiler cannot prove `Send` for a held `Oneshot` over this request type.
-    // https://github.com/rust-lang/rust/issues/110338
-    let mut chain = chain;
-    let Ok(ready) = chain.ready().await;
-    let Ok(res) = ready.call(req).await;
-    // The final response and the PHP reply share one guard; the drain window
-    // stays open until the last holder drops.
-    res.map(|body| RespBody {
-        kind: BodyKind::Boxed(body),
-        guard: reqs_counter,
-        transport: None,
-    })
+        reqs_counter,
+        &mut parts,
+        incoming,
+        peer,
+    )
+    .await
 }
 
-/// Wraps `inner` in `layers`, the first listed outermost.
-fn fold(layers: &[Layer], inner: Service) -> Service {
-    layers
-        .iter()
-        .rev()
-        .fold(inner, |inner, layer| tower::Layer::layer(layer, inner))
-}
-
-/// One connection. [`Conn::serve`] is the inner service of its middleware chain.
+/// One HTTP connection.
 pub(crate) struct Conn {
     shared: Arc<Shared>,
     closed: tokio::sync::watch::Receiver<bridge::ConnectionState>,
@@ -293,66 +254,24 @@ impl Conn {
             server,
         })
     }
-
-    /// The configured middleware around [`Conn::serve`]. None without middleware.
-    pub(crate) fn chain(self: &Arc<Self>) -> Option<Service> {
-        let layers = &self.shared.cfg.middleware;
-        if layers.is_empty() {
-            return None;
-        }
-        let conn = Arc::clone(self);
-        let serve = tower::service_fn(move |req| {
-            let conn = Arc::clone(&conn);
-            async move { Ok::<_, Infallible>(conn.serve(req).await) }
-        });
-        Some(fold(layers, Service::new(serve)))
-    }
-
-    async fn serve(&self, req: middleware::Request) -> middleware::Response {
-        let (mut parts, body) = req.into_parts();
-        let Some(state) = parts.extensions.remove::<ReqState>() else {
-            tracing::error!(target: "http", "request state missing from request extensions");
-            return error_response(http::StatusCode::INTERNAL_SERVER_ERROR);
-        };
-        let Some(peer) = parts.extensions.remove::<Peer>() else {
-            tracing::error!(target: "http", "peer info missing from request extensions");
-            return error_response(http::StatusCode::INTERNAL_SERVER_ERROR);
-        };
-        serve_php(
-            &self.shared,
-            &self.closed,
-            state.authority,
-            state.guard,
-            &mut parts,
-            body,
-            peer,
-        )
-        .await
-        .map(BodyExt::boxed_unsync)
-    }
 }
 
-async fn serve_php<B>(
+async fn serve_php(
     shared: &Shared,
     closed: &tokio::sync::watch::Receiver<bridge::ConnectionState>,
     authority: Option<Vec<u8>>,
     guard: Arc<InflightReqCount>,
     parts: &mut http::request::Parts,
-    body: B,
+    body: Incoming,
     peer: Peer,
-) -> http::Response<RespBody>
-where
-    B: Body<Data = bytes::Bytes> + Unpin,
-    B::Error: std::fmt::Display,
-{
+) -> http::Response<RespBody> {
     let cfg = &shared.cfg;
     let mut body = body;
-    // The direct path bounds the hint through the content-length check; a middleware body can report any lower bound.
     let reserve = body.size_hint().lower().min(cfg.max_body_size as u64) as usize;
     let mut collected: Vec<u8> = Vec::with_capacity(reserve);
     loop {
         // hyper only times the head read, so each body frame gets its own progress bound here.
-        let frame = match timeout_lazy(cfg.keepalive_timeout, body.frame()).await {
+        let frame = match timeout(cfg.keepalive_timeout, body.frame()).await {
             Ok(frame) => frame,
             Err(_) => {
                 tracing::debug!(target: "http", "request body stalled past keepalive_timeout");
@@ -432,7 +351,7 @@ where
         BodyKind::Empty
     } else {
         let staged = if declared_cl.is_some() {
-            timeout_lazy(Duration::from_millis(10), reply.recv())
+            timeout(Duration::from_millis(10), reply.recv())
                 .await
                 .ok()
                 .flatten()
@@ -456,18 +375,6 @@ where
     *res.status_mut() = status;
     *res.headers_mut() = response_headers(headers, declared_cl);
     res
-}
-
-/// Polls `fut` once and arms the timer only when it is pending: a ready future needs no timer.
-async fn timeout_lazy<F: Future>(
-    dur: Duration,
-    fut: F,
-) -> Result<F::Output, tokio::time::error::Elapsed> {
-    let mut fut = std::pin::pin!(fut);
-    match std::future::poll_fn(|cx| Poll::Ready(fut.as_mut().poll(cx))).await {
-        Poll::Ready(out) => Ok(out),
-        Poll::Pending => tokio::time::timeout(dur, fut).await,
-    }
 }
 
 /// Both refusals come before dispatch: the multipart parse, then the intake.
@@ -528,166 +435,4 @@ async fn parse_multipart(
         })?;
     req.body = rapira_sapi::types::Body::Multipart(parsed?);
     Ok(req)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tower::layer::layer_fn;
-    use tower::service_fn;
-
-    use crate::response::empty_body;
-
-    fn deny() -> Layer {
-        Layer::new(layer_fn(|_inner: Service| {
-            service_fn(|_req: middleware::Request| async {
-                Ok(error_response(http::StatusCode::FORBIDDEN))
-            })
-        }))
-    }
-
-    /// Appends `{name}-in` to the request and `{name}-out` to the response.
-    fn tag(name: &'static str) -> Layer {
-        Layer::new(
-            tower::ServiceBuilder::new()
-                .map_request(move |mut req: middleware::Request| {
-                    req.headers_mut()
-                        .append("x-trace", format!("{name}-in").parse().unwrap());
-                    req
-                })
-                .map_response(move |mut res: middleware::Response| {
-                    res.headers_mut()
-                        .append("x-trace", format!("{name}-out").parse().unwrap());
-                    res
-                }),
-        )
-    }
-
-    /// Answers 200 with the `x-trace` values of the request.
-    fn echo() -> Service {
-        Service::new(service_fn(|req: middleware::Request| async move {
-            let mut res = http::Response::builder()
-                .status(200)
-                .body(empty_body())
-                .unwrap();
-            for v in req.headers().get_all("x-trace") {
-                res.headers_mut().append("x-trace", v.clone());
-            }
-            Ok(res)
-        }))
-    }
-
-    fn trace(res: &middleware::Response) -> Vec<&str> {
-        res.headers()
-            .get_all("x-trace")
-            .iter()
-            .map(|v| v.to_str().unwrap())
-            .collect()
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn chain_runs_outermost_first_and_unwinds_in_reverse() {
-        let chain = fold(&[tag("a"), tag("b")], echo());
-        let Ok(res) = chain.oneshot(http::Request::new(empty_body())).await;
-        assert_eq!(res.status(), 200);
-        assert_eq!(trace(&res), ["a-in", "b-in", "b-out", "a-out"]);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn short_circuit_skips_downstream_and_the_handler() {
-        let chain = fold(&[tag("a"), deny(), tag("never")], echo());
-        let Ok(res) = chain.oneshot(http::Request::new(empty_body())).await;
-        assert_eq!(res.status(), 403);
-        assert_eq!(trace(&res), ["a-out"]);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn empty_chain_reaches_the_handler_directly() {
-        let chain = fold(&[], echo());
-        let mut req = http::Request::new(empty_body());
-        req.headers_mut().append("x-trace", "solo".parse().unwrap());
-        let Ok(res) = chain.oneshot(req).await;
-        assert_eq!(res.status(), 200);
-        assert_eq!(trace(&res), ["solo"]);
-    }
-
-    /// Pending for `left` polls, then ready. Each pending poll wakes the task at once.
-    struct ReadyAfter {
-        left: Option<u32>,
-    }
-
-    impl Future for ReadyAfter {
-        type Output = ();
-        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-            match self.left {
-                Some(0) => Poll::Ready(()),
-                Some(n) => {
-                    self.left = Some(n - 1);
-                    cx.waker().wake_by_ref();
-                    Poll::Pending
-                }
-                None => Poll::Pending,
-            }
-        }
-    }
-
-    /// Outside a runtime `tokio::time::timeout` panics: a ready future must complete without it.
-    #[test]
-    fn timeout_lazy_ready_future_needs_no_timer() {
-        let mut fut = std::pin::pin!(timeout_lazy(
-            Duration::from_secs(1),
-            ReadyAfter { left: Some(0) }
-        ));
-        let mut cx = Context::from_waker(std::task::Waker::noop());
-        assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Ready(Ok(()))));
-    }
-
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn timeout_lazy_outcomes() {
-        struct Case {
-            name: &'static str,
-            pending_polls: Option<u32>,
-            elapsed: bool,
-            waited: Duration,
-        }
-        let dur = Duration::from_millis(10);
-        let cases = [
-            Case {
-                name: "ready future returns at once",
-                pending_polls: Some(0),
-                elapsed: false,
-                waited: Duration::ZERO,
-            },
-            Case {
-                name: "future ready after the first poll returns Ok",
-                pending_polls: Some(1),
-                elapsed: false,
-                waited: Duration::ZERO,
-            },
-            Case {
-                name: "future ready after several polls returns Ok",
-                pending_polls: Some(3),
-                elapsed: false,
-                waited: Duration::ZERO,
-            },
-            Case {
-                name: "pending future times out at the deadline",
-                pending_polls: None,
-                elapsed: true,
-                waited: dur,
-            },
-        ];
-        for case in cases {
-            let start = tokio::time::Instant::now();
-            let out = timeout_lazy(
-                dur,
-                ReadyAfter {
-                    left: case.pending_polls,
-                },
-            )
-            .await;
-            assert_eq!(out.is_err(), case.elapsed, "{}", case.name);
-            assert_eq!(start.elapsed(), case.waited, "{}", case.name);
-        }
-    }
 }

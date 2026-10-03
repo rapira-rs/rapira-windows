@@ -182,10 +182,9 @@ fn cached_static_files_revalidate_over_the_wire() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// One connection serves sequential requests through the middleware chain:
-/// miss to PHP, static hit, the same file from the cache, miss to PHP again.
+/// One connection serves a PHP response, a static file, the cached file, and another PHP response.
 #[test]
-fn the_chain_serves_sequential_requests_on_one_connection() {
+fn static_files_and_php_serve_sequential_requests_on_one_connection() {
     let root = static_root(&[("app.css", "body{}")]);
     let srv = spawn_with_http_extra(
         "shared/echo-worker.php",

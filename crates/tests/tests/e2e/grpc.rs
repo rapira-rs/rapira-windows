@@ -1,7 +1,6 @@
 use std::net::SocketAddr;
 
 use http::Method;
-use rapira_net::ListenAddr;
 use serde_json::Value;
 use tests::grpc::{Conn, ECHO_PATH as ECHO, Fields, Wire, envelope, fields};
 use tests::server_log;
@@ -67,7 +66,7 @@ fn php_outcomes_reach_the_client() -> anyhow::Result<()> {
     let mut srv = Spawn::grpc(fixture_path("grpc/echo-worker.php"))
         .json_log()
         .spawn();
-    let listen = ListenAddr::Tcp(srv.addr);
+    let listen = srv.addr;
     let rt = runtime();
     for case in cases {
         let got = rt.block_on(async {
@@ -112,7 +111,7 @@ fn php_outcomes_reach_the_client() -> anyhow::Result<()> {
 /// A Connect unary call with a JSON body over HTTP/1.1. The server may send the reply chunked, so hyper reads it.
 fn connect_json(addr: SocketAddr, path: &str, body: &str) -> anyhow::Result<(u16, String)> {
     let call = async {
-        let mut conn = Conn::open(&ListenAddr::Tcp(addr), Wire::Http1).await?;
+        let mut conn = Conn::open(&addr, Wire::Http1).await?;
         let got = conn
             .send(
                 Method::POST,

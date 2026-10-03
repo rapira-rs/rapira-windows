@@ -1,6 +1,5 @@
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::anyhow;
 use tokio::sync::watch;
@@ -23,7 +22,7 @@ pub struct Worker {
     pub sink: Sink,
     /// Set to true once. The plugin stops accepting, drains within `drain_grace`, and returns from `serve`.
     pub stop: watch::Receiver<bool>,
-    /// The bound of the plugin's drain after the stop. The root sets it below the join bound of [`run_plugin`].
+    /// The plugin drain limit. The root leaves time for interpreter teardown within its shutdown deadline.
     pub drain_grace: Duration,
 }
 
@@ -45,7 +44,6 @@ pub struct Running {
     name: &'static str,
     thread: Option<JoinHandle<anyhow::Result<()>>>,
     stopper: Stopper,
-    grace: Duration,
 }
 
 impl Running {
@@ -53,34 +51,9 @@ impl Running {
         self.thread.as_ref().is_none_or(JoinHandle::is_finished)
     }
 
-    /// Joins the plugin thread. An error from serve, a panic, or a join past `grace` after stop is an Err.
+    /// Joins the plugin thread. The root's shutdown timer bounds this wait.
     pub fn join(mut self) -> anyhow::Result<()> {
         let thread = self.thread.take().expect("join consumes Running");
-        let events = &self.stopper.events;
-        let mut state = events.lock();
-        while !state.ended {
-            state = match state.stopped_at {
-                None => events
-                    .changed
-                    .wait(state)
-                    .unwrap_or_else(PoisonError::into_inner),
-                Some(at) => {
-                    let Some(left) = self.grace.checked_sub(at.elapsed()) else {
-                        return Err(anyhow!(
-                            "{} did not stop within {:?}",
-                            self.name,
-                            self.grace
-                        ));
-                    };
-                    events
-                        .changed
-                        .wait_timeout(state, left)
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .0
-                }
-            };
-        }
-        drop(state);
         thread.join().map_err(|payload| {
             let msg = payload
                 .downcast_ref::<&str>()
@@ -105,56 +78,20 @@ impl Drop for Running {
 #[derive(Clone, Default)]
 pub struct Stopper {
     flag: watch::Sender<bool>,
-    events: Arc<JoinEvents>,
 }
 
 impl Stopper {
     pub fn stop(&self) {
         self.flag.send_replace(true);
-        let mut state = self.events.lock();
-        state.stopped_at.get_or_insert_with(Instant::now);
-        self.events.changed.notify_all();
-    }
-}
-
-/// The two events that [`Running::join`] waits for.
-#[derive(Default)]
-struct JoinEvents {
-    state: Mutex<JoinState>,
-    changed: Condvar,
-}
-
-#[derive(Default)]
-struct JoinState {
-    /// The first stop: the grace of the join counts from here.
-    stopped_at: Option<Instant>,
-    /// The plugin thread ended.
-    ended: bool,
-}
-
-impl JoinEvents {
-    fn lock(&self) -> MutexGuard<'_, JoinState> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-}
-
-/// Marks the end of the plugin thread when it drops, also on a panic.
-struct Ended(Arc<JoinEvents>);
-
-impl Drop for Ended {
-    fn drop(&mut self) {
-        self.0.lock().ended = true;
-        self.0.changed.notify_all();
     }
 }
 
 /// Builds one two-worker tokio runtime with the IO and time drivers, spawns `rapira-{name}` and runs `serve` on it.
-/// `stopper` stops the plugin. `grace` bounds the join after the stop. `drain_grace` goes to [`Worker::drain_grace`].
+/// `stopper` stops the plugin. `drain_grace` goes to [`Worker::drain_grace`].
 pub fn run_plugin(
     plugin: Box<dyn Plugin>,
     sink: Sink,
     stopper: Stopper,
-    grace: Duration,
     drain_grace: Duration,
 ) -> anyhow::Result<Running> {
     let name = plugin.name();
@@ -164,7 +101,6 @@ pub fn run_plugin(
         .thread_name(format!("rapira-{name}-io"))
         .build()
         .map_err(|e| anyhow!("building the {name} runtime: {e}"))?;
-    let ended = Ended(Arc::clone(&stopper.events));
     let worker = Worker {
         handle: rt.handle().clone(),
         sink,
@@ -174,7 +110,6 @@ pub fn run_plugin(
     let thread = std::thread::Builder::new()
         .name(format!("rapira-{name}"))
         .spawn(move || {
-            let _ended = ended;
             let result = plugin.serve(worker);
             // The runtime drops here, on a plain thread: a drop in an async context panics.
             drop(rt);
@@ -185,6 +120,5 @@ pub fn run_plugin(
         name,
         thread: Some(thread),
         stopper,
-        grace,
     })
 }

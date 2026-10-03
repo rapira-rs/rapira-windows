@@ -3,17 +3,15 @@ use std::net::{SocketAddr, TcpListener};
 use anyhow::Context;
 use socket2::{Domain, Protocol, Socket, Type};
 
-pub use rapira_config::ListenAddr;
-
 /// A single owner carries the socket from boot to the plugin's IO runtime.
 #[derive(Debug)]
 pub struct PreparedListener {
     pub(crate) socket: TcpListener,
-    addr: ListenAddr,
+    addr: SocketAddr,
 }
 
 impl PreparedListener {
-    pub fn addr(&self) -> &ListenAddr {
+    pub fn addr(&self) -> &SocketAddr {
         &self.addr
     }
 }
@@ -29,8 +27,7 @@ impl PrepareCtx {
         Self::default()
     }
 
-    pub fn bind(&mut self, addr: &ListenAddr) -> anyhow::Result<PreparedListener> {
-        let ListenAddr::Tcp(addr) = addr;
+    pub fn bind(&mut self, addr: &SocketAddr) -> anyhow::Result<PreparedListener> {
         let socket = Socket::new(
             Domain::for_address(*addr),
             Type::STREAM,
@@ -54,7 +51,7 @@ impl PrepareCtx {
         self.addresses.push(resolved);
         Ok(PreparedListener {
             socket: socket.into(),
-            addr: ListenAddr::Tcp(resolved),
+            addr: resolved,
         })
     }
 }

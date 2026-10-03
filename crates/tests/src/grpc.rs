@@ -1,14 +1,14 @@
 //! Clients that speak gRPC, gRPC-Web and Connect over the wire.
 
+use std::net::SocketAddr;
+
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue, Method};
 use http_body_util::{BodyExt, Full};
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use rapira_net::ListenAddr;
 use rapira_sapi::Addr;
-use tokio::io::{AsyncRead, AsyncWrite};
 
 pub const ECHO_SERVICE: &str = "rapira.test.v1.EchoService";
 pub const ECHO_PATH: &str = "/rapira.test.v1.EchoService/Echo";
@@ -43,10 +43,6 @@ pub fn status_bytes(url: &str) -> Vec<u8> {
     ]
     .concat()
 }
-
-trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
-
-impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
 
 #[derive(Clone, Copy, Debug)]
 pub enum Wire {
@@ -96,15 +92,10 @@ impl Response {
 }
 
 impl Conn {
-    pub async fn open(listen: &ListenAddr, wire: Wire) -> anyhow::Result<Conn> {
-        let (io, peer): (Box<dyn Io>, Addr) = match listen {
-            ListenAddr::Tcp(addr) => {
-                let stream = tokio::net::TcpStream::connect(addr).await?;
-                let local = stream.local_addr()?;
-                (Box::new(stream), Addr::Inet(local))
-            }
-        };
-        let io = TokioIo::new(io);
+    pub async fn open(listen: &SocketAddr, wire: Wire) -> anyhow::Result<Conn> {
+        let stream = tokio::net::TcpStream::connect(listen).await?;
+        let peer = Addr::Inet(stream.local_addr()?);
+        let io = TokioIo::new(stream);
         let sender = match wire {
             Wire::H2 => {
                 let (send, conn) =

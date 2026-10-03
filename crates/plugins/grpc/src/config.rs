@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use rapira_config::{
-    ConfigCtx, ListenAddr, PoolSection, PoolSettings, check_entrypoint, nonzero_timeout,
-    parse_listen, resolve_pool,
+    ConfigCtx, PoolSection, PoolSettings, check_entrypoint, nonzero_timeout, parse_listen,
+    resolve_pool,
 };
 use serde::Deserialize;
 
@@ -30,7 +30,7 @@ pub struct Section {
 
 #[derive(Debug)]
 pub struct Settings {
-    pub listen: ListenAddr,
+    pub listen: SocketAddr,
     pub descriptor_set: PathBuf,
     /// The services to serve out of the set; None serves the services of the files that no other file of the set imports.
     pub services: Option<Vec<String>>,
@@ -58,7 +58,7 @@ fn settings(section: Section, ctx: &ConfigCtx) -> Result<Settings> {
     let listen = parse_listen(
         "grpc",
         section.listen.as_deref(),
-        ListenAddr::Tcp(SocketAddr::from((Ipv4Addr::LOCALHOST, 50051))),
+        SocketAddr::from((Ipv4Addr::LOCALHOST, 50051)),
     )?;
 
     let Some(ds) = section.descriptor_set.as_deref().filter(|s| !s.is_empty()) else {
@@ -147,7 +147,7 @@ mod tests {
     }
 
     struct Want {
-        listen: ListenAddr,
+        listen: SocketAddr,
         descriptor_set: &'static str,
         services: Option<&'static [&'static str]>,
         reflection: bool,
@@ -174,7 +174,7 @@ mod tests {
     /// What `toml("")` resolves to.
     fn base() -> Want {
         Want {
-            listen: ListenAddr::Tcp(SocketAddr::from(([127, 0, 0, 1], 50051))),
+            listen: SocketAddr::from(([127, 0, 0, 1], 50051)),
             descriptor_set: "C:/w/a.binpb",
             services: None,
             reflection: false,

@@ -1,12 +1,9 @@
+use std::sync::OnceLock;
 pub(crate) use std::{
     cell::Cell,
     ffi::{c_char, c_int},
     path::Path,
     time::Duration,
-};
-use std::{
-    net::{IpAddr, Ipv4Addr},
-    sync::OnceLock,
 };
 
 pub(crate) use crate::work::{DispatcherClasses, Held, release};
@@ -117,43 +114,11 @@ pub fn path_bytes(p: &Path) -> Vec<u8> {
     p.to_string_lossy().as_bytes().to_vec()
 }
 
-/// Appends `n` in decimal.
-pub fn push_dec(out: &mut String, mut n: u16) {
-    let mut buf = [0u8; 5];
-    let mut at = buf.len();
-    loop {
-        at -= 1;
-        buf[at] = b'0' + (n % 10) as u8;
-        n /= 10;
-        if n == 0 {
-            break;
-        }
-    }
-    out.push_str(std::str::from_utf8(&buf[at..]).expect("ascii digits"));
-}
-
-/// Appends the dotted form of `ip`, the same bytes as its `Display`.
-pub fn push_ipv4(out: &mut String, ip: Ipv4Addr) {
-    for (i, octet) in ip.octets().into_iter().enumerate() {
-        if i > 0 {
-            out.push('.');
-        }
-        push_dec(out, u16::from(octet));
-    }
-}
-
 impl AddrOwned {
     pub fn new(a: &Addr) -> Self {
         match a {
             Addr::Inet(sa) => Self::Inet {
-                ip: match sa.ip() {
-                    IpAddr::V4(v4) => {
-                        let mut ip = String::with_capacity(15);
-                        push_ipv4(&mut ip, v4);
-                        ip
-                    }
-                    v6 @ IpAddr::V6(_) => v6.to_string(),
-                },
+                ip: sa.ip().to_string(),
                 port: sa.port(),
             },
             Addr::Unix(p) => Self::Unix(p.as_deref().map(path_bytes).filter(|b| !b.is_empty())),

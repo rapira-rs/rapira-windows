@@ -3,7 +3,6 @@ use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
 use crate::harness::*;
-use rapira_net::ListenAddr;
 use rapira_sapi::Mode;
 
 const REQ: Duration = Duration::from_secs(10);
@@ -12,7 +11,7 @@ const ECHO: &str = "shared/echo-worker.php";
 #[test]
 fn port_zero_serves_on_the_logged_port() {
     let srv = Spawn::http(Mode::Dispatcher, fixture_path(ECHO))
-        .http_listen(ListenAddr::Tcp(([127, 0, 0, 1], 0).into()))
+        .http_listen(([127, 0, 0, 1], 0).into())
         .with_grpc(fixture_path("grpc/echo-worker.php"))
         .spawn();
     let end = Instant::now() + BOOT;
@@ -33,11 +32,11 @@ fn port_zero_serves_on_the_logged_port() {
 
 #[test]
 fn two_pools_on_one_address_fail_before_php_starts() {
-    let addr = ListenAddr::Tcp(([127, 0, 0, 1], free_port()).into());
+    let addr = SocketAddr::from(([127, 0, 0, 1], free_port()));
     let (status, log) = Spawn::http(Mode::Dispatcher, fixture_path(ECHO))
-        .http_listen(addr.clone())
+        .http_listen(addr)
         .with_grpc(fixture_path("grpc/echo-worker.php"))
-        .grpc_listen(addr.clone())
+        .grpc_listen(addr)
         .boot_failure();
     assert!(!status.success(), "{log}");
     assert!(
@@ -51,7 +50,7 @@ fn two_pools_on_one_address_fail_before_php_starts() {
 fn another_process_cannot_take_a_live_listener() {
     let first = Spawn::http(Mode::Dispatcher, fixture_path(ECHO)).spawn();
     let (status, log) = Spawn::http(Mode::Dispatcher, fixture_path(ECHO))
-        .http_listen(ListenAddr::Tcp(first.addr))
+        .http_listen(first.addr)
         .boot_failure();
     assert!(!status.success(), "{log}");
     assert_eq!(http_get(first.addr, "/", REQ).unwrap().0, 200);
