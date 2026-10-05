@@ -1,7 +1,6 @@
 use anyhow::{Context, bail};
 use rapira_config::{
-    ConfigCtx, LogSection, LogSettings, SupervisorSection, SupervisorSettings, resolve_log,
-    resolve_supervisor,
+    LogSettings, SupervisorSection, SupervisorSettings, resolve_log, resolve_supervisor,
 };
 use serde::Deserialize;
 use std::path::Path;
@@ -12,16 +11,18 @@ use std::path::Path;
 struct FileConfig {
     http: Option<rapira_http::config::Section>,
     grpc: Option<rapira_grpc::config::Section>,
+    observability: Option<rapira_observability::config::Section>,
     #[serde(default)]
     supervisor: SupervisorSection,
     #[serde(default)]
-    log: LogSection,
+    log: LogSettings,
 }
 
 #[derive(Debug)]
 pub struct Settings {
     pub http: Option<rapira_http::config::Settings>,
     pub grpc: Option<rapira_grpc::config::Settings>,
+    pub observability: Option<rapira_observability::config::Settings>,
     pub supervisor: SupervisorSettings,
     pub log: LogSettings,
 }
@@ -31,30 +32,32 @@ pub fn resolve(path: &Path) -> anyhow::Result<Settings> {
         .with_context(|| format!("reading config file {}", path.display()))?;
     let file: FileConfig =
         toml::from_str(&text).with_context(|| format!("parsing config file {}", path.display()))?;
-    let ctx = ConfigCtx {
-        dir: path.parent().unwrap_or(Path::new(".")).to_path_buf(),
-    };
-    settings(file, &ctx)
+    settings(file, path.parent().unwrap_or(Path::new(".")))
 }
 
-fn settings(file: FileConfig, ctx: &ConfigCtx) -> anyhow::Result<Settings> {
+fn settings(file: FileConfig, dir: &Path) -> anyhow::Result<Settings> {
     if file.http.is_none() && file.grpc.is_none() {
         bail!("no plugin configured: add an [http] or a [grpc] table");
     }
     let http = file
         .http
-        .map(|section| rapira_http::config::resolve(section, ctx))
+        .map(|section| rapira_http::config::resolve(section, dir))
         .transpose()?;
     let grpc = file
         .grpc
-        .map(|section| rapira_grpc::config::resolve(section, ctx))
+        .map(|section| rapira_grpc::config::resolve(section, dir))
         .transpose()?;
-    let supervisor = resolve_supervisor(file.supervisor, ctx)?;
+    let supervisor = resolve_supervisor(file.supervisor, dir)?;
+    let observability = file
+        .observability
+        .map(rapira_observability::config::resolve)
+        .transpose()?;
     let log = resolve_log(file.log)?;
 
     Ok(Settings {
         http,
         grpc,
+        observability,
         supervisor,
         log,
     })
@@ -64,13 +67,6 @@ fn settings(file: FileConfig, ctx: &ConfigCtx) -> anyhow::Result<Settings> {
 mod tests {
     use super::*;
     use rapira_config::{LogLevel, resolve_pool};
-    use std::path::PathBuf;
-
-    fn ctx() -> ConfigCtx {
-        ConfigCtx {
-            dir: PathBuf::from("C:/w"),
-        }
-    }
 
     struct Case {
         name: &'static str,
@@ -114,6 +110,11 @@ mod tests {
                 toml: include_str!("../examples/rapira.toml"),
                 error: None,
             },
+            Case {
+                name: "observability with a plugin",
+                toml: "[http.pool]\nentrypoint = 'a.php'\n[observability]\nlisten = ':9180'\n[observability.metrics]",
+                error: None,
+            },
         ];
         for case in cases {
             let got = toml::from_str::<FileConfig>(case.toml);
@@ -146,14 +147,34 @@ mod tests {
             http.r#static.and_then(|s| s.root).as_deref(),
             Some("public")
         );
-        let pool = resolve_pool(http.pool, "http.pool", &ctx()).unwrap();
+        let pool = resolve_pool(http.pool, "http.pool", Path::new("C:/w")).unwrap();
         assert_eq!(pool.processes, 3);
     }
 
     #[test]
     fn a_file_without_a_plugin_table_is_refused() {
-        let file: FileConfig = toml::from_str("[log]\nlevel = \"info\"\n").unwrap();
-        let err = settings(file, &ctx()).unwrap_err().to_string();
-        assert_eq!(err, "no plugin configured: add an [http] or a [grpc] table");
+        struct Case {
+            name: &'static str,
+            toml: &'static str,
+        }
+        let cases = [
+            Case {
+                name: "log only",
+                toml: "[log]\nlevel = 'info'",
+            },
+            Case {
+                name: "observability only",
+                toml: "[observability]\nlisten = ':9180'\n[observability.probes]",
+            },
+        ];
+        for case in cases {
+            let file: FileConfig = toml::from_str(case.toml).expect(case.name);
+            let err = settings(file, Path::new("C:/w")).unwrap_err().to_string();
+            assert_eq!(
+                err, "no plugin configured: add an [http] or a [grpc] table",
+                "{}",
+                case.name
+            );
+        }
     }
 }

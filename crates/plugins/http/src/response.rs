@@ -5,11 +5,11 @@ use http::header::{
 use http_body_util::BodyExt;
 
 pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync>;
-pub(crate) type Body = http_body_util::combinators::UnsyncBoxBody<bytes::Bytes, BoxError>;
+pub(crate) type Body = http_body_util::combinators::UnsyncBoxBody<hyper::body::Bytes, BoxError>;
 pub(crate) type Response = http::Response<Body>;
 
 pub(crate) fn empty_body() -> Body {
-    http_body_util::Empty::<bytes::Bytes>::new()
+    http_body_util::Empty::<hyper::body::Bytes>::new()
         .map_err(BoxError::from)
         .boxed_unsync()
 }

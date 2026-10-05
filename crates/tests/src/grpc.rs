@@ -4,9 +4,9 @@ use std::net::SocketAddr;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
-use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue, Method};
 use http_body_util::{BodyExt, Full};
+use hyper::body::Bytes;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rapira_sapi::Addr;
 

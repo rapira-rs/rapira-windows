@@ -1,6 +1,6 @@
 use anyhow::{Context, bail};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 mod listen;
@@ -8,21 +8,16 @@ mod log;
 mod pool;
 mod supervisor;
 
-pub use log::{LogFormat, LogLevel, LogSection, LogSettings, resolve_log};
+pub use log::{LogFormat, LogLevel, LogSettings, resolve_log};
 pub use pool::{Mode, PoolSection, PoolSettings, check_entrypoint, resolve_pool};
 pub use supervisor::{SupervisorSection, SupervisorSettings, resolve_supervisor};
 
-/// What every section resolves against.
-#[derive(Debug, Clone)]
-pub struct ConfigCtx {
-    /// The directory of the config file. Relative paths in the file resolve against it.
-    pub dir: PathBuf,
-}
-
-impl ConfigCtx {
-    pub fn resolve_path(&self, value: &str) -> std::io::Result<PathBuf> {
-        std::path::absolute(self.dir.join(value))
-    }
+/// Resolve `value` against the config directory. An empty string counts as absent.
+pub fn opt_path(dir: &Path, value: Option<&str>) -> std::io::Result<Option<PathBuf>> {
+    value
+        .filter(|v| !v.is_empty())
+        .map(|v| std::path::absolute(dir.join(v)))
+        .transpose()
 }
 
 /// `{table}.listen`, or `default` when the key is absent.

@@ -4,7 +4,7 @@ use std::fmt;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use crate::ConfigCtx;
+use crate::opt_path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PoolSettings {
@@ -44,22 +44,18 @@ pub struct PoolSection {
     max_requests: Option<u64>,
 }
 
-pub fn resolve_pool(
-    section: PoolSection,
-    table: &str,
-    ctx: &ConfigCtx,
-) -> anyhow::Result<PoolSettings> {
+pub fn resolve_pool(section: PoolSection, table: &str, dir: &Path) -> anyhow::Result<PoolSettings> {
     let processes = section
         .processes
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
     if !(1..=4096).contains(&processes) {
         bail!("{table}.processes must be between 1 and 4096");
     }
-    let Some(ep) = section.entrypoint.as_deref().filter(|s| !s.is_empty()) else {
+    let Some(entrypoint) = opt_path(dir, section.entrypoint.as_deref())? else {
         bail!("{table}.entrypoint is required");
     };
     Ok(PoolSettings {
-        entrypoint: ctx.resolve_path(ep)?,
+        entrypoint,
         processes,
         mode: section.mode.unwrap_or(Mode::Dispatcher),
         max_requests: section.max_requests.unwrap_or(0),
@@ -88,13 +84,7 @@ mod tests {
     use super::*;
 
     fn pool(text: &str) -> anyhow::Result<PoolSettings> {
-        resolve_pool(
-            toml::from_str(text)?,
-            "http.pool",
-            &ConfigCtx {
-                dir: PathBuf::from("C:/app"),
-            },
-        )
+        resolve_pool(toml::from_str(text)?, "http.pool", Path::new("C:/app"))
     }
 
     #[test]

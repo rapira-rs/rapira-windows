@@ -1,11 +1,11 @@
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
 use rapira_config::{
-    ConfigCtx, PoolSection, PoolSettings, check_entrypoint, nonzero_timeout, parse_listen,
+    PoolSection, PoolSettings, check_entrypoint, nonzero_timeout, opt_path, parse_listen,
     resolve_pool,
 };
 use serde::Deserialize;
@@ -25,6 +25,9 @@ pub struct Section {
     pub keepalive_interval_secs: Option<u64>,
     pub keepalive_timeout_secs: Option<u64>,
     #[serde(default)]
+    pub interceptors: Vec<String>,
+    pub auth: Option<rapira_grpc_auth::Section>,
+    #[serde(default)]
     pub pool: PoolSection,
 }
 
@@ -43,28 +46,33 @@ pub struct Settings {
     pub keepalive_interval: Duration,
     /// Wait for the PING ACK before the listener closes the connection.
     pub keepalive_timeout: Duration,
+    pub interceptors: Vec<Interceptor>,
     pub pool: PoolSettings,
 }
 
+#[derive(Debug)]
+pub enum Interceptor {
+    Auth(rapira_grpc_auth::Settings),
+}
+
 /// Boot checks run here: entrypoint file.
-pub fn resolve(section: Section, ctx: &ConfigCtx) -> Result<Settings> {
-    let settings = settings(section, ctx)?;
+pub fn resolve(section: Section, dir: &Path) -> Result<Settings> {
+    let settings = settings(section, dir)?;
     check_entrypoint("grpc.pool", &settings.pool.entrypoint)?;
     Ok(settings)
 }
 
 /// The settings of `section`. Reads no file.
-fn settings(section: Section, ctx: &ConfigCtx) -> Result<Settings> {
+fn settings(section: Section, dir: &Path) -> Result<Settings> {
     let listen = parse_listen(
         "grpc",
         section.listen.as_deref(),
         SocketAddr::from((Ipv4Addr::LOCALHOST, 50051)),
     )?;
 
-    let Some(ds) = section.descriptor_set.as_deref().filter(|s| !s.is_empty()) else {
+    let Some(descriptor_set) = opt_path(dir, section.descriptor_set.as_deref())? else {
         bail!("grpc.descriptor_set is required");
     };
-    let descriptor_set = ctx.resolve_path(ds)?;
 
     let services = section.services;
     if services.as_ref().is_some_and(Vec::is_empty) {
@@ -93,7 +101,12 @@ fn settings(section: Section, ctx: &ConfigCtx) -> Result<Settings> {
         section.keepalive_timeout_secs.unwrap_or(10),
     )?;
 
-    let pool = resolve_pool(section.pool, "grpc.pool", ctx)?;
+    let auth = section
+        .auth
+        .map(|s| rapira_grpc_auth::resolve(s, dir))
+        .transpose()?;
+    let interceptors = resolve_interceptors(section.interceptors, auth)?;
+    let pool = resolve_pool(section.pool, "grpc.pool", dir)?;
 
     Ok(Settings {
         listen,
@@ -104,6 +117,7 @@ fn settings(section: Section, ctx: &ConfigCtx) -> Result<Settings> {
         max_timeout,
         keepalive_interval,
         keepalive_timeout,
+        interceptors,
         pool,
     })
 }
@@ -113,13 +127,48 @@ fn optional_timeout(key: &str, secs: Option<u64>) -> Result<Option<Duration>> {
         .transpose()
 }
 
+fn resolve_interceptors(
+    list: Vec<String>,
+    mut auth: Option<rapira_grpc_auth::Settings>,
+) -> Result<Vec<Interceptor>> {
+    for (i, name) in list.iter().enumerate() {
+        if list[..i].contains(name) {
+            bail!("grpc.interceptors lists \"{name}\" twice");
+        }
+    }
+    let mut interceptors = Vec::new();
+    for name in &list {
+        match name.as_str() {
+            "auth" => match auth.take() {
+                Some(settings) => interceptors.push(Interceptor::Auth(settings)),
+                None => bail!("grpc.interceptors lists \"auth\" but [grpc.auth] is missing"),
+            },
+            other => bail!(
+                "grpc.interceptors entry \"{other}\" is unknown; known interceptors: \"auth\""
+            ),
+        }
+    }
+    if auth.is_some() {
+        bail!("[grpc.auth] is configured but grpc.interceptors does not list \"auth\"");
+    }
+    Ok(interceptors)
+}
+
 impl Server {
-    /// Loads the schema before PHP starts. A bad descriptor set or service name stops the boot.
+    /// Loads the schema and token files before PHP starts.
     pub fn from_settings(settings: Settings) -> Result<Self> {
         let schema = Arc::new(Schema::load(
             &settings.descriptor_set,
             settings.services.as_deref(),
         )?);
+        let mut interceptors: Vec<Arc<dyn connectrpc::Interceptor>> = Vec::new();
+        for interceptor in &settings.interceptors {
+            match interceptor {
+                Interceptor::Auth(s) => {
+                    interceptors.push(Arc::new(rapira_grpc_auth::Auth::load(s)?))
+                }
+            }
+        }
         Ok(Self::init(Config {
             listen: settings.listen,
             schema,
@@ -128,6 +177,7 @@ impl Server {
             max_timeout: settings.max_timeout,
             keepalive_interval: settings.keepalive_interval,
             keepalive_timeout: settings.keepalive_timeout,
+            interceptors,
         }))
     }
 }
@@ -139,12 +189,6 @@ mod tests {
     use rapira_config::Mode;
 
     use super::*;
-
-    fn ctx() -> ConfigCtx {
-        ConfigCtx {
-            dir: PathBuf::from("C:/w"),
-        }
-    }
 
     struct Want {
         listen: SocketAddr,
@@ -182,6 +226,88 @@ mod tests {
             max_timeout: None,
             keepalive_interval: Duration::from_secs(10),
             keepalive_timeout: Duration::from_secs(10),
+        }
+    }
+
+    #[test]
+    fn interceptor_list_and_tables_must_agree() {
+        struct Case {
+            name: &'static str,
+            toml: String,
+            expected: Result<&'static [&'static str], &'static str>,
+        }
+        let cases = [
+            Case {
+                name: "no interceptors",
+                toml: toml(""),
+                expected: Ok(&[]),
+            },
+            Case {
+                name: "auth with its table",
+                toml: toml("interceptors = [\"auth\"]\n[auth]\ntokens_file = \"t\"\n"),
+                expected: Ok(&["C:/w/t"]),
+            },
+            Case {
+                name: "auth listed twice",
+                toml: toml("interceptors = [\"auth\", \"auth\"]\n[auth]\ntokens_file = \"t\"\n"),
+                expected: Err("grpc.interceptors lists \"auth\" twice"),
+            },
+            Case {
+                name: "unknown name",
+                toml: toml("interceptors = [\"authz\"]\n"),
+                expected: Err(
+                    "grpc.interceptors entry \"authz\" is unknown; known interceptors: \"auth\"",
+                ),
+            },
+            Case {
+                name: "auth listed without its table",
+                toml: toml("interceptors = [\"auth\"]\n"),
+                expected: Err("grpc.interceptors lists \"auth\" but [grpc.auth] is missing"),
+            },
+            Case {
+                name: "auth table without the entry",
+                toml: toml("[auth]\ntokens_file = \"t\"\n"),
+                expected: Err(
+                    "[grpc.auth] is configured but grpc.interceptors does not list \"auth\"",
+                ),
+            },
+            Case {
+                name: "tokens_file missing",
+                toml: toml("interceptors = [\"auth\"]\n[auth]\n"),
+                expected: Err("grpc.auth.tokens_file is required"),
+            },
+            Case {
+                name: "tokens_file empty",
+                toml: toml("interceptors = [\"auth\"]\n[auth]\ntokens_file = \"\"\n"),
+                expected: Err("grpc.auth.tokens_file is required"),
+            },
+            Case {
+                name: "unknown key in the auth table",
+                toml: toml(
+                    "interceptors = [\"auth\"]\n[auth]\ntokens_file = \"t\"\nheader = \"x\"\n",
+                ),
+                expected: Err("unknown field `header`"),
+            },
+        ];
+        for case in cases {
+            let got = toml::from_str::<Section>(&case.toml)
+                .map_err(anyhow::Error::from)
+                .and_then(|section| settings(section, Path::new("C:/w")));
+            match (got, case.expected) {
+                (Ok(g), Ok(want)) => {
+                    let files: Vec<_> = g
+                        .interceptors
+                        .into_iter()
+                        .map(|i| match i {
+                            Interceptor::Auth(s) => s.tokens_file,
+                        })
+                        .collect();
+                    let want: Vec<_> = want.iter().map(PathBuf::from).collect();
+                    assert_eq!(files, want, "{}", case.name);
+                }
+                (Err(e), Err(want)) => assert!(e.to_string().contains(want), "{}: {e}", case.name),
+                (got, _) => panic!("{}: unexpected {got:?}", case.name),
+            }
         }
     }
 
@@ -287,7 +413,7 @@ mod tests {
         for case in cases {
             let got = toml::from_str::<Section>(&case.toml)
                 .map_err(anyhow::Error::from)
-                .and_then(|section| settings(section, &ctx()));
+                .and_then(|section| settings(section, Path::new("C:/w")));
             match (got, case.expected) {
                 (Ok(g), Ok(want)) => {
                     assert_eq!(g.listen, want.listen, "{}", case.name);

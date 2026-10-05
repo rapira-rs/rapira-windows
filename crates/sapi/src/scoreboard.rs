@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::sync::atomic::Ordering::{Relaxed, Release};
 
-use rapira_scoreboard::{SLOT_ACTIVE, SLOT_DRAINING, SLOT_IDLE, SharedSlot};
+use rapira_scoreboard::{SLOT_ACTIVE, SLOT_DRAINING, SLOT_IDLE, SLOT_STARTING, SharedSlot};
 
 thread_local! {
     pub static SB: Cell<Option<&'static SharedSlot>> = const { Cell::new(None) };
@@ -16,6 +16,7 @@ pub enum Event {
     Idle,
     Active,
     Draining,
+    BootFailed,
 }
 
 pub fn sb_set(slot: &'static SharedSlot) {
@@ -41,17 +42,18 @@ pub fn sb_update(event: Event) {
             s.recycles.fetch_add(1, Relaxed);
         }
         Event::Unhealthy => crate::quota::fire_unhealthy(),
-        Event::Idle => {
-            let state = if DRAINING.get() {
-                SLOT_DRAINING
-            } else {
-                SLOT_IDLE
-            };
-            s.state.store(state, Release);
-        }
+        Event::Idle => s.state.store(draining_or(SLOT_IDLE), Release),
         Event::Active => {
             s.state.store(SLOT_ACTIVE, Release);
         }
-        Event::Draining => DRAINING.set(true),
+        Event::Draining => {
+            DRAINING.set(true);
+            s.state.store(SLOT_DRAINING, Release);
+        }
+        Event::BootFailed => s.state.store(draining_or(SLOT_STARTING), Release),
     }
+}
+
+fn draining_or(state: u32) -> u32 {
+    if DRAINING.get() { SLOT_DRAINING } else { state }
 }

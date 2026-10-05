@@ -6,9 +6,9 @@ use anyhow::{Result, anyhow};
 use connectrpc::Router;
 use connectrpc_health::StaticChecker;
 use connectrpc_reflection::Reflector;
-use rapira_net::{PrepareCtx, PreparedListener};
-use rapira_sapi::plugin::{Mode, PhpPart, Plugin, Worker};
-use rapira_sapi::work::Intake;
+use rapira_net::PreparedListener;
+use rapira_sapi::plugin::{Mode, Plugin, Worker};
+use rapira_sapi::work::DispatcherClasses;
 
 mod call;
 pub mod config;
@@ -17,8 +17,8 @@ mod php;
 mod schema;
 mod serve;
 
-use call::{Call, RpcProtocol, RpcStatus, UnaryCall, UnaryReply};
-pub use php::PHP_PART;
+use call::{Call, RpcStatus, UnaryCall, UnaryReply};
+pub use php::rapira_grpc_register_classes;
 use schema::{MethodInfo, Schema, set_services};
 
 #[derive(Clone)]
@@ -34,6 +34,7 @@ pub(crate) struct Config {
     /// HTTP/2 PING cadence and the wait for its ACK. A peer that is gone without a FIN sends no ACK, so its connection closes within the sum and does not hold a later drain.
     pub keepalive_interval: Duration,
     pub keepalive_timeout: Duration,
+    pub interceptors: Vec<Arc<dyn connectrpc::Interceptor>>,
 }
 
 pub struct Server {
@@ -66,13 +67,13 @@ impl Plugin for Server {
         &[Mode::Dispatcher]
     }
 
-    fn php(&self) -> PhpPart {
-        PHP_PART
+    fn dispatcher(&self) -> DispatcherClasses {
+        php::DISPATCHER_CLASSES
     }
 
-    fn prepare(&mut self, ctx: &mut PrepareCtx) -> Result<()> {
+    fn prepare(&mut self) -> Result<()> {
         set_services(self.config.schema.services().to_vec())?;
-        let listener = ctx.bind(&self.config.listen)?;
+        let listener = rapira_net::bind(&self.config.listen)?;
         tracing::info!(target: "grpc", "prepared listener on {}", listener.addr());
 
         let names: Vec<String> = self
@@ -102,7 +103,6 @@ impl Plugin for Server {
         let Some(prepared) = prepared else {
             return Err(anyhow!("grpc listener was not prepared"));
         };
-        let intake = Intake::new(worker.sink.clone());
-        serve::serve(intake, config, prepared, worker)
+        serve::serve(worker.sink.clone(), config, prepared, worker)
     }
 }

@@ -1,14 +1,14 @@
 use std::net::SocketAddr;
 
 use http::Method;
+use rapira_sapi::Mode;
 use serde_json::Value;
 use tests::grpc::{Conn, ECHO_PATH as ECHO, Fields, Wire, envelope, fields};
 use tests::server_log;
 
 use crate::harness::{
     BOOT, ECHO_SERVICE, MASTER_EXIT_OK, STOP_BUDGET, Spawn, assert_exit_code, diagnostics,
-    fixture_path, http_get, send_ctrl_break, spawn_grpc, spawn_grpc_boot_failure,
-    spawn_grpc_with_http, wait_log_contains, wait_workers,
+    fixture_path, http_get, listen, send_ctrl_break, wait_log_contains, wait_workers,
 };
 
 /// `EchoRequest { text }`: field 1, length-delimited, for a text shorter than 128 bytes.
@@ -154,7 +154,10 @@ fn grpc_pool_serves_from_rapira_toml() {
             reply: r#"{"text":"rapira.test.v1.EchoService:3,rapira.test.v1.OtherService:1"}"#,
         },
     ];
-    let srv = spawn_grpc(2);
+    let srv = Spawn::grpc(fixture_path("grpc/echo-worker.php"))
+        .services(None)
+        .processes(0, 2)
+        .spawn();
     wait_workers(&srv, BOOT, "2 grpc workers", |p| p.len() == 2);
     for case in cases {
         let got = connect_json(srv.addr, case.path, case.body);
@@ -170,11 +173,13 @@ fn grpc_pool_serves_from_rapira_toml() {
 /// Each worker gets the dispatcher of its own pool: `echo-worker.php` answers HTTP, `grpc-worker.php` answers gRPC.
 #[test]
 fn http_and_grpc_pools_run_side_by_side() {
-    let (srv, http) = spawn_grpc_with_http("shared/echo-worker.php");
+    let srv = Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php"))
+        .with_grpc(fixture_path("grpc/echo-worker.php"))
+        .spawn();
     wait_workers(&srv, BOOT, "1 http and 1 grpc worker", |p| p.len() == 2);
 
-    let (code, body) =
-        http_get(http, "/", BOOT).unwrap_or_else(|e| panic!("GET /: {e}\n{}", diagnostics(&srv)));
+    let (code, body) = http_get(srv.addr, "/", BOOT)
+        .unwrap_or_else(|e| panic!("GET /: {e}\n{}", diagnostics(&srv)));
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
     assert!(
         body.starts_with(b"ok:"),
@@ -183,7 +188,7 @@ fn http_and_grpc_pools_run_side_by_side() {
         diagnostics(&srv)
     );
 
-    let got = connect_json(srv.addr, ECHO, r#"{"text":"hi"}"#);
+    let got = connect_json(listen(&srv), ECHO, r#"{"text":"hi"}"#);
     assert!(
         matches!(&got, Ok((200, reply)) if reply == r#"{"text":"hi"}"#),
         "{got:?}\n{}",
@@ -215,7 +220,10 @@ fn grpc_boot_fails_before_php_starts() {
         },
     ];
     for case in cases {
-        let (status, log) = spawn_grpc_boot_failure(case.descriptor_set, case.service);
+        let (status, log) = Spawn::grpc(fixture_path("grpc/echo-worker.php"))
+            .descriptor_set(&tests::fixture(&format!("grpc/{}", case.descriptor_set)))
+            .services(Some(&[case.service]))
+            .boot_failure();
         assert_eq!(status.code(), Some(1), "{}: {log}", case.name);
         assert!(log.contains(case.log), "{}: {log}", case.name);
     }
@@ -224,7 +232,7 @@ fn grpc_boot_fails_before_php_starts() {
 /// Ctrl+Break lets the interpreter finish its call before the server exits.
 #[test]
 fn ctrl_break_drains_an_in_flight_grpc_call() {
-    let mut srv = spawn_grpc(1);
+    let mut srv = Spawn::grpc(fixture_path("grpc/echo-worker.php")).spawn();
     let addr = srv.addr;
     let call = std::thread::spawn(move || connect_json(addr, ECHO, r#"{"text":"slow-ok"}"#));
     assert!(

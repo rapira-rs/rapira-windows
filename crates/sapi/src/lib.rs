@@ -6,7 +6,6 @@ pub mod context;
 pub mod diagnostics;
 pub mod dispatcher;
 pub mod exchange;
-pub mod executor;
 pub mod module;
 pub mod plugin;
 pub mod quota;
@@ -22,18 +21,14 @@ use std::ffi::c_int;
 
 pub use bindings::*;
 pub use plugin::Mode;
-pub use quota::PoolHooks;
-pub use start::{PhpModule, Rapira, boot_master};
+pub use start::{PhpModule, Rapira, boot_master, linked_php_version};
 pub use types::{Addr, ClientCert, Frame, Request, ResponseHead, Tls};
 
 // bindgen names the Zend SUCCESS/FAILURE constants differently across php-src versions, so the values are hardcoded.
 pub const SUCCESS: c_int = 0;
 pub const FAILURE: c_int = -1;
 
-// HASH_KEY_IS_STRING is a #define on 8.4 and an enum constant on 8.5, so it is hardcoded and compared through i64::from at the call sites.
-pub const HASH_KEY_IS_STRING: i64 = 1;
-
-// The Outcome-typed shims return a C `int`; call sites decode it via `Outcome::from_c` (unexpected values fall back to `Bailout`).
+// The request shims return RAPIRA_OK, RAPIRA_BAILOUT, or RAPIRA_THROW.
 unsafe extern "C" {
     pub fn rapira_sg() -> *mut sapi_globals_struct;
     pub fn rapira_eg() -> *mut zend_executor_globals;

@@ -16,6 +16,7 @@ Read `.claude/CLAUDE.md` for the settled architecture, PHP contract, and test po
 - Build and test x64 and ARM64 on matching native runners. Use native tools for local work.
 - Build release PHP from official source with `ci/build-php.ps1`. Bundle the matching project-built runtime.
 - Run one process with a fixed interpreter thread pool and work queue for each plugin. `<plugin>.pool.processes` sets its thread count.
+- Keep queue counters per pool and request counters per interpreter slot. Observability runs on a separate thread without PHP.
 - Run MINIT once. Run module teardown on the boot thread after every interpreter has stopped.
 - Run in the foreground. Keep pidfile support. Use console control events for shutdown.
 - Do not add reload, status, or dynamic pool scaling.

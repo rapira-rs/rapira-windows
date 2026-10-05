@@ -8,11 +8,11 @@ The http plugin of the `rapira` binary. It terminates HTTP/1.1 on the configured
 
 - `name()` returns `http`: the TOML table and the dispatcher name that PHP sees.
 - `modes()` accepts the classic, worker and dispatcher modes.
-- `php()` returns `PHP_PART`, the `PhpPart` of the plugin: `register`, the function that MINIT calls after the base classes to register the `Rapira\Http` classes, and `dispatcher`, the dispatcher classes of dispatcher mode.
-- `prepare()` runs on the boot thread before PHP starts. It removes spool directories of dead processes and binds the listener with `PrepareCtx::bind`.
+- `dispatcher()` returns the dispatcher classes. MINIT calls `rapira_http_register_classes` after registering the base classes.
+- `prepare()` runs on the boot thread before PHP starts. It removes spool directories of dead processes and binds the listener with `rapira_net::bind`.
 - `serve()` runs on the `rapira-http` plugin thread. Its `Worker` holds a two-thread tokio runtime handle, the PHP pool sink, the stop flag, and `drain_grace`. The plugin drains within this limit after a stop.
 
-`serve()` wraps the pool sink as `Intake<Exchange>` and takes the prepared listener through `rapira_net::Acceptor`. The plugin checks each request and tries the configured static-file handler. If no file matches, it reads the body, builds an `Exchange`, and submits it to the interpreter queue. PHP produces response frames. The plugin writes these frames to the socket.
+`serve()` takes the pool `Sink` and the prepared listener through `rapira_net::Acceptor`. The plugin checks each request and tries the configured static-file handler. If no file matches, it reads the body, builds an `Exchange`, and submits it to the interpreter queue. PHP produces response frames. The plugin writes these frames to the socket.
 
 `Exchange` is the work unit. It implements `rapira_sapi::work::Work`:
 
@@ -43,7 +43,7 @@ The client gets 503 when the intake of the worker stays full for 30 seconds, and
 - `src/bridge.rs`: the reply body that streams the PHP frames and the `sendFile` slices, and the write timeout.
 - `src/exchange.rs`: the `Exchange` unit and its `Work` impl.
 - `src/multipart.rs`: the multipart parser and the spool dirs of dispatcher mode.
-- `src/php/`: the Rust behind the PHP methods: the class entries, `PHP_PART` and `DISPATCHER_CLASSES` (`mod.rs`), `getRequest()` (`request.rs`), the head, body and trailer writes (`respond.rs`, `headers.rs`), `sendFile()` (`sendfile.rs`), the value class constructors (`values.rs`), and the unit tests of these parts that need no PHP (`tests.rs`).
+- `src/php/`: the Rust behind the PHP methods: the class entries and `DISPATCHER_CLASSES` (`mod.rs`), `getRequest()` (`request.rs`), the head, body and trailer writes (`respond.rs`, `headers.rs`), `sendFile()` (`sendfile.rs`), the value class constructors (`values.rs`), and the unit tests of these parts that need no PHP (`tests.rs`).
 
 ## Middleware
 

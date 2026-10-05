@@ -4,23 +4,19 @@ use std::{
     time::Instant,
 };
 
-use bytes::Bytes;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
+use hyper::body::Bytes;
 use rapira_sapi::callbacks::{MAX_BUFFERED_BODY, guard};
 use rapira_sapi::exchange::{AddrOwned, add_list, build_address, header_key, path_bytes};
-use rapira_sapi::plugin::PhpPart;
 use rapira_sapi::scoreboard::{Event, sb_update};
 use rapira_sapi::types::{
     Addr, Body, Context, FormField, Frame, Request, ResponseHead, Tls, UploadedFile,
 };
 use rapira_sapi::work::{DispatcherClasses, Held, release};
 use rapira_sapi::{
-    HashPosition, HashTable, IS_ARRAY, IS_STRING, add_next_index_object, object_init_ex,
-    rapira_array_init, rapira_ce_already_finalized_error, rapira_ce_tls,
-    rapira_ce_work_discarded_exception, rapira_eg, zend, zend_class_entry,
-    zend_hash_get_current_data_ex, zend_hash_get_current_key_ex,
-    zend_hash_internal_pointer_reset_ex, zend_hash_move_forward_ex, zend_object, zend_string, zval,
-    zval_add_ref, zval_ptr_dtor,
+    HashTable, IS_ARRAY, IS_STRING, add_next_index_object, object_init_ex, rapira_array_init,
+    rapira_ce_already_finalized_error, rapira_ce_tls, rapira_ce_work_discarded_exception,
+    rapira_eg, zend, zend_class_entry, zend_object, zval, zval_add_ref, zval_ptr_dtor,
 };
 use tokio::sync::mpsc::{Sender, error::TrySendError};
 
@@ -47,7 +43,7 @@ unsafe extern "C" {
     pub static mut rapira_ce_internal_http_dispatcher: *mut zend_class_entry;
     pub static mut rapira_ce_internal_http_dispatcher_info: *mut zend_class_entry;
     pub static mut rapira_ce_internal_http_exchange: *mut zend_class_entry;
-    fn rapira_http_register_classes();
+    pub fn rapira_http_register_classes();
 }
 
 /// Mirrors `rapira_exchange_obj` in rapira_http.h. The C fields sit before `std`.
@@ -63,11 +59,6 @@ pub static DISPATCHER_CLASSES: DispatcherClasses = DispatcherClasses {
     info: || unsafe { rapira_ce_internal_http_dispatcher_info },
     unit: || unsafe { rapira_ce_internal_http_exchange },
     busy: c"receive() while a Rapira\\Http\\Exchange is unfinalized; finalize it first",
-};
-
-pub static PHP_PART: PhpPart = PhpPart {
-    register: rapira_http_register_classes,
-    dispatcher: DISPATCHER_CLASSES,
 };
 
 /// The head locks on the first head or body write: a body chunk commits an implicit 200 first.

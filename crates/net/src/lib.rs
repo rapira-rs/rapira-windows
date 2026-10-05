@@ -8,7 +8,7 @@ use tokio::sync::watch;
 use windows_sys::Win32::Networking::WinSock::{WSAEINVAL, WSAENOTSOCK, WSAESHUTDOWN};
 
 pub mod listen;
-pub use listen::{PrepareCtx, PreparedListener};
+pub use listen::{PreparedListener, bind};
 
 /// Takes connections on the plugin's IO runtime.
 pub trait Serve {

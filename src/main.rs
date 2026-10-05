@@ -1,6 +1,5 @@
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use rapira_config::PoolSettings;
-use rapira_net::PrepareCtx;
 use rapira_sapi::plugin::{Mode, Plugin};
 use std::{path::PathBuf, process::ExitCode};
 
@@ -94,14 +93,25 @@ fn serve(args: ServeArgs) -> anyhow::Result<ExitCode> {
         "the total interpreter count exceeds {}",
         rapira_scoreboard::SB_MAX_SLOTS
     );
-    let mut prepare = PrepareCtx::new();
     for (plugin, pool) in &mut plugins {
         check_mode(plugin.name(), plugin.modes(), pool.mode)?;
         plugin
-            .prepare(&mut prepare)
+            .prepare()
             .with_context(|| format!("plugin {}: prepare failed", plugin.name()))?;
     }
-    worker::serve(plugins, threads, &settings.supervisor).map(ExitCode::from)
+    let observability = settings
+        .observability
+        .map(|config| {
+            rapira_observability::Server::new(
+                config,
+                rapira_observability::Build {
+                    version: env!("CARGO_PKG_VERSION"),
+                    php_version: rapira_sapi::linked_php_version(),
+                },
+            )
+        })
+        .transpose()?;
+    worker::serve(plugins, threads, &settings.supervisor, observability).map(ExitCode::from)
 }
 
 #[cfg(test)]

@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
+use connectrpc::http;
 use connectrpc::server::serve_connection;
 use connectrpc::{
     Chain, CompressionRegistry, ConnectRpcBody, ConnectRpcService, ConnectionConfig,
@@ -11,13 +12,13 @@ use connectrpc_health::StaticChecker;
 use rapira_net::{Acceptor, Serve};
 use rapira_sapi::Addr;
 use rapira_sapi::plugin::Worker;
-use rapira_sapi::work::Intake;
+use rapira_sapi::work::Sink;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch;
 use tower::util::MapResponse;
 
 use crate::dispatch::PhpDispatcher;
-use crate::{Call, Config, Prepared};
+use crate::{Config, Prepared};
 
 /// Everything the accept loop hands to a connection, and the drain that follows it.
 struct Serving {
@@ -29,12 +30,7 @@ struct Serving {
 }
 
 impl Serving {
-    fn start(
-        intake: Intake<Call>,
-        config: &Config,
-        router: Router,
-        health: Arc<StaticChecker>,
-    ) -> Self {
+    fn start(intake: Sink, config: &Config, router: Router, health: Arc<StaticChecker>) -> Self {
         tracing::info!(target: "grpc", "listening on {}", config.listen);
         let mut deadlines = DeadlinePolicy::new();
         if let Some(timeout) = config.default_timeout {
@@ -48,10 +44,13 @@ impl Serving {
             intake,
         };
         // The plugin routes come first, so a configured service cannot hide health or reflection.
-        let service = ConnectRpcService::new(Chain(router, dispatcher))
+        let mut service = ConnectRpcService::new(Chain(router, dispatcher))
             .with_deadline_policy(deadlines)
             // The default registry offers every codec that the build compiles, zstd included.
             .with_compression(CompressionRegistry::new().register(GzipProvider::default()));
+        for interceptor in &config.interceptors {
+            service = service.with_interceptor_arc(Arc::clone(interceptor));
+        }
         Self {
             service,
             connection: ConnectionConfig::new()
@@ -124,7 +123,7 @@ fn status_in_trailers(
 
 /// Runs the accept loop on the calling thread until the stop flag, then drains the connections.
 pub(crate) fn serve(
-    intake: Intake<Call>,
+    intake: Sink,
     config: Config,
     prepared: Prepared,
     worker: Worker,
