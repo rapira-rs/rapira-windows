@@ -80,6 +80,7 @@ fn same(a: &[u8], b: &[u8]) -> bool {
 
 /// Errors identify the line without its text.
 fn parse(text: &str) -> anyhow::Result<Vec<String>> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut tokens = Vec::new();
     for (i, line) in text.lines().enumerate() {
         let line = line.trim();
@@ -157,9 +158,19 @@ mod tests {
                 expected: Err("line 1 is not a valid bearer token"),
             },
             Case {
-                name: "utf-8 bom",
+                name: "leading utf-8 bom",
                 text: "\u{feff}alpha\n",
-                expected: Err("line 1 is not a valid bearer token"),
+                expected: Ok(&["alpha"]),
+            },
+            Case {
+                name: "leading utf-8 bom before a comment",
+                text: "\u{feff}# tokens\r\nalpha\r\n",
+                expected: Ok(&["alpha"]),
+            },
+            Case {
+                name: "utf-8 bom on a later line",
+                text: "alpha\n\u{feff}beta\n",
+                expected: Err("line 2 is not a valid bearer token"),
             },
             Case {
                 name: "comments only",
