@@ -83,30 +83,20 @@ jobs:
         strategy:
             fail-fast: false
             matrix:
+                php_branch: ['8.4', '8.5']
+                asset_arch: [x86_64, arm64]
                 include:
                     - php_branch: "8.4"
                       spec: ${{ needs.prepare.outputs.php_84 }}
-                      runner: windows-latest
-                      target: x86_64-pc-windows-msvc
-                      asset_arch: x86_64
-                      install_group: php-x86_64
                     - php_branch: "8.5"
                       spec: ${{ needs.prepare.outputs.php_85 }}
+                    - asset_arch: x86_64
                       runner: windows-latest
                       target: x86_64-pc-windows-msvc
-                      asset_arch: x86_64
                       install_group: php-x86_64
-                    - php_branch: "8.4"
-                      spec: ${{ needs.prepare.outputs.php_84 }}
+                    - asset_arch: arm64
                       runner: windows-11-vs2026-arm
                       target: aarch64-pc-windows-msvc
-                      asset_arch: arm64
-                      install_group: php-arm64
-                    - php_branch: "8.5"
-                      spec: ${{ needs.prepare.outputs.php_85 }}
-                      runner: windows-11-vs2026-arm
-                      target: aarch64-pc-windows-msvc
-                      asset_arch: arm64
                       install_group: php-arm64
         env:
             STEM: rapira-v${{ inputs.version }}-php${{ matrix.php_branch }}-windows-${{ matrix.asset_arch }}

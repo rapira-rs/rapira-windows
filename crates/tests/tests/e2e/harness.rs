@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 pub use super::console::send_ctrl_break;
 use rapira_sapi::{Addr, Mode};
 use serde_json::Value;
-use tests::server_log;
+use tests::{poll, server_log};
 use windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
 
 /// Startup budget for the server and its interpreter pools.
@@ -20,8 +20,6 @@ pub const BOOT: Duration = Duration::from_secs(30);
 /// Master could not bring up a serviceable gen-0 pool.
 pub const MASTER_EXIT_FAILBOOT: i32 = 70;
 pub const MASTER_EXIT_OK: i32 = 0;
-/// Master forced stop (a second signal arrived while draining).
-pub const MASTER_EXIT_FORCED: i32 = 130;
 
 /// Exceeds the default 30-second budget for plugin drain and PHP teardown.
 pub const STOP_BUDGET: Duration = Duration::from_secs(45);
@@ -54,18 +52,7 @@ impl Server {
     }
 
     pub fn wait_exit(&mut self, timeout: Duration) -> Option<ExitStatus> {
-        let end = Instant::now() + timeout;
-        loop {
-            match self.child.try_wait() {
-                Ok(Some(st)) => return Some(st),
-                Ok(None) => {}
-                Err(_) => return None,
-            }
-            if Instant::now() >= end {
-                return None;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        poll(timeout, || self.child.try_wait().transpose()).and_then(Result::ok)
     }
 
     pub fn try_status(&mut self) -> Option<ExitStatus> {
@@ -351,16 +338,6 @@ fn render_config(
 
 pub use tests::grpc::ECHO_SERVICE;
 
-/// Copies `grpc/echo-worker.php` and its descriptor set into `dir` as `grpc-worker.php` and `echo.binpb`.
-fn stage_grpc(dir: &Path) {
-    std::fs::copy(
-        fixture_path("grpc/echo-worker.php"),
-        dir.join("grpc-worker.php"),
-    )
-    .expect("copy the grpc fixture");
-    std::fs::copy(tests::echo_descriptor_set(), dir.join("echo.binpb")).expect("copy echo.binpb");
-}
-
 /// A `[grpc]` pool over `entrypoint`. `listen`, `descriptor_set` and `extra` (keys inside `[grpc]`) go into the file verbatim; `services` becomes a TOML string array, and None leaves the key out.
 fn render_grpc(
     listen: &str,
@@ -378,58 +355,6 @@ fn render_grpc(
         "[grpc]\nlisten = \"{listen}\"\ndescriptor_set = \"{descriptor_set}\"\n{services}{extra}\n\
          [grpc.pool]\nprocesses = {processes}\nentrypoint = \"{entrypoint}\"\n"
     )
-}
-
-/// A server with a gRPC echo pool. `addr` is the gRPC listener.
-pub fn spawn_grpc(processes: usize) -> Server {
-    let dir = scratch_dir();
-    stage_grpc(&dir);
-    let render = |port| {
-        render_grpc(
-            &tcp(port),
-            processes,
-            "grpc-worker.php",
-            "echo.binpb",
-            None,
-            "",
-        )
-    };
-    let mut srv = spawn_ready(dir, &render, None, Some("info"), None, &[]);
-    srv.grpc = Some(srv.addr);
-    srv
-}
-
-/// Starts HTTP and gRPC pools with one interpreter each. Returns the server and the HTTP address.
-pub fn spawn_grpc_with_http(http_fixture: &str) -> (Server, SocketAddr) {
-    let (dir, entrypoint) = stage_fixture(http_fixture);
-    stage_grpc(&dir);
-    let http_port = std::cell::Cell::new(0);
-    let render = |port| {
-        http_port.set(free_port());
-        render_config(&tcp(http_port.get()), 1, &entrypoint, "", "")
-            + &render_grpc(&tcp(port), 1, "grpc-worker.php", "echo.binpb", None, "")
-    };
-    let mut srv = spawn_ready(dir, &render, None, Some("info"), None, &[]);
-    srv.grpc = Some(srv.addr);
-    (srv, SocketAddr::from(([127, 0, 0, 1], http_port.get())))
-}
-
-/// Boots a `[grpc]`-only config that must fail: returns the status with the whole log.
-pub fn spawn_grpc_boot_failure(descriptor_set: &str, service: &str) -> (ExitStatus, String) {
-    let dir = scratch_dir();
-    stage_grpc(&dir);
-    let services = [service.to_owned()];
-    let render = |port| {
-        render_grpc(
-            &tcp(port),
-            1,
-            "grpc-worker.php",
-            descriptor_set,
-            Some(&services),
-            "",
-        )
-    };
-    exit_of(dir, &render, Some("info"), None, &[])
 }
 
 /// A server with one interpreter per pool by default. Each setter adds to the config.
@@ -879,45 +804,26 @@ pub fn wait_workers(
     what: &str,
     pred: impl Fn(&[u32]) -> bool,
 ) -> Vec<u32> {
-    let end = Instant::now() + deadline;
-    loop {
+    poll(deadline, || {
         let pids = ready_workers(srv);
-        if pred(&pids) {
-            return pids;
-        }
-        if Instant::now() >= end {
-            panic!(
-                "timed out after {deadline:?} waiting for {what}\n{}",
-                diagnostics(srv)
-            );
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+        pred(&pids).then_some(pids)
+    })
+    .unwrap_or_else(|| {
+        panic!(
+            "timed out after {deadline:?} waiting for {what}\n{}",
+            diagnostics(srv)
+        )
+    })
 }
 
 pub fn assert_exit_code(status: Option<ExitStatus>, expected: i32, srv: &Server) {
     match status.and_then(|s| s.code()) {
         Some(code) if code == expected => {}
-        Some(code) => panic!(
-            "expected exit {expected} [{}], got {code} [{}]\n{}",
-            code_name(expected),
-            code_name(code),
-            diagnostics(srv)
-        ),
+        Some(code) => panic!("expected exit {expected}, got {code}\n{}", diagnostics(srv)),
         None => panic!(
-            "expected exit {expected} [{}], but the master was killed by a signal or is still running\n{}",
-            code_name(expected),
+            "expected exit {expected}, but the process has no exit code or still runs\n{}",
             diagnostics(srv)
         ),
-    }
-}
-
-fn code_name(code: i32) -> String {
-    match code {
-        MASTER_EXIT_OK => "DRAINED/OK".into(),
-        MASTER_EXIT_FAILBOOT => "MASTER_FAILBOOT".into(),
-        MASTER_EXIT_FORCED => "MASTER_FORCED".into(),
-        other => format!("code {other}"),
     }
 }
 
@@ -1140,19 +1046,12 @@ impl Conn {
 /// Poll `server.log` for `needle`, bounded.
 pub fn wait_log_contains(srv: &Server, needle: &str, deadline: Duration) -> bool {
     let path = srv.dir.join("server.log");
-    let end = std::time::Instant::now() + deadline;
-    loop {
-        if std::fs::read_to_string(&path)
-            .map(|s| s.contains(needle))
-            .unwrap_or(false)
-        {
-            return true;
-        }
-        if std::time::Instant::now() >= end {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    poll(deadline, || {
+        std::fs::read_to_string(&path)
+            .is_ok_and(|s| s.contains(needle))
+            .then_some(())
+    })
+    .is_some()
 }
 
 /// Drain the server and read the final operator-visible scoreboard line.

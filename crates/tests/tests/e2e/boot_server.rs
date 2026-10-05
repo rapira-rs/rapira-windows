@@ -1,4 +1,4 @@
-use rapira_sapi::{Mode, PHP_VERSION_ID};
+use rapira_sapi::Mode;
 use serde_json::{Value, json};
 use tests::wire::submit;
 use tests::{drain, fixture, req};
@@ -75,7 +75,7 @@ fn boot_server_follows_the_cli() -> anyhow::Result<()> {
             fixture: "boot_server/dispatcher.php",
             env: &[("BOOT_PROBE", "from-env")],
             ini: "register_argc_argv = 0",
-            argv: PHP_VERSION_ID >= 80500,
+            argv: true,
         },
     ];
 

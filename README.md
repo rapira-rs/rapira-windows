@@ -23,6 +23,8 @@ Download the archive for your PHP minor and architecture from [GitHub Releases](
 
 See [examples/rapira.toml](examples/rapira.toml) for HTTP and gRPC pool configuration. HTTP supports classic, worker, and dispatcher modes. gRPC supports dispatcher mode.
 
+The gRPC plugin supports bearer-token authentication before calls reach PHP. See [gRPC authentication](crates/plugins/grpc/README.md#authentication) for the token file and TLS proxy configuration.
+
 ## Process model and control
 
 - Rapira starts one process. Each plugin has a fixed pool of PHP interpreter threads and its own work queue.
@@ -30,6 +32,7 @@ See [examples/rapira.toml](examples/rapira.toml) for HTTP and gRPC pool configur
 - `<plugin>.pool.processes` sets the interpreter thread count for that plugin.
 - The Windows build supports only a static pool. It rejects the main build's scaling settings. It does not support reload or status requests.
 - `<plugin>.pool.max_requests` recycles an interpreter after a request quota with jitter.
+- A failed worker or dispatcher boot retries within five seconds without client traffic. An idle or active interpreter keeps its pool ready while another interpreter retries.
 - `getmypid()` returns the same process ID in every interpreter.
 - A native crash in one interpreter thread stops the server process.
 - `http.listen` and `grpc.listen` accept TCP addresses.
@@ -37,6 +40,41 @@ See [examples/rapira.toml](examples/rapira.toml) for HTTP and gRPC pool configur
 - Closing the console window does not start a drain.
 - A forced exit can leave the pidfile. Remove a stale pidfile before the next start.
 - Rapira does not register with Windows Service Control Manager. Use [WinSW](https://github.com/winsw/winsw) when you need a Windows service.
+
+## Observability
+
+Add a TCP endpoint to an HTTP or gRPC server:
+
+```toml
+[observability]
+listen = "127.0.0.1:9180"
+keepalive_timeout_secs = 60
+
+[observability.metrics]
+[observability.probes]
+```
+
+`listen` and at least one endpoint table are required. The endpoint runs on a separate thread with one Tokio IO worker. It runs no PHP.
+
+- `GET /metrics` returns Prometheus text metrics.
+- `GET /livez` returns 200 with `ok` while the server can answer.
+- `GET /readyz` returns 200 when every PHP pool has an idle or active interpreter. It returns 503 and lists pools without a ready interpreter during boot or a failed restart.
+- Other paths, methods, and disabled endpoints return 404.
+
+Metrics with a `pool` label describe one plugin pool. A worker is an interpreter thread. Request and restart counters survive interpreter recycling. Shared queues are counted once per pool.
+
+| Metric | Value |
+| --- | --- |
+| `rapira_workers` | Interpreter threads by `starting`, `idle`, `active`, or `draining` state |
+| `rapira_workers_configured` | The pool's configured `processes` count |
+| `rapira_requests_total` | Work completed or rejected by the host |
+| `rapira_requests_failed_total` | Work the host could not complete |
+| `rapira_requests_failed_on_full_queue_total` | Submissions that found a full queue and never entered it |
+| `rapira_requests_queued` | Queued work and submissions waiting for queue space |
+| `rapira_script_restarts_total` | Entrypoint restarts in interpreter threads |
+| `rapira_build_info` | Rapira and linked PHP version labels, with value 1 |
+
+An intake timeout adds one request and one failure. A cancelled submission that found a full queue adds only to the full-queue failure counter. The Windows endpoint has no per-worker process-exit or memory series because all interpreters share one process.
 
 ## Windows file and socket behavior
 

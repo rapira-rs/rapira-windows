@@ -1,6 +1,3 @@
-#[macro_use]
-mod macros;
-
 use std::env;
 use std::path::PathBuf;
 
@@ -30,7 +27,7 @@ impl bindgen::callbacks::ParseCallbacks for WindowsLinks {
     }
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rustc-check-cfg=cfg(php84, php85)");
     let php = rapira_php_build::discover()?;
     println!("cargo:rustc-link-search=native={}", php.lib_dir.display());
@@ -73,10 +70,7 @@ fn main() -> anyhow::Result<()> {
         .clang_arg("-DRAPIRA_BINDGEN=1")
         .opaque_type("_zend_op");
     for binding in ALLOWED_BINDINGS {
-        bindings = bindings
-            .allowlist_function(binding)
-            .allowlist_type(binding)
-            .allowlist_var(binding);
+        bindings = bindings.allowlist_item(binding);
     }
     bindings
         .generate()?
@@ -85,9 +79,7 @@ fn main() -> anyhow::Result<()> {
     rapira_php_build::rerun_if_changed(&[
         "rapira_sapi.h",
         "allowed_bindings.rs",
-        "rapira.stub.php",
         "rapira_arginfo.h",
-        "rapira_exception.stub.php",
         "rapira_exception_arginfo.h",
     ]);
     Ok(())

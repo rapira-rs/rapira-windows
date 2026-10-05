@@ -1,11 +1,13 @@
 use std::ffi::{CStr, c_char};
 
 use crate::{
-    IS_DOUBLE, IS_LONG, IS_NULL, IS_PROP_REINITABLE, IS_PROP_UNINIT, IS_REFERENCE, IS_UNDEF,
-    rapira_eg, rapira_zval_stringl, zend_class_entry, zend_object, zend_property_info, zend_string,
-    zend_throw_error, zend_throw_exception, zend_update_property, zend_update_property_double,
-    zend_update_property_long, zend_update_property_null, zend_update_property_stringl,
-    zend_value_error, zval,
+    HashPosition, HashTable, IS_DOUBLE, IS_LONG, IS_NULL, IS_PROP_REINITABLE, IS_PROP_UNINIT,
+    IS_REFERENCE, IS_UNDEF, rapira_eg, rapira_zval_stringl, zend_class_entry,
+    zend_hash_get_current_data_ex, zend_hash_get_current_key_ex,
+    zend_hash_internal_pointer_reset_ex, zend_hash_move_forward_ex, zend_object,
+    zend_property_info, zend_read_property, zend_string, zend_throw_error, zend_throw_exception,
+    zend_ulong, zend_update_property, zend_update_property_double, zend_update_property_long,
+    zend_update_property_null, zend_update_property_stringl, zend_value_error, zval,
 };
 
 pub fn ptr_or_empty(bytes: &[u8]) -> *const c_char {
@@ -20,14 +22,6 @@ pub fn ptr_or_empty(bytes: &[u8]) -> *const c_char {
 /// `zv` readable.
 pub unsafe fn is_undef(zv: *const zval) -> bool {
     unsafe { u32::from((*zv).u1.v.type_) == IS_UNDEF }
-}
-
-/// # Safety
-/// `list` a live packed array; ownership of the string bytes stays with the caller.
-pub(crate) unsafe fn list_push_stringl(list: *mut zval, bytes: &[u8]) {
-    unsafe {
-        crate::add_next_index_stringl(list, ptr_or_empty(bytes), bytes.len());
-    }
 }
 
 /// # Safety
@@ -231,14 +225,6 @@ pub unsafe fn zval_type(zv: *const zval) -> u32 {
 }
 
 /// # Safety
-/// `zv` writable.
-pub(crate) unsafe fn zval_null(zv: *mut zval) {
-    unsafe {
-        (*zv).u1.type_info = IS_NULL;
-    }
-}
-
-/// # Safety
 /// `zv` a live zval; a reference's payload stays owned by the reference.
 pub unsafe fn deref(zv: *mut zval) -> *mut zval {
     unsafe {
@@ -246,6 +232,72 @@ pub unsafe fn deref(zv: *mut zval) -> *mut zval {
             &raw mut (*(*zv).value.ref_).val
         } else {
             zv
+        }
+    }
+}
+
+/// The result can point into `rv`. Keep `rv` alive until the caller has used the result.
+/// # Safety
+/// `ce` is registered, `obj` is live, and the engine is active on this thread.
+pub unsafe fn read_prop(
+    ce: *mut zend_class_entry,
+    obj: *mut zend_object,
+    name: &CStr,
+    rv: &mut zval,
+) -> *mut zval {
+    unsafe {
+        deref(zend_read_property(
+            ce,
+            obj,
+            name.as_ptr(),
+            name.count_bytes(),
+            true,
+            rv,
+        ))
+    }
+}
+
+// PHP 8.4 defines this as a macro. PHP 8.5 defines it as an enum value.
+const HASH_KEY_IS_STRING: i64 = 1;
+
+pub enum Key {
+    Str(*mut zend_string),
+    Index(zend_ulong),
+}
+
+/// The position advances before each result. The caller must keep the table unchanged.
+pub struct Entries {
+    ht: *mut HashTable,
+    pos: HashPosition,
+}
+
+/// # Safety
+/// `ht` is a live array and stays live until the walk ends.
+pub unsafe fn entries(ht: *mut HashTable) -> Entries {
+    let mut pos = 0;
+    unsafe { zend_hash_internal_pointer_reset_ex(ht, &mut pos) };
+    Entries { ht, pos }
+}
+
+impl Iterator for Entries {
+    type Item = (Key, *mut zval);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        unsafe {
+            let entry = zend_hash_get_current_data_ex(self.ht, &raw mut self.pos);
+            if entry.is_null() {
+                return None;
+            }
+            let mut skey = std::ptr::null_mut();
+            let mut nkey = 0;
+            let kt = zend_hash_get_current_key_ex(self.ht, &mut skey, &mut nkey, &self.pos);
+            zend_hash_move_forward_ex(self.ht, &mut self.pos);
+            let key = if i64::from(kt) == HASH_KEY_IS_STRING {
+                Key::Str(skey)
+            } else {
+                Key::Index(nkey)
+            };
+            Some((key, deref(entry)))
         }
     }
 }

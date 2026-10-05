@@ -1,12 +1,12 @@
 use crossbeam_channel::{Sender, TrySendError};
 use std::ffi::CStr;
-use std::marker::PhantomData;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use crate::scoreboard::{Event, sb_update};
 use crate::{zend_class_entry, zend_object};
+use rapira_scoreboard::Pool;
 
 pub(crate) const INTAKE_WAIT: Duration = Duration::from_secs(30);
 
@@ -88,39 +88,46 @@ pub fn now_unix_f64() -> f64 {
 #[derive(Clone)]
 pub struct Sink {
     tx: Sender<Box<dyn Work>>,
-    pending: Arc<AtomicUsize>,
+    pool: Arc<Pool>,
 }
 
-struct PendingGuard<'a>(Option<&'a AtomicUsize>);
+struct PendingGuard<'a> {
+    pool: Option<&'a Pool>,
+    deadline: Option<Instant>,
+}
 
 impl<'a> PendingGuard<'a> {
-    fn arm(pending: &'a AtomicUsize) -> Self {
-        pending.fetch_add(1, Ordering::Relaxed);
-        Self(Some(pending))
+    fn arm(pool: &'a Pool) -> Self {
+        pool.pending.fetch_add(1, Ordering::Relaxed);
+        Self {
+            pool: Some(pool),
+            deadline: None,
+        }
     }
     fn disarm(mut self) {
-        self.0 = None;
+        self.pool = None;
     }
 }
 
 impl Drop for PendingGuard<'_> {
     fn drop(&mut self) {
-        if let Some(pending) = self.0.take() {
-            pending.fetch_sub(1, Ordering::Relaxed);
+        if let Some(pool) = self.pool.take() {
+            pool.pending.fetch_sub(1, Ordering::Relaxed);
+            if self.deadline.is_some() {
+                pool.failed_on_full_queue.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 }
 
 impl Sink {
-    pub(crate) fn new(tx: Sender<Box<dyn Work>>, pending: Arc<AtomicUsize>) -> Self {
-        Self { tx, pending }
+    pub(crate) fn new(tx: Sender<Box<dyn Work>>, pool: Arc<Pool>) -> Self {
+        Self { tx, pool }
     }
 
     /// pending is incremented before the send: the consumer decrements as soon as it wakes, so the reverse order could wrap the counter below zero.
     pub async fn submit(&self, mut unit: Box<dyn Work>) -> Result<(), Refused> {
-        let pending = PendingGuard::arm(&self.pending);
-        // The deadline starts at the first full intake: the common send needs no clock read.
-        let mut deadline = None;
+        let mut pending = PendingGuard::arm(&self.pool);
         loop {
             match self.tx.try_send(unit) {
                 Ok(()) => {
@@ -128,13 +135,16 @@ impl Sink {
                     return Ok(());
                 }
                 Err(TrySendError::Full(u)) => {
-                    let deadline = *deadline.get_or_insert_with(|| Instant::now() + INTAKE_WAIT);
+                    let deadline = *pending
+                        .deadline
+                        .get_or_insert_with(|| Instant::now() + INTAKE_WAIT);
                     if Instant::now() > deadline {
                         tracing::warn!(
                             target: "rapira",
                             "intake full for {INTAKE_WAIT:?} ({} pending); shedding the request",
-                            self.pending.load(Ordering::Relaxed)
+                            self.pool.pending.load(Ordering::Relaxed)
                         );
+                        self.pool.shed.fetch_add(1, Ordering::Relaxed);
                         return Err(Refused::Saturated);
                     }
                     unit = u;
@@ -143,63 +153,5 @@ impl Sink {
                 Err(TrySendError::Disconnected(_)) => return Err(Refused::Stopped),
             }
         }
-    }
-}
-
-/// The typed handle a plugin's transport submits to.
-pub struct Intake<U: Work> {
-    sink: Sink,
-    unit: PhantomData<fn(U)>,
-}
-
-impl<U: Work> Clone for Intake<U> {
-    fn clone(&self) -> Self {
-        Self::new(self.sink.clone())
-    }
-}
-
-impl<U: Work> Intake<U> {
-    /// The worker behind `sink` must have started with the `DispatcherClasses` of the plugin that owns `U`.
-    pub fn new(sink: Sink) -> Self {
-        Self {
-            sink,
-            unit: PhantomData,
-        }
-    }
-
-    pub async fn submit(&self, unit: U) -> Result<(), Refused> {
-        self.sink.submit(Box::new(unit)).await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    struct Probe;
-    impl Work for Probe {
-        fn cancelled(&self) -> bool {
-            false
-        }
-        unsafe fn attach(self: Box<Self>, _: *mut zend_object) -> *mut dyn Held {
-            unreachable!()
-        }
-        fn into_cgi(self: Box<Self>) -> Option<crate::types::Context> {
-            None
-        }
-        fn shed(self: Box<Self>) {}
-    }
-
-    fn sink() -> (Sink, crossbeam_channel::Receiver<Box<dyn Work>>) {
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        (Sink::new(tx, Arc::new(AtomicUsize::new(0))), rx)
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn intake_reports_stopped_after_the_receiver_is_gone() {
-        let (sink, rx) = sink();
-        let intake = Intake::<Probe>::new(sink);
-        drop(rx);
-        assert_eq!(intake.submit(Probe).await.unwrap_err(), Refused::Stopped);
     }
 }

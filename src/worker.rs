@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use rapira_config::{PoolSettings, SupervisorSettings};
+use rapira_sapi::Rapira;
 use rapira_sapi::plugin::{Plugin, Stopper, run_plugin};
-use rapira_sapi::{PoolHooks, Rapira};
 
 mod console {
     use super::*;
@@ -60,39 +60,55 @@ pub fn serve(
     plugins: Vec<(Box<dyn Plugin>, PoolSettings)>,
     threads: usize,
     supervisor: &SupervisorSettings,
+    observability: Option<rapira_observability::Server>,
 ) -> anyhow::Result<u8> {
     let _console = console::Watcher::install()?;
-    let module =
-        rapira_sapi::boot_master(&[rapira_http::PHP_PART, rapira_grpc::PHP_PART], threads)?;
-    let board = rapira_scoreboard::Scoreboard::create(threads)?;
+    let module = rapira_sapi::boot_master(
+        &[
+            rapira_http::rapira_http_register_classes,
+            rapira_grpc::rapira_grpc_register_classes,
+        ],
+        threads,
+    )?;
+    let board = rapira_scoreboard::create(threads)?;
     let boot_failed = Arc::new(AtomicBool::new(false));
     let mut pools = Vec::new();
     let mut running = Vec::new();
     let mut stoppers = Vec::new();
-    let mut boards = Vec::new();
     let mut offset = 0;
-    let startup: anyhow::Result<()> = (|| {
-        for (plugin, settings) in plugins {
-            let name = plugin.name();
-            let slots = board.slice(offset..offset + settings.processes);
+    let boards: Vec<_> = plugins
+        .iter()
+        .map(|(plugin, settings)| {
+            let slots = Arc::new(rapira_scoreboard::Pool::new(
+                plugin.name(),
+                &board[offset..offset + settings.processes],
+            ));
             offset += settings.processes;
-            let hooks = PoolHooks {
-                max_requests: settings.max_requests,
-                on_boot_failure: Arc::new({
-                    let failed = boot_failed.clone();
-                    move || {
-                        failed.store(true, Ordering::Release);
-                    }
-                }),
-            };
+            slots
+        })
+        .collect();
+    let obs_stop = tokio::sync::watch::Sender::new(false);
+    let mut observer = None;
+    let startup: anyhow::Result<()> = (|| {
+        if let Some(server) = observability {
+            let pools = boards.clone();
+            let stop = obs_stop.subscribe();
+            let grace = supervisor.drain_grace();
+            observer = Some(
+                std::thread::Builder::new()
+                    .name("rapira-observability".into())
+                    .spawn(move || server.serve(pools, stop, grace))?,
+            );
+        }
+        for ((plugin, settings), slots) in plugins.into_iter().zip(&boards) {
             let pool = Rapira::start_pool(
                 &module,
-                name,
                 settings.mode,
                 settings.entrypoint,
-                slots,
-                hooks,
-                plugin.php().dispatcher,
+                slots.clone(),
+                settings.max_requests,
+                boot_failed.clone(),
+                plugin.dispatcher(),
             )?;
             let stopper = Stopper::default();
             let sink = pool.sink();
@@ -104,7 +120,6 @@ pub fn serve(
                 supervisor.drain_grace(),
             )?);
             stoppers.push(stopper);
-            boards.push((name, slots));
         }
         Ok(())
     })();
@@ -112,12 +127,17 @@ pub fn serve(
         if console::ASKED.load(Ordering::Acquire)
             || boot_failed.load(Ordering::Acquire)
             || running.iter().any(|plugin| plugin.is_finished())
+            || observer.as_ref().is_some_and(|thread| thread.is_finished())
         {
             break;
         }
         std::thread::sleep(Duration::from_millis(20));
     }
     tracing::info!(target: "rapira", "shutdown requested; draining plugins");
+    let mut failed = observer.as_ref().is_some_and(|thread| thread.is_finished());
+    if failed {
+        tracing::error!(target: "observability", "server stopped before shutdown");
+    }
     let deadline = Instant::now() + supervisor.process_control_timeout;
     // The same deadline covers plugin drain, interpreter teardown, and module shutdown.
     let (_shutdown_guard, shutdown_done) = std::sync::mpsc::channel::<()>();
@@ -143,10 +163,20 @@ pub fn serve(
     for stopper in &stoppers {
         stopper.stop();
     }
-    let mut failed = false;
+    obs_stop.send_replace(true);
     for plugin in running {
         if let Err(error) = plugin.join() {
             tracing::error!(target: "rapira", "{error:#}");
+            failed = true;
+        }
+    }
+    if let Some(thread) = observer {
+        let result = thread
+            .join()
+            .map_err(|_| anyhow::anyhow!("observability thread panicked"))
+            .and_then(|result| result);
+        if let Err(error) = result {
+            tracing::error!(target: "observability", "{error:#}");
             failed = true;
         }
     }
@@ -163,9 +193,9 @@ pub fn serve(
             });
         }
     }
-    for (name, board) in boards {
-        for slot in board.snapshot_slots() {
-            tracing::info!(target: "rapira", pool = name, "slot {} pid {} state {} handled {} errors {} recycles {}", slot.id, slot.pid, slot.state, slot.handled, slot.errors, slot.recycles);
+    for board in boards {
+        for (id, slot) in board.slots.iter().enumerate() {
+            tracing::info!(target: "rapira", pool = board.name, "slot {id} pid {} state {} handled {} errors {} recycles {}", slot.pid.load(Ordering::Relaxed), slot.state.load(Ordering::Relaxed), slot.handled.load(Ordering::Relaxed), slot.errors.load(Ordering::Relaxed), slot.recycles.load(Ordering::Relaxed));
         }
     }
     drop(pools);

@@ -1,13 +1,6 @@
 use std::cell::RefCell;
-use std::sync::Arc;
 
 use crate::scoreboard::{Event, sb_update};
-
-#[derive(Clone)]
-pub struct PoolHooks {
-    pub max_requests: u64,
-    pub on_boot_failure: Arc<dyn Fn() + Send + Sync>,
-}
 
 #[derive(Default)]
 struct QuotaState {

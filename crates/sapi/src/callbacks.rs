@@ -8,6 +8,7 @@ use ::http::header::{
 };
 use core::slice;
 use std::ffi::CStr;
+use std::fmt::NumBuffer;
 use std::io::Read;
 use std::mem::ManuallyDrop;
 use std::os::raw::{c_char, c_int};
@@ -29,48 +30,34 @@ pub fn guard<T>(default: T, f: impl FnOnce() -> T) -> T {
 
 pub const MAX_BUFFERED_BODY: usize = 1 << 30;
 
-struct SapiHeaders(*mut sapi_headers_struct);
-
-impl SapiHeaders {
-    /// http_response_code is an app-controlled c_int; clamping keeps the u16 cast from wrapping.
-    fn status(&self) -> u16 {
-        let h = unsafe { &*self.0 };
-        if h.http_response_code != 0 {
-            h.http_response_code.clamp(100, 599) as u16
-        } else {
-            200
-        }
-    }
-
-    fn lines(&self) -> impl Iterator<Item = SapiHeader> {
-        let mut el: *mut _zend_llist_element = unsafe { &mut *self.0 }.headers.head;
-        std::iter::from_fn(move || {
-            let e: &_zend_llist_element = unsafe { el.as_ref()? };
-            el = e.next;
-            Some(SapiHeader(e.data.as_ptr() as *const sapi_header_struct))
-        })
+/// Clamps the application-controlled status before conversion to u16.
+fn head_status(h: &sapi_headers_struct) -> u16 {
+    if h.http_response_code != 0 {
+        h.http_response_code.clamp(100, 599) as u16
+    } else {
+        200
     }
 }
 
-struct SapiHeader(*const sapi_header_struct);
+fn head_lines(h: &sapi_headers_struct) -> impl Iterator<Item = &sapi_header_struct> {
+    let mut el: *mut _zend_llist_element = h.headers.head;
+    std::iter::from_fn(move || {
+        let e = unsafe { el.as_ref()? };
+        el = e.next;
+        Some(unsafe { &*(e.data.as_ptr() as *const sapi_header_struct) })
+    })
+}
 
-impl SapiHeader {
-    fn name_value(&self) -> Option<(HeaderName, HeaderValue)> {
-        let sh = unsafe { &*self.0 };
-        if sh.header.is_null() || sh.header_len == 0 {
-            return None;
-        }
-        let line: &[u8] = unsafe { slice::from_raw_parts(sh.header as *const u8, sh.header_len) };
-        let Some(field) = split_header_line(line) else {
-            tracing::debug!(
-                target: "php",
-                "dropped unrepresentable response header: {}",
-                String::from_utf8_lossy(line)
-            );
-            return None;
-        };
-        Some(field)
+fn header_field(sh: &sapi_header_struct) -> Option<(HeaderName, HeaderValue)> {
+    if sh.header.is_null() || sh.header_len == 0 {
+        return None;
     }
+    let line = unsafe { slice::from_raw_parts(sh.header as *const u8, sh.header_len) };
+    let Some(field) = split_header_line(line) else {
+        tracing::debug!(target: "php", "dropped unrepresentable response header: {}", String::from_utf8_lossy(line));
+        return None;
+    };
+    Some(field)
 }
 
 /// `HeaderName::from_bytes` accepts only the RFC 9110 `tchar` set and `HeaderValue::from_bytes` only the field-value bytes.
@@ -147,9 +134,10 @@ fn cgi_header_name<'a>(buf: &'a mut Vec<u8>, field: &str) -> &'a CStr {
 /// Owned buffers stay in ManuallyDrop because `put` can bail out over this frame.
 fn cgi_header_vars(headers: &HeaderMap, content_length: i64, mut put: impl FnMut(&CStr, &[u8])) {
     if content_length >= 0 {
-        let len = ManuallyDrop::new(content_length.to_string());
-        put(c"CONTENT_LENGTH", len.as_bytes());
-        drop(ManuallyDrop::into_inner(len));
+        put(
+            c"CONTENT_LENGTH",
+            content_length.format_into(&mut NumBuffer::new()).as_bytes(),
+        );
     }
     let mut name = ManuallyDrop::new(Vec::new());
     let mut joined = ManuallyDrop::new(Vec::new());
@@ -170,20 +158,18 @@ pub unsafe extern "C" fn rapira_rs_ub_write(
     len: usize,
     aborted: *mut bool,
 ) -> usize {
-    let mut completed = false;
-    let written = guard(0, || {
-        let n = (|| {
+    guard(None, || {
             let ctx = unsafe {
                 let Some(c) = ctx() else {
                     let data = slice::from_raw_parts(buf.cast::<u8>(), len);
                     tracing::info!(target: "php", "{}", String::from_utf8_lossy(data));
-                    return len;
+                    return Some(len);
                 };
                 c
             };
 
             if ctx.stream == StreamState::NotSent {
-                let status = unsafe { SapiHeaders(&mut (*rapira_sg()).sapi_headers).status() };
+                let status = unsafe { head_status(&(*rapira_sg()).sapi_headers) };
                 ctx.commit_head(status, HeaderMap::new());
             }
 
@@ -191,7 +177,7 @@ pub unsafe extern "C" fn rapira_rs_ub_write(
                 if tx.is_closed() {
                     ctx.finish(false);
                     unsafe { *aborted = true };
-                    return 0;
+                    return Some(0);
                 }
                 if ctx.body.len() + len > MAX_BUFFERED_BODY {
                     tracing::error!(
@@ -201,7 +187,7 @@ pub unsafe extern "C" fn rapira_rs_ub_write(
                     );
                     ctx.finish(true);
                     unsafe { *aborted = true };
-                    return 0;
+                    return Some(0);
                 }
                 let buf = unsafe { slice::from_raw_parts(buf.cast::<u8>(), len) };
                 ctx.body.extend_from_slice(buf);
@@ -210,15 +196,11 @@ pub unsafe extern "C" fn rapira_rs_ub_write(
                 }
             }
 
-            len
-        })();
-        completed = true;
-        n
-    });
-    if !completed {
+            Some(len)
+    }).unwrap_or_else(|| {
         unsafe { *aborted = true };
-    }
-    written
+        0
+    })
 }
 
 /// # Safety
@@ -237,12 +219,9 @@ pub unsafe extern "C" fn send_headers(h: *mut sapi_headers_struct) -> c_int {
             ctx
         };
 
-        let h = SapiHeaders(h);
-        let headers: HeaderMap = h
-            .lines()
-            .filter_map(|l: SapiHeader| l.name_value())
-            .collect();
-        ctx.commit_head(h.status(), headers);
+        let h = unsafe { &*h };
+        let headers = head_lines(h).filter_map(header_field).collect();
+        ctx.commit_head(head_status(h), headers);
         SAPI_HEADER_SENT_SUCCESSFULLY as c_int
     })
 }
@@ -391,7 +370,7 @@ pub fn send_error_head(c: &mut Context, status: u16) {
 }
 
 pub(crate) fn finalize_response(c: &mut Context, errored: bool) -> bool {
-    let truncated = c.is_truncated(errored);
+    let truncated = errored && c.stream == StreamState::BodyStreamed;
     if errored {
         send_error_head(c, 500);
     }

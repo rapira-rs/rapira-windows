@@ -8,11 +8,11 @@ The grpc plugin of the `rapira` binary. It serves unary RPCs from PHP over gRPC,
 
 - `name()` returns `grpc`: the TOML table and the dispatcher name that PHP sees.
 - `modes()` accepts dispatcher mode only.
-- `php()` returns `PHP_PART`, the `PhpPart` of the plugin: `register`, the function that MINIT calls after the base classes to register the `Rapira\Grpc` classes, and `dispatcher`, the dispatcher classes.
+- `dispatcher()` returns the dispatcher classes. MINIT calls `rapira_grpc_register_classes` after registering the base classes.
 - `prepare()` runs on the boot thread before PHP starts. It sets the service list, binds the listener, and builds the health and reflection routes.
 - `serve()` runs on the `rapira-grpc` plugin thread. Its `Worker` holds a two-thread tokio runtime handle, the PHP pool sink, the stop flag, and `drain_grace`. The plugin drains within this limit after a stop.
 
-`serve()` wraps the pool sink as `Intake<Call>` and takes the prepared listener through `rapira_net::Acceptor`. `PhpDispatcher` builds a `Call` for each unary method and submits it to the interpreter queue. PHP finalizes the call with `respond()` or `fail()`. The plugin sends the result to the client.
+`serve()` takes the pool `Sink` and the prepared listener through `rapira_net::Acceptor`. `PhpDispatcher` builds a `Call` for each unary method and submits it to the interpreter queue. PHP finalizes the call with `respond()` or `fail()`. The plugin sends the result to the client.
 
 `Call` is the work unit. It implements `rapira_sapi::work::Work`:
 
@@ -36,7 +36,7 @@ The grpc plugin of the `rapira` binary. It serves unary RPCs from PHP over gRPC,
 - `src/dispatch.rs`: `PhpDispatcher`: the route to PHP, the JSON transcoding, and the map from the PHP outcome to a status.
 - `src/schema.rs`: the descriptor set, the method routes, the JSON transcoding, and the service list of `getServices()`.
 - `src/call.rs`: the `Call` unit and its `Work` impl, and the `UnaryCall`, `UnaryReply` and `RpcStatus` types.
-- `src/php/`: the Rust behind the PHP methods: the class entries, `PHP_PART` and `DISPATCHER_CLASSES` (`mod.rs`), the call and its metadata (`call.rs`), and the value class constructors (`values.rs`).
+- `src/php/`: the Rust behind the PHP methods: the class entries and `DISPATCHER_CLASSES` (`mod.rs`), the call and its metadata (`call.rs`), and the value class constructors (`values.rs`).
 
 ## Protocols
 
@@ -117,6 +117,24 @@ A client sets a timeout with `grpc-timeout` (gRPC and gRPC-Web) or `connect-time
 
 The plugin cannot stop PHP code, so PHP continues to run the call. A later `respond()` or `fail()` throws `Rapira\Exception\WorkDiscardedException`. Check `isCancelled()` during long work. Set `default_timeout_secs` so that each call has a deadline.
 
+## Authentication
+
+Enable bearer-token authentication in `rapira.toml`:
+
+```toml
+[grpc]
+interceptors = ["auth"]
+
+[grpc.auth]
+tokens_file = "grpc-tokens.txt"
+```
+
+The token file path is relative to the config directory. Put one token on each line. Blank lines and lines that start with `#` are permitted. The file must contain at least one valid token. Rapira loads it before PHP starts. Restart the server after changing it.
+
+Send one `Authorization: Bearer <token>` header. The scheme is case-insensitive. A rejected call does not reach PHP. gRPC and gRPC-Web get UNAUTHENTICATED (16). Connect gets HTTP 401 with a `WWW-Authenticate: Bearer` header. Application calls and reflection require a token. The built-in health service permits calls without a token.
+
+The listener uses plaintext TCP. Use a TLS proxy for remote clients that send tokens.
+
 ## Health and reflection
 
 The plugin serves the gRPC health checking protocol (`grpc.health.v1.Health`) from Rust in each worker. `Check` and `Watch` report SERVING for the empty name `""` and for each configured service. Health does not check PHP: a worker whose PHP boot failed reports SERVING, and its calls get UNAVAILABLE. https://github.com/grpc/grpc/blob/master/doc/health-checking.md
@@ -153,6 +171,8 @@ The `[grpc]` table. Unknown keys fail the boot.
 - `max_timeout_secs`: the upper limit for a client timeout. Default: unset, no limit. `default_timeout_secs` must not be larger.
 - `keepalive_interval_secs`: the time without a new request, request data or a PING answer after which the listener sends an HTTP/2 keepalive PING. Default `10`. It must be at least 1.
 - `keepalive_timeout_secs`: the time the listener waits for the PING answer before it closes the connection. Default `10`. It must be at least 1.
+- `interceptors`: names in execution order. Default `[]`. The supported name is `"auth"`. Each listed interceptor requires its table. Repeated or unknown names fail startup.
+- `[grpc.auth].tokens_file`: required when `"auth"` is listed. The path must name a readable token file.
 - `[grpc.pool]`: the worker pool. It takes the keys of `[http.pool]`, and its `mode` must be `"dispatcher"`.
 
 The drain window is `[supervisor].process_control_timeout_secs` minus the smaller of 5 seconds and half the timeout. The remaining time allows PHP teardown. The host forces exit if the full shutdown exceeds this budget.

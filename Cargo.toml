@@ -28,6 +28,8 @@ members = [
     "crates/net",
     "crates/plugins/http",
     "crates/plugins/grpc",
+    "crates/interceptors/auth",
+    "crates/observability",
 ]
 
 [workspace.dependencies]
@@ -40,6 +42,8 @@ rapira_config = { path = "crates/config" }
 rapira_static_files = { path = "crates/middleware/static_files" }
 rapira_http = { path = "crates/plugins/http" }
 rapira_grpc = { path = "crates/plugins/grpc" }
+rapira_grpc_auth = { path = "crates/interceptors/auth" }
+rapira_observability = { path = "crates/observability" }
 rapira_net = { path = "crates/net" }
 rapira_scoreboard = { path = "crates/scoreboard" }
 serde = { version = "1", features = ["derive"] }
@@ -69,15 +73,16 @@ codegen-units = 1
 [dependencies]
 anyhow = { workspace = true }
 clap = { version = "4", features = ["derive"] }
-rapira_net = { workspace = true }
 rapira_sapi = { workspace = true }
 rapira_config = { workspace = true }
 rapira_http = { workspace = true }
 rapira_grpc = { workspace = true }
+rapira_observability = { workspace = true }
+tokio = { workspace = true }
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading"] }
 rapira_scoreboard = { workspace = true }
 mimalloc = "0.1"
 serde = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter", "chrono", "json"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi", "env-filter", "json"] }

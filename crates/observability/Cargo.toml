@@ -1,0 +1,24 @@
+[package]
+name = "rapira_observability"
+version = "0.8.1"
+edition.workspace = true
+publish = false
+license = "MIT"
+description = "Metrics and health probes for the Windows interpreter pools"
+
+[lints]
+workspace = true
+
+[dependencies]
+rapira_config = { workspace = true }
+rapira_scoreboard = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+rapira_net = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "time"] }
+hyper = { workspace = true, features = ["http1", "server"] }
+hyper-util = { workspace = true, features = ["tokio", "server", "http1", "server-graceful"] }
+
+[dev-dependencies]
+toml = { workspace = true }

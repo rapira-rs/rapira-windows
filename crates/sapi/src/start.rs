@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::ffi::CString;
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -10,10 +10,11 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError, bounded};
+use rapira_scoreboard::Pool;
 use tracing::{error, info};
 
-use crate::plugin::{Mode, PhpPart};
-use crate::quota::{self, PoolHooks};
+use crate::plugin::Mode;
+use crate::quota;
 use crate::rapira_worker::{WorkerExit, rapira_worker};
 use crate::scoreboard::{Event, sb_set, sb_update};
 use crate::work::{DispatcherClasses, Sink, Work};
@@ -21,16 +22,57 @@ use crate::*;
 
 thread_local! {
     static JOB_RX: RefCell<Option<JobRx>> = const { RefCell::new(None) };
-    static PARTS: RefCell<Vec<PhpPart>> = const { RefCell::new(Vec::new()) };
+    static REGISTER_FNS: RefCell<Vec<unsafe extern "C" fn()>> = const { RefCell::new(Vec::new()) };
+}
+
+/// # Safety
+/// Requires an active request. `php_execute_script` catches a bailout itself.
+pub(crate) unsafe fn run_script(script: &Path) -> bool {
+    unsafe {
+        let c_script = CString::new(script.to_string_lossy().as_bytes()).unwrap_or_default();
+        let mut fh: zend_file_handle = std::mem::zeroed();
+        zend_stream_init_filename(&mut fh, c_script.as_ptr());
+        fh.primary_script = true;
+        let ok = php_execute_script(&mut fh);
+        zend_destroy_file_handle(&mut fh);
+        ok
+    }
 }
 
 #[derive(Clone)]
 struct JobRx {
     rx: Receiver<Box<dyn Work>>,
-    pending: Arc<AtomicUsize>,
+    pool: Arc<Pool>,
     stop: Receiver<()>,
     stopping: Arc<AtomicBool>,
     handled: Arc<AtomicBool>,
+}
+
+impl JobRx {
+    fn recv(&self, timeout: Option<Duration>) -> Pulled {
+        if self.stopping.load(Ordering::Acquire) {
+            return Pulled::Closed;
+        }
+        let got = match timeout {
+            None => crossbeam_channel::select_biased! {
+                recv(self.stop) -> _ => Err(RecvTimeoutError::Disconnected),
+                recv(self.rx) -> unit => unit.map_err(|_| RecvTimeoutError::Disconnected),
+            },
+            Some(timeout) => crossbeam_channel::select_biased! {
+                recv(self.stop) -> _ => Err(RecvTimeoutError::Disconnected),
+                recv(self.rx) -> unit => unit.map_err(|_| RecvTimeoutError::Disconnected),
+                default(timeout) => Err(RecvTimeoutError::Timeout),
+            },
+        };
+        match got {
+            Ok(unit) => {
+                self.pool.pending.fetch_sub(1, Ordering::Relaxed);
+                Pulled::Job(unit)
+            }
+            Err(RecvTimeoutError::Timeout) => Pulled::Timeout,
+            Err(RecvTimeoutError::Disconnected) => Pulled::Closed,
+        }
+    }
 }
 
 pub struct PhpModule {
@@ -106,14 +148,25 @@ fn php_series(id: u32) -> (u32, u32) {
     (id / 10_000, (id / 100) % 100)
 }
 
+pub fn linked_php_version() -> String {
+    unsafe {
+        std::ffi::CStr::from_ptr(php_version())
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
 /// Registers the base classes and every linked plugin once before the pools start.
-pub fn boot_master(parts: &[PhpPart], threads: usize) -> anyhow::Result<PhpModule> {
+pub fn boot_master(
+    register: &[unsafe extern "C" fn()],
+    threads: usize,
+) -> anyhow::Result<PhpModule> {
     let (headers, linked) = unsafe { (rapira_headers_php_version_id(), php_version_id()) };
     anyhow::ensure!(
         php_series(headers) == php_series(linked),
         "PHP runtime version {linked} does not match the build headers {headers}"
     );
-    PARTS.set(parts.to_vec());
+    REGISTER_FNS.set(register.to_vec());
     let mut sapi = module::build_sapi_module();
     let started = unsafe {
         anyhow::ensure!(
@@ -135,9 +188,9 @@ pub fn boot_master(parts: &[PhpPart], threads: usize) -> anyhow::Result<PhpModul
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rapira_rs_register_plugin_classes() {
-    PARTS.with_borrow(|parts| {
-        for part in parts {
-            unsafe { (part.register)() };
+    REGISTER_FNS.with_borrow(|register| {
+        for f in register {
+            unsafe { f() };
         }
     });
 }
@@ -152,11 +205,11 @@ pub struct Rapira {
 impl Rapira {
     pub fn start_pool(
         module: &PhpModule,
-        name: &'static str,
         mode: Mode,
         entrypoint: PathBuf,
-        board: rapira_scoreboard::Scoreboard,
-        hooks: PoolHooks,
+        board: Arc<Pool>,
+        max_requests: u64,
+        boot_failed: Arc<AtomicBool>,
         classes: DispatcherClasses,
     ) -> anyhow::Result<Self> {
         let directory = CString::new(
@@ -166,43 +219,43 @@ impl Rapira {
                 .to_string_lossy()
                 .as_bytes(),
         )?;
-        let pending = Arc::new(AtomicUsize::new(0));
         let (tx, rx) = bounded(1024);
         let (stop_tx, stop) = bounded(0);
         let stopping = Arc::new(AtomicBool::new(false));
         let job = JobRx {
             rx,
-            pending: pending.clone(),
+            pool: board.clone(),
             stop,
             stopping: stopping.clone(),
             handled: Arc::new(AtomicBool::new(false)),
         };
-        let reported = Arc::new(AtomicBool::new(false));
-        let (gate_tx, gate_rx) = bounded(board.nslots());
+        let (gate_tx, gate_rx) = bounded(board.slots.len());
         let mut pool = Self {
-            sink: Some(Sink::new(tx, pending)),
-            workers: Vec::with_capacity(board.nslots()),
+            sink: Some(Sink::new(tx, board.clone())),
+            workers: Vec::with_capacity(board.slots.len()),
             stopping,
             stop_tx: Some(stop_tx),
         };
-        for index in 0..board.nslots() {
-            board.set_starting(index);
-            let slot = board.slot(index);
-            let (job, hooks, reported, gate) = (
-                job.clone(),
-                hooks.clone(),
-                reported.clone(),
-                gate_rx.clone(),
-            );
+        for (index, slot) in board.slots.iter().enumerate() {
+            slot.state
+                .store(rapira_scoreboard::SLOT_STARTING, Ordering::Release);
+            let (job, boot_failed, gate) = (job.clone(), boot_failed.clone(), gate_rx.clone());
             let (entrypoint, directory) = (entrypoint.clone(), directory.clone());
             let active = ActiveThread::new(&module.active);
             let worker = thread::Builder::new()
-                .name(format!("rapira-{name}-{index}"))
+                .name(format!("rapira-{}-{index}", board.name))
                 .spawn(move || {
                     let _active = active;
                     if gate.recv().is_ok() {
                         worker_main(
-                            name, mode, entrypoint, directory, job, slot, index, hooks, reported,
+                            mode,
+                            entrypoint,
+                            directory,
+                            job,
+                            slot,
+                            index,
+                            max_requests,
+                            boot_failed,
                             classes,
                         );
                     }
@@ -215,7 +268,7 @@ impl Rapira {
                 }
             }
         }
-        for _ in 0..board.nslots() {
+        for _ in board.slots {
             gate_tx.send(()).expect("worker start gate is connected");
         }
         Ok(pool)
@@ -264,36 +317,37 @@ fn effective_quota(max: u64, index: usize) -> u64 {
 
 #[allow(clippy::too_many_arguments)]
 fn worker_main(
-    name: &str,
     mode: Mode,
     entrypoint: PathBuf,
     directory: CString,
     job: JobRx,
     slot: &'static rapira_scoreboard::SharedSlot,
     index: usize,
-    hooks: PoolHooks,
-    reported: Arc<AtomicBool>,
+    max_requests: u64,
+    boot_failed: Arc<AtomicBool>,
     classes: DispatcherClasses,
 ) {
+    let name = job.pool.name;
     slot.bind(std::process::id());
     crate::context::set_script(&entrypoint);
     JOB_RX.set(Some(job.clone()));
     crate::exchange::set_classes(classes);
     let mut streak: u32 = 0;
     loop {
+        sb_set(slot);
+        sb_update(Event::BootFailed);
         let started = Instant::now();
         let php = match PhpThread::new(mode, &directory) {
             Ok(php) => php,
             Err(error) => {
                 error!(target: "rapira", "pool {name} thread {index}: {error:#}");
-                (hooks.on_boot_failure)();
+                boot_failed.store(true, Ordering::Release);
                 break;
             }
         };
         crate::exchange::forget_dispatcher();
         crate::exchange::cycle_reset();
-        sb_set(slot);
-        quota::install(effective_quota(hooks.max_requests, index));
+        quota::install(effective_quota(max_requests, index));
         info!(target: "rapira", pool = name, "worker thread {index} ready");
         let outcome = catch_unwind(AssertUnwindSafe(|| match mode {
             Mode::Classic => {
@@ -309,6 +363,7 @@ fn worker_main(
             quota::fire_unhealthy();
         }
         let unhealthy = quota::is_unhealthy();
+        sb_update(Event::Draining);
         drop(php);
         if job.stopping.load(Ordering::Acquire)
             || (matches!(outcome, Ok(WorkerExit::Closed)) && !quota::is_draining())
@@ -316,8 +371,14 @@ fn worker_main(
             break;
         }
         if unhealthy {
-            if !job.handled.load(Ordering::Acquire) && !reported.swap(true, Ordering::AcqRel) {
-                (hooks.on_boot_failure)();
+            if !job.handled.load(Ordering::Acquire)
+                && !job
+                    .pool
+                    .slots
+                    .iter()
+                    .any(rapira_scoreboard::SharedSlot::serving)
+            {
+                boot_failed.store(true, Ordering::Release);
             }
             if started.elapsed() >= Duration::from_secs(10) {
                 streak = 0;
@@ -333,6 +394,9 @@ fn worker_main(
         sb_update(Event::Recycled);
         info!(target: "rapira", pool = name, "worker thread {index} recycling");
     }
+    slot.pid.store(0, Ordering::Relaxed);
+    slot.state
+        .store(rapira_scoreboard::SLOT_FREE, Ordering::Release);
     JOB_RX.set(None);
 }
 
@@ -367,30 +431,25 @@ pub(crate) fn pull_job_wait(timeout: Option<Duration>) -> Pulled {
         let Some(job) = slot else {
             return Pulled::Closed;
         };
-        if job.stopping.load(Ordering::Acquire) {
-            return Pulled::Closed;
-        }
         sb_update(Event::Idle);
-        let got = match timeout {
-            None => crossbeam_channel::select_biased! {
-                recv(job.stop) -> _ => Err(RecvTimeoutError::Disconnected),
-                recv(job.rx) -> unit => unit.map_err(|_| RecvTimeoutError::Disconnected),
-            },
-            Some(timeout) => crossbeam_channel::select_biased! {
-                recv(job.stop) -> _ => Err(RecvTimeoutError::Disconnected),
-                recv(job.rx) -> unit => unit.map_err(|_| RecvTimeoutError::Disconnected),
-                default(timeout) => Err(RecvTimeoutError::Timeout),
-            },
-        };
-        sb_update(Event::Active);
-        match got {
-            Ok(unit) => {
-                job.pending.fetch_sub(1, Ordering::Relaxed);
-                Pulled::Job(unit)
-            }
-            Err(RecvTimeoutError::Timeout) => Pulled::Timeout,
-            Err(RecvTimeoutError::Disconnected) => Pulled::Closed,
-        }
+        let pulled = job.recv(timeout);
+        sb_update(if matches!(pulled, Pulled::Closed) {
+            Event::Draining
+        } else {
+            Event::Active
+        });
+        pulled
+    })
+}
+
+/// Failed boot waits preserve the slot state because PHP cannot accept work.
+pub(crate) fn pull_job_to_shed(timeout: Duration) -> Pulled {
+    if quota::is_draining() {
+        return Pulled::Closed;
+    }
+    JOB_RX.with_borrow(|slot| match slot {
+        Some(job) => job.recv(Some(timeout)),
+        None => Pulled::Closed,
     })
 }
 
@@ -404,14 +463,19 @@ pub(crate) fn pull_job_try() -> Pulled {
             return Pulled::Closed;
         };
         if job.stopping.load(Ordering::Acquire) {
+            sb_update(Event::Draining);
             return Pulled::Closed;
         }
         sb_update(Event::Idle);
         let got = job.rx.try_recv();
-        sb_update(Event::Active);
+        sb_update(if matches!(got, Err(TryRecvError::Disconnected)) {
+            Event::Draining
+        } else {
+            Event::Active
+        });
         match got {
             Ok(unit) => {
-                job.pending.fetch_sub(1, Ordering::Relaxed);
+                job.pool.pending.fetch_sub(1, Ordering::Relaxed);
                 Pulled::Job(unit)
             }
             Err(TryRecvError::Empty) => Pulled::Empty,
@@ -420,9 +484,9 @@ pub(crate) fn pull_job_try() -> Pulled {
     })
 }
 
-pub(crate) fn pending_depth() -> usize {
+pub(crate) fn pending_depth() -> u64 {
     JOB_RX.with_borrow(|slot| {
         slot.as_ref()
-            .map_or(0, |job| job.pending.load(Ordering::Relaxed))
+            .map_or(0, |job| job.pool.pending.load(Ordering::Relaxed))
     })
 }

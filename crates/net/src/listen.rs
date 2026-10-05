@@ -16,42 +16,26 @@ impl PreparedListener {
     }
 }
 
-/// Binds every configured listener before PHP starts.
-#[derive(Default)]
-pub struct PrepareCtx {
-    addresses: Vec<SocketAddr>,
-}
-
-impl PrepareCtx {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn bind(&mut self, addr: &SocketAddr) -> anyhow::Result<PreparedListener> {
-        let socket = Socket::new(
-            Domain::for_address(*addr),
-            Type::STREAM,
-            Some(Protocol::TCP),
-        )
-        .with_context(|| format!("socket for {addr}"))?;
-        // SO_REUSEADDR on Windows lets a second process steal a live listener.
-        // https://learn.microsoft.com/en-us/windows/win32/winsock/using-so-reuseaddr-and-so-exclusiveaddruse
-        socket
-            .bind(&(*addr).into())
-            .with_context(|| format!("bind {addr}"))?;
-        socket
-            .listen(65535)
-            .with_context(|| format!("listen {addr}"))?;
-        socket.set_nonblocking(true)?;
-        let resolved = socket.local_addr()?.as_socket().expect("TCP local address");
-        anyhow::ensure!(
-            !self.addresses.contains(&resolved),
-            "duplicate listener {resolved}"
-        );
-        self.addresses.push(resolved);
-        Ok(PreparedListener {
-            socket: socket.into(),
-            addr: resolved,
-        })
-    }
+/// Binds a configured listener before PHP starts.
+pub fn bind(addr: &SocketAddr) -> anyhow::Result<PreparedListener> {
+    let socket = Socket::new(
+        Domain::for_address(*addr),
+        Type::STREAM,
+        Some(Protocol::TCP),
+    )
+    .with_context(|| format!("socket for {addr}"))?;
+    // SO_REUSEADDR on Windows lets a second process steal a live listener.
+    // https://learn.microsoft.com/en-us/windows/win32/winsock/using-so-reuseaddr-and-so-exclusiveaddruse
+    socket
+        .bind(&(*addr).into())
+        .with_context(|| format!("bind {addr}"))?;
+    socket
+        .listen(65535)
+        .with_context(|| format!("listen {addr}"))?;
+    socket.set_nonblocking(true)?;
+    let resolved = socket.local_addr()?.as_socket().expect("TCP local address");
+    Ok(PreparedListener {
+        socket: socket.into(),
+        addr: resolved,
+    })
 }

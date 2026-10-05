@@ -80,7 +80,9 @@ clangd reads the generated commands from the ignored `target/clangd` directory. 
 | `crates/php_build` | Native PHP discovery, C compilation, and linking |
 | `crates/config` | Shared configuration types |
 | `crates/net` | Prepared TCP listeners |
-| `crates/scoreboard` | Per-thread counters |
+| `crates/scoreboard` | Per-thread states and counters, and shared pool queue counters |
+| `crates/observability` | TCP metrics and readiness probes on a PHP-free thread |
+| `crates/interceptors/auth` | gRPC bearer-token authentication |
 | `crates/plugins/http` | HTTP server and PHP API |
 | `crates/plugins/grpc` | Unary gRPC, gRPC-Web, Connect, and PHP API |
 | `crates/middleware` | Built-in HTTP middleware |

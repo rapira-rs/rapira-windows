@@ -1,5 +1,4 @@
 use std::convert::Infallible;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -11,13 +10,13 @@ use hyper_util::server::graceful::GracefulShutdown;
 use rapira_net::{Acceptor, PreparedListener, Serve};
 use rapira_sapi::Addr;
 use rapira_sapi::plugin::Worker;
-use rapira_sapi::work::Intake;
+use rapira_sapi::work::Sink;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch::{Sender, channel};
 
 use crate::bridge::ConnectionState;
 use crate::handler::{Conn, Shared, respond};
-use crate::{Config, Exchange, multipart};
+use crate::{Config, multipart};
 
 /// Everything the accept loop hands to a connection, and the drain that follows it.
 struct Serving {
@@ -27,16 +26,11 @@ struct Serving {
 }
 
 impl Serving {
-    fn start(
-        intake: Intake<Exchange>,
-        uploads: Option<Arc<multipart::Limits>>,
-        config: Config,
-    ) -> Self {
+    fn start(intake: Sink, config: Config) -> Self {
         tracing::info!(target: "http", "listening on http://{}", config.listen);
         let shared = Arc::new(Shared {
             cfg: config,
             intake,
-            uploads,
             inflight: Arc::new(AtomicUsize::new(0)),
         });
         let mut builder = http1::Builder::new();
@@ -146,25 +140,17 @@ fn spawn_watched(
 
 /// Runs the accept loop on the calling thread until the stop flag, then drains the connections.
 pub(crate) fn serve(
-    intake: Intake<Exchange>,
-    config: Config,
+    intake: Sink,
+    mut config: Config,
     prepared: PreparedListener,
     worker: Worker,
 ) -> Result<()> {
     let acceptor = Acceptor::adopt(prepared, worker.stop.clone(), &worker.handle)?;
-    // Each worker spools in its own dir under the configured one.
-    let uploads: Option<Arc<multipart::Limits>> = config
-        .uploads
-        .as_ref()
-        .map(|limits| {
-            anyhow::Ok(Arc::new(multipart::Limits {
-                dir: multipart::create_worker_spool_dir(&limits.dir)?,
-                ..limits.clone()
-            }))
-        })
-        .transpose()?;
-    let spool_dir: Option<PathBuf> = uploads.as_ref().map(|limits| limits.dir.clone());
-    let serving = Serving::start(intake, uploads, config);
+    if let Some(limits) = &mut config.uploads {
+        limits.dir = multipart::create_worker_spool_dir(&limits.dir)?;
+    }
+    let spool_dir = config.uploads.as_ref().map(|limits| limits.dir.clone());
+    let serving = Serving::start(intake, config);
     let fatal = acceptor.run(&worker.handle, &serving);
     let drained = worker
         .handle

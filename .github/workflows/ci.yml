@@ -19,6 +19,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: rustfmt
+      - name: Format
+        run: cargo fmt --all --check
       - id: php84
         shell: pwsh
         run: |
@@ -37,22 +42,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        php: ['8.4', '8.5']
+        arch: [x86_64, arm64]
         include:
           - php: '8.4'
             spec: ${{ needs.prepare.outputs.php84 }}
-            arch: x86_64
-            runner: windows-latest
           - php: '8.5'
             spec: ${{ needs.prepare.outputs.php85 }}
-            arch: x86_64
+          - arch: x86_64
             runner: windows-latest
-          - php: '8.4'
-            spec: ${{ needs.prepare.outputs.php84 }}
-            arch: arm64
-            runner: windows-11-vs2026-arm
-          - php: '8.5'
-            spec: ${{ needs.prepare.outputs.php85 }}
-            arch: arm64
+          - arch: arm64
             runner: windows-11-vs2026-arm
     name: ${{ matrix.arch }} PHP ${{ matrix.php }}
     steps:
@@ -101,13 +100,11 @@ jobs:
           key: ${{ steps.php-cache.outputs.cache-primary-key }}
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
-          components: clippy, rustfmt
+          components: clippy
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           cache-on-failure: true
           key: ${{ matrix.arch }}-php-${{ fromJSON(matrix.spec).php_version }}
-      - name: Format
-        run: cargo fmt --all --check
       - name: Clippy
         run: ./dev.ps1 -Task clippy -Devel $env:PHP_DEVEL_DIR -Runtime $env:PHP_RUNTIME
       - name: Workspace tests

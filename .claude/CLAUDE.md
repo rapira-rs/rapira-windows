@@ -2,6 +2,7 @@
 
 - ZTS PHP 8.4 and 8.5 only. `rapira_sapi.h` rejects NTS headers. Windows 10, Windows 11, and Windows Server on x64. Windows 11 on ARM64.
 - One process with a fixed interpreter thread pool per plugin. Each pool owns its work queue. `processes` is the interpreter thread count.
+- Queue counters belong to the pool. Request and restart counters belong to interpreter slots and survive recycling. A separate observability thread reads these counters and runs no PHP.
 - MINIT runs once before the interpreter threads start. Module teardown runs on the boot thread after every interpreter has stopped. A forced exit uses `TerminateProcess`.
 - Use native architecture tools. Build and test x64 and ARM64 on matching native CI runners. Build release PHP from official source with `ci/build-php.ps1`.
 - Use console control events for shutdown. Keep fixed pool sizes.

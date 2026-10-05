@@ -2,6 +2,60 @@ use crate::harness::*;
 use std::time::{Duration, Instant};
 
 #[test]
+fn boot_retries_without_application_traffic() {
+    let srv = Spawn::http(
+        rapira_sapi::Mode::Dispatcher,
+        fixture_path("lifecycle/dependency-boot-worker.php"),
+    )
+    .spawn();
+    assert!(
+        wait_log_contains(&srv, "dependency down", BOOT),
+        "{}",
+        diagnostics(&srv)
+    );
+    std::fs::write(srv.dir.join("http/up.flag"), "").unwrap();
+    assert!(
+        wait_log_contains(&srv, "dependency ready", Duration::from_secs(15)),
+        "{}",
+        diagnostics(&srv)
+    );
+}
+
+#[test]
+fn failed_boot_without_traffic_stops_the_pool() {
+    let mut srv = Spawn::http(
+        rapira_sapi::Mode::Dispatcher,
+        fixture_path("lifecycle/dependency-boot-worker.php"),
+    )
+    .spawn();
+    let status = srv.wait_exit(Duration::from_secs(35));
+    assert_exit_code(status, MASTER_EXIT_FAILBOOT, &srv);
+}
+
+#[test]
+fn an_idle_interpreter_keeps_a_partly_booted_pool_running() {
+    let mut srv = Spawn::http(
+        rapira_sapi::Mode::Dispatcher,
+        fixture_path("lifecycle/lock-boot-worker.php"),
+    )
+    .processes(2, 0)
+    .spawn();
+    assert!(
+        wait_log_contains(&srv, "boot lock acquired", BOOT),
+        "{}",
+        diagnostics(&srv)
+    );
+    assert!(
+        wait_log_contains(&srv, "recycling", Duration::from_secs(35)),
+        "{}",
+        diagnostics(&srv)
+    );
+    assert!(srv.try_status().is_none(), "{}", diagnostics(&srv));
+    let (status, body) = http_get(srv.addr, "/", BOOT).unwrap();
+    assert_eq!((status, body.as_slice()), (200, b"ok".as_slice()));
+}
+
+#[test]
 fn http_round_trip() {
     let srv = spawn_with_config("shared/echo-worker.php", 1, "");
     wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
