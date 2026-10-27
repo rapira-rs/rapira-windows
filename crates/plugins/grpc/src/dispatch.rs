@@ -5,20 +5,23 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use bytes::Bytes;
 use connectrpc::dispatcher::{RequestStream, StreamingResult, UnaryResult};
+use connectrpc::http;
 use connectrpc::{
     CodecFormat, ConnectError, Dispatcher, EncodedBody, EncodedResponse, ErrorCode, ErrorDetail,
     MethodDescriptor, Payload, Protocol, RequestContext,
 };
 use rapira_sapi::Addr;
-use rapira_sapi::work::Sink;
+use rapira_sapi::work::Intake;
+use tokio::sync::oneshot;
 
+use crate::php::GrpcState;
 use crate::schema::Schema;
-use crate::{Call, RpcStatus, UnaryCall};
+use crate::{RpcStatus, UnaryCall};
 
 /// Routes the unary methods of the configured services to PHP.
 pub(crate) struct PhpDispatcher {
     pub(crate) schema: Arc<Schema>,
-    pub(crate) intake: Sink,
+    pub(crate) intake: Intake,
 }
 
 impl Dispatcher for PhpDispatcher {
@@ -79,7 +82,7 @@ fn streaming() -> ConnectError {
 
 async fn unary(
     schema: &Schema,
-    intake: &Sink,
+    intake: &Intake,
     path: String,
     mut ctx: RequestContext,
     request: Payload,
@@ -104,6 +107,11 @@ async fn unary(
         }
     };
     let protocol = ctx.protocol();
+    let plain_reply = matches!(protocol, Some(Protocol::Grpc | Protocol::GrpcWeb))
+        && ctx
+            .header("grpc-encoding")
+            .is_none_or(|value| value == "identity");
+    let bytes = message.len();
     let call = UnaryCall {
         method: path.clone(),
         protocol,
@@ -117,14 +125,15 @@ async fn unary(
             .unwrap_or(Addr::Unix(None)),
         message,
     };
-    let (call, reply) = Call::new(call);
+    let (tx, reply) = oneshot::channel();
+    let call = GrpcState::new(call, tx);
     // A refusal before dispatch: PHP never saw the call.
-    if let Err(e) = intake.submit(Box::new(call)).await {
+    if let Err(e) = intake.submit(Box::new(call), bytes).await {
         return Err(ConnectError::unavailable(e.to_string()));
     }
     // A closed channel means that PHP lost the call. Dropping this future closes the call for PHP.
     let Ok(reply) = reply.await else {
-        tracing::warn!(target: "grpc", "{path}: the worker lost the call");
+        tracing::warn!(target: "grpc", "{path}: the app lost the call");
         return Err(ConnectError::internal("internal error"));
     };
     let message = match reply.outcome {
@@ -148,6 +157,15 @@ async fn unary(
     let mut response = EncodedResponse::new(EncodedBody::from(body));
     response.headers = reply.headers;
     response.trailers = reply.trailers;
+    if plain_reply {
+        response.compress = Some(false);
+    }
+    if protocol == Some(Protocol::Connect) {
+        response.headers.append(
+            http::header::VARY,
+            http::HeaderValue::from_static("accept-encoding"),
+        );
+    }
     Ok(response)
 }
 
@@ -159,12 +177,12 @@ fn status_error(status: RpcStatus, protocol: Option<Protocol>) -> ConnectError {
     err.details = status
         .details
         .into_iter()
-        .map(|(url, value)| ErrorDetail {
-            type_url: match url.rsplit_once('/') {
+        .map(|detail| ErrorDetail {
+            type_url: match detail.type_url.rsplit_once('/') {
                 Some((_, name)) if !whole_url => name.to_owned(),
-                _ => url,
+                _ => detail.type_url,
             },
-            value: Some(STANDARD_NO_PAD.encode(value)),
+            value: Some(STANDARD_NO_PAD.encode(detail.value)),
             debug: None,
         })
         .collect();

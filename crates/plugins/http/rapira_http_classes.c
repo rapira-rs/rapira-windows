@@ -17,12 +17,12 @@ zend_class_entry *rapira_ce_http_file_not_sendable_exception;
 // own copy: std_object_handlers is shared engine state
 static zend_object_handlers rapira_exchange_handlers;
 
-// job is a Rust Box; free_obj hands it back to Rust to drop
+// unit is a Rust Box; free_obj gives it to Rust to drop.
 static void rapira_exchange_free(zend_object *std) {
     rapira_exchange_obj *obj = rapira_exchange_from(std);
-    if (obj->job != NULL) {
-        rapira_rs_exchange_drop(obj->job);
-        obj->job = NULL;
+    if (obj->unit != NULL) {
+        rapira_rs_exchange_drop(obj->unit);
+        obj->unit = NULL;
     }
     // no-op on IS_UNDEF (getRequest never called)
     zval_ptr_dtor(&obj->request);
@@ -36,37 +36,15 @@ ZEND_METHOD(Rapira_Internal_Http_Dispatcher, name) {
     RETURN_STRING("http");
 }
 
-ZEND_METHOD(Rapira_Internal_Http_Dispatcher, __construct) {
-    (void)execute_data;
-    (void)return_value;
-    zend_throw_error(NULL,
-                     "host-created; obtain it from \\Rapira\\get_dispatcher()");
+ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, serverName) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    RAPIRA_RETURN_THROWS_UNLESS(rapira_rs_http_server_name(return_value),
+                                "serverName");
 }
 
-ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, __construct) {
-    (void)execute_data;
-    (void)return_value;
-    zend_throw_error(NULL, "host-created");
-}
-
-ZEND_METHOD(Rapira_Internal_Http_Dispatcher, receive) {
-    rapira_sapi_receive(INTERNAL_FUNCTION_PARAM_PASSTHRU);
-}
-
-ZEND_METHOD(Rapira_Internal_Http_Dispatcher, tryReceive) {
-    rapira_sapi_try_receive(INTERNAL_FUNCTION_PARAM_PASSTHRU);
-}
-
-ZEND_METHOD(Rapira_Internal_Http_Dispatcher, getInfo) {
-    rapira_sapi_get_info(INTERNAL_FUNCTION_PARAM_PASSTHRU);
-}
-
-ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, pendingCount) {
-    rapira_sapi_pending_count(INTERNAL_FUNCTION_PARAM_PASSTHRU);
-}
-
-ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, activeCount) {
-    rapira_sapi_active_count(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, serverPort) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_LONG(rapira_rs_http_server_port());
 }
 
 void rapira_http_register_classes(void) {

@@ -2,9 +2,9 @@ use tracing::error;
 
 use crate::{
     callbacks::*,
-    diagnostics::error_type_to_level,
+    diagnostics::{Severity, error_type_to_level},
     scoreboard::sb_update,
-    start::{Pulled, pull_job, pull_job_to_shed, run_script},
+    start::{Pulled, pull_unit, pull_unit_to_shed, run_script},
 };
 use std::{
     borrow::Cow,
@@ -120,12 +120,12 @@ pub fn rapira_worker(script: PathBuf) -> WorkerExit {
                 failures += 1;
                 if failures == UNHEALTHY_AFTER {
                     error!(target: "rapira", "worker keeps failing to boot; flagged unhealthy");
-                    sb_update(scoreboard::Event::Unhealthy);
+                    crate::quota::fire_unhealthy();
                 }
                 sb_update(scoreboard::Event::BootFailed);
-                match pull_job_to_shed(BOOT_RETRY) {
+                match pull_unit_to_shed(BOOT_RETRY) {
                     Pulled::Closed => break WorkerExit::Closed,
-                    Pulled::Job(unit) => {
+                    Pulled::Unit(unit) => {
                         unit.shed();
                         sb_update(scoreboard::Event::Shed);
                     }
@@ -152,7 +152,7 @@ pub extern "C" fn rapira_rs_handle_request(
 
 /// Flushes before rapira_request_teardown: the real head (status, cookies, php_error_cb's 500) lives in SG(sapi_headers), which teardown destroys.
 fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cache) -> c_int {
-    let Some(mut ctx) = next_job() else {
+    let Some(mut ctx) = next_unit() else {
         return if RECYCLE.get() {
             RAPIRA_HANDLE_RECYCLE
         } else {
@@ -180,6 +180,7 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
     } else {
         unsafe { rapira_finish_output() }
     };
+    ctx.errored = outcome != RAPIRA_OK || flushed == RAPIRA_BAILOUT;
     let teardown = unsafe { rapira_request_teardown() };
 
     let recycle: bool = [outcome, flushed, teardown].contains(&RAPIRA_BAILOUT);
@@ -187,7 +188,6 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
     let truncated: bool = finalize_response(&mut ctx, errored);
 
     log_and_clear_last_error();
-    unbind_server_context();
     sb_update(scoreboard::Event::Handled(errored));
     if recycle {
         RECYCLE.set(true);
@@ -201,7 +201,7 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
 }
 
 /// The first call tears down the bootstrap request php_request_startup() left behind, before any job is served.
-fn next_job() -> Option<Context> {
+fn next_unit() -> Option<Context> {
     if FIRST_CALL.take() {
         if unsafe { rapira_request_teardown() } == RAPIRA_BAILOUT {
             error!(target: "rapira", "rapira_request_teardown() bailed on first call; recycling");
@@ -213,17 +213,14 @@ fn next_job() -> Option<Context> {
     }
     log_and_clear_last_error();
     loop {
-        match pull_job() {
+        match pull_unit() {
             Some(unit) => {
                 if unit.cancelled() {
-                    sb_update(scoreboard::Event::Handled(true));
+                    sb_update(scoreboard::Event::Shed);
                     continue;
                 }
                 crate::exchange::RECEIVED.set(true);
-                let Some(ctx) = unit.into_cgi() else {
-                    unreachable!("a unit with no CGI form goes to dispatcher-mode workers only");
-                };
-                return Some(ctx);
+                return Some(unit.into_cgi());
             }
             None => {
                 crate::exchange::CLOSED_SEEN.set(true);
@@ -239,7 +236,9 @@ fn next_job() -> Option<Context> {
 pub extern "C" fn rapira_rs_finish_response() {
     guard((), || unsafe {
         if let Some(c) = ctx() {
-            c.finish(false);
+            let errored = c.errored || fatal_error_recorded();
+            let truncated = finalize_response(c, errored);
+            c.finish(truncated);
         }
     });
 }
@@ -249,9 +248,12 @@ fn log_and_clear_last_error() {
     unsafe {
         let pg = rapira_pg();
         let msg = (*pg).last_error_message;
-        if !msg.is_null() {
-            let (level, label) =
-                error_type_to_level((*pg).last_error_type, (*rapira_eg()).error_reporting);
+        let mask = (*rapira_eg()).error_reporting;
+        let php_logged = (*pg).last_error_type & (mask | E_CORE as c_int) != 0
+            && (*pg).log_errors
+            && (*pg).error_log.is_null();
+        if !msg.is_null() && !php_logged {
+            let Severity { level, label } = error_type_to_level((*pg).last_error_type, mask);
             crate::diagnostics::event_at!(
                 "php",
                 level,

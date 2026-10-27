@@ -91,6 +91,11 @@ function Build-Arm64Dependencies {
 
     Cmake libonig @('-DBUILD_SHARED_LIBS=OFF', '-DBUILD_TEST=OFF', '-DINSTALL_DOCUMENTATION=OFF')
     Copy-Item (Join-Path $Root 'lib\onig.lib') (Join-Path $Root 'lib\onig_a.lib')
+    $sodium = Join-Path $sources 'libsodium'
+    Msbuild (Join-Path $sodium 'builds\msvc\vs2022\libsodium\libsodium.vcxproj') @('/p:Configuration=ReleaseDLL', "/p:OutDir=$Root\bin\")
+    Copy-Item (Join-Path $Root 'bin\libsodium.lib') (Join-Path $Root 'lib')
+    Copy-Item (Join-Path $sodium 'src\libsodium\include\sodium.h') (Join-Path $Root 'include')
+    Copy-Item (Join-Path $sodium 'src\libsodium\include\sodium') (Join-Path $Root 'include') -Recurse -Force
     Cmake libssh2 @('-DCRYPTO_BACKEND=OpenSSL', '-DBUILD_EXAMPLES=OFF', '-DBUILD_TESTING=OFF')
     Cmake nghttp2 @('-DENABLE_LIB_ONLY=ON', '-DBUILD_STATIC_LIBS=OFF', '-DBUILD_TESTING=OFF')
     Cmake libcurl @('-DBUILD_CURL_EXE=OFF', '-DBUILD_TESTING=OFF', '-DCURL_USE_OPENSSL=ON',

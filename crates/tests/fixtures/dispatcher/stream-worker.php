@@ -57,6 +57,15 @@ try {
             $ex->sendFile($req->headers['x-path'][0] ?? '');
             continue;
         }
+        if ($probe === 'sendfile-over-cl') {
+            $ex->writeHead(200, ['content-length' => ['5']]);
+            try {
+                $ex->sendFile($req->headers['x-path'][0], (int) ($q['offset'] ?? 0), isset($q['length']) ? (int) $q['length'] : null);
+            } catch (\Rapira\Http\Exception\ContentLengthExceededError) {
+                $ex->writeBody('fixed');
+            }
+            continue;
+        }
         if ($probe === 'sendfile-slice') {
             $ex->writeHead(206, ['content-range' => ['bytes 2-4/26']]);
             $ex->sendFile($req->headers['x-path'][0] ?? '', 2, 3);

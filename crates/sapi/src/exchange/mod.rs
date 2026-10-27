@@ -14,7 +14,7 @@ pub(crate) use crate::{
     rapira_ce_no_dispatcher_error, rapira_ce_timeout_exception, rapira_ce_unix_address,
     rapira_dispatcher_info_obj, rapira_receive_timed, rapira_receive_untimed,
     scoreboard::{Event, sb_update},
-    start::{Pulled, pending_depth, pull_job_try, pull_job_wait},
+    start::{Pulled, pending_depth, pull_unit_try, pull_unit_wait},
     types::Addr,
     zend, zval, zval_add_ref, zval_ptr_dtor,
 };
@@ -55,6 +55,8 @@ pub(crate) fn cycle_reset() {
     UNIT.set(None);
     CLOSED_SEEN.set(false);
     RECEIVED.set(false);
+    // RSHUTDOWN can bail out after PHP frees the cached object.
+    receive::DISPATCHER.set(None);
 }
 
 /// Reclaim a unit free_obj never saw (shutdown bailout / allocation bailout).

@@ -3,6 +3,7 @@ fileinfo
 mbstring
 exif
 openssl
+sodium
 curl
 sqlite3
 pdo_sqlite

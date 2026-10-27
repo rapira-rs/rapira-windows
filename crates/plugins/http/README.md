@@ -9,10 +9,10 @@ The http plugin of the `rapira` binary. It terminates HTTP/1.1 on the configured
 - `name()` returns `http`: the TOML table and the dispatcher name that PHP sees.
 - `modes()` accepts the classic, worker and dispatcher modes.
 - `dispatcher()` returns the dispatcher classes. MINIT calls `rapira_http_register_classes` after registering the base classes.
-- `prepare()` runs on the boot thread before PHP starts. It removes spool directories of dead processes and binds the listener with `rapira_net::bind`.
-- `serve()` runs on the `rapira-http` plugin thread. Its `Worker` holds a two-thread tokio runtime handle, the PHP pool sink, the stop flag, and `drain_grace`. The plugin drains within this limit after a stop.
+- `prepare()` runs on the boot thread before PHP starts. It sets the server identity, removes spool directories of dead processes, and binds the listener with `rapira_net::bind`.
+- `serve()` runs on the `rapira-http` plugin thread. Its `Worker` holds a two-thread tokio runtime handle, the PHP pool intake, the stop flag, and `drain_grace`. The plugin drains within this limit after a stop.
 
-`serve()` takes the pool `Sink` and the prepared listener through `rapira_net::Acceptor`. The plugin checks each request and tries the configured static-file handler. If no file matches, it reads the body, builds an `Exchange`, and submits it to the interpreter queue. PHP produces response frames. The plugin writes these frames to the socket.
+`serve()` takes the pool `Intake` and the prepared listener through `rapira_net::Acceptor`. The plugin checks each request and tries the configured static-file handler. If no file matches, it reads the body, builds an `Exchange`, and submits it to the interpreter queue. PHP produces response frames. The plugin writes these frames to the socket.
 
 `Exchange` is the work unit. It implements `rapira_sapi::work::Work`:
 
@@ -21,7 +21,7 @@ The http plugin of the `rapira` binary. It terminates HTTP/1.1 on the configured
 - `into_cgi()` gives the CGI request that the classic and worker modes run.
 - `shed()` answers 503 when the PHP boot of the worker failed.
 
-The client gets 503 when the intake of the worker stays full for 30 seconds, and 500 when the PHP thread of the worker has stopped. PHP does not see these requests.
+The intake has 1024 slots and a 64 MiB body budget per pool. Each waiting request uses the smaller of its body size and 64 MiB, including multipart spool bytes. The client gets 503 when the free byte budget is too small or all slots stay full for 30 seconds. A stopped intake returns 500. PHP does not see these requests.
 
 ## Crate layout
 
@@ -30,7 +30,7 @@ The client gets 503 when the intake of the worker stays full for 30 seconds, and
 - `rapira_http.stub.php`: the PHP stub of the `Rapira\Http` and `Rapira\Internal\Http` classes.
 - `rapira_http_arginfo.h`: generated from the stub by `dev.ps1 -Task stubs`. Do not edit it.
 - `rapira_http.h`: the C layout of the exchange object and the class entries.
-- `rapira_http_classes.c`: `rapira_http_register_classes`, the object handlers, and the method shells of the dispatcher classes. MINIT calls `rapira_http_register_classes` after the base classes.
+- `rapira_http_classes.c`: `rapira_http_register_classes` and the object handlers. Dispatcher methods use the shared SAPI shells. MINIT calls `rapira_http_register_classes` after the base classes.
 - `rapira_http.c`: the method shells of the value classes `Request`, `FormField`, `UploadedFile` and `Multipart`.
 - `rapira_exchange.c`: the method shells of `Exchange`.
 - `src/lib.rs`: `Config`, `Server` and its `Plugin` impl.
@@ -43,7 +43,7 @@ The client gets 503 when the intake of the worker stays full for 30 seconds, and
 - `src/bridge.rs`: the reply body that streams the PHP frames and the `sendFile` slices, and the write timeout.
 - `src/exchange.rs`: the `Exchange` unit and its `Work` impl.
 - `src/multipart.rs`: the multipart parser and the spool dirs of dispatcher mode.
-- `src/php/`: the Rust behind the PHP methods: the class entries and `DISPATCHER_CLASSES` (`mod.rs`), `getRequest()` (`request.rs`), the head, body and trailer writes (`respond.rs`, `headers.rs`), `sendFile()` (`sendfile.rs`), the value class constructors (`values.rs`), and the unit tests of these parts that need no PHP (`tests.rs`).
+- `src/php/`: the Rust behind the PHP methods: the class entries and `DISPATCHER_CLASSES` (`mod.rs`), server identity (`info.rs`), `getRequest()` (`request.rs`), response writes (`respond.rs`, `headers.rs`), `sendFile()` (`sendfile.rs`), value constructors (`values.rs`), and pure unit tests (`tests.rs`).
 
 ## Middleware
 
@@ -52,6 +52,8 @@ The client gets 503 when the intake of the worker stays full for 30 seconds, and
 `rapira_static_files::StaticFiles` serves files from `[http.static].root`. It reads the request head and leaves the body for PHP on a miss. The HTTP plugin holds the connection addresses, receive time, authority, and in-flight counter for the request.
 
 A permission error or a bad file name is also a miss. Any other read failure answers 500. That request does not reach PHP.
+
+Multiple byte ranges return the whole file. An `If-Range` value that differs from the current strong ETag also returns the whole file.
 
 `StaticFiles` holds served files in memory. An entry stays fresh for one second. The HTTP plugin shares one cache of up to 16 MiB across its pool. It stores no file above 256 KiB. A permission change does not stop a cached file from being served. Delete or replace the file to stop serving it. A restart empties the cache.
 
@@ -71,21 +73,21 @@ A permission error or a bad file name is also a miss. Any other read failure ans
 - Responses stream; nothing is buffered beyond one frame per request plus the PHP-side frame channel.
 - The plugin owns the framing: PHP-supplied `Content-Length`/`Transfer-Encoding` and hop-by-hop fields are stripped (RFC 9110 §7.6.1, including fields named by a `Connection` value), a PHP-declared length becomes the `Content-Length`, and hyper authors chunked framing when there is none. https://www.rfc-editor.org/rfc/rfc9110#section-7.6.1
 - A truncated reply (worker death, or a body shorter than the declared length) drops the connection without a clean terminator, so the client can tell the response was cut short.
-- `sendFile` events stream the validated file slice in 64 KiB reads off the blocking pool.
+- `sendFile` rejects a slice that exceeds the declared response length before it writes any bytes. Accepted slices stream through 256 KiB reads on the blocking pool.
 - Interim (1xx) heads and trailers are dropped.
 - `write_timeout_secs` bounds a single stalled write toward the client; a connection that makes no write progress for that long is closed and the PHP unit discarded.
 
 ## Shutdown
 
-On the stop signal the accept loop ends immediately, idle keepalive connections close, and in-flight requests drain within the drain window (see Config); requests still running past the deadline are cut short and reported.
+On the stop signal the accept loop ends immediately. A held HTTP/1.1 connection can send another request within the drain window. Its response includes `Connection: close`. Connections close by the drain deadline. Requests still active at that deadline are cut short and reported.
 
 ## Config
 
 The `[http]` table. Unknown keys fail the boot.
 
 - `listen`: `host:port` or `:port` for all interfaces. Default `127.0.0.1:8000`.
-- `server_name`: what PHP sees as `SERVER_NAME`. Default `localhost`.
-- `server_port`: what PHP sees as `SERVER_PORT`. Default: the listen port.
+- `server_name`: the CGI `SERVER_NAME` and dispatcher info `serverName()`. Default `localhost`.
+- `server_port`: the CGI `SERVER_PORT` and dispatcher info `serverPort()`. Default: the listen port.
 - `max_body_size_mb`: the request body limit. Default 8. A larger body answers 413.
 - `write_timeout_secs`: the limit for one stalled write to the client, not for the whole response. Default 30.
 - `keepalive_timeout_secs`: closes an idle keepalive connection, and limits each head read and body-frame read. Default 60.

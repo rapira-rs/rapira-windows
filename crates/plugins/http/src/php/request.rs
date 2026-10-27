@@ -150,7 +150,7 @@ unsafe fn build_multipart(
 
 /// False means a throw is pending; a caught panic returns false without one and the C shell throws instead.
 /// # Safety
-/// `ex` is a live exchange with a non-null job; `return_value` is writable.
+/// `ex` is a live exchange with a non-null unit; `return_value` is writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_exchange_build_request(
     ex: *mut ExchangeObj,
@@ -171,8 +171,8 @@ unsafe fn build_request_impl(ex: *mut ExchangeObj, return_value: *mut zval) -> b
             return true;
         }
         let ce: *mut zend_class_entry = rapira_ce_http_request;
-        let st = &mut *(*ex).job.cast::<ExchangeState>();
-        let req = &st.ctx.req;
+        let st = &mut *(*ex).unit.cast::<ExchangeState>();
+        let req = &st.req;
         let view = st.view.get_or_insert_with(|| RequestView::new(req));
 
         let mut headers: zval = std::mem::zeroed();
@@ -240,7 +240,7 @@ unsafe fn build_request_impl(ex: *mut ExchangeObj, return_value: *mut zval) -> b
         let target = req.target.as_deref().unwrap_or(req.uri.as_bytes());
         zend::slot_stringl(o, target_slot, target);
         zend::slot_str_or_null(o, authority_slot, req.authority.as_deref());
-        zend::slot_stringl(o, protocol_slot, protocol_php(&req.protocol).as_bytes());
+        zend::slot_stringl(o, protocol_slot, protocol_php(req.protocol).as_bytes());
         zend::slot_init(o, headers_slot, &headers);
         match &st.body {
             BodyState::Raw(v) => zend::slot_stringl(o, body_slot, v),

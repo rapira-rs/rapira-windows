@@ -28,6 +28,7 @@
 --enable-zlib
 --enable-shmop
 --with-openssl=shared
+--with-sodium=shared
 --with-curl=shared
 --with-sqlite3=shared
 --with-pdo-sqlite=shared

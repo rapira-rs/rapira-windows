@@ -19,11 +19,16 @@ pub(crate) fn set_sendfile_root(root: PathBuf) {
     let _ = SENDFILE_ROOT.set(canonical);
 }
 
+struct FileSlice {
+    file: std::fs::File,
+    len: u64,
+}
+
 fn open_send_file(
     path: &[u8],
     offset: u64,
     length: Option<u64>,
-) -> Result<(std::fs::File, u64), &'static CStr> {
+) -> Result<FileSlice, &'static CStr> {
     let path = std::str::from_utf8(path).map_err(|_| c"no readable file at the path")?;
     let path = std::path::Path::new(path);
     // PHP's virtual working directory is interpreter-local in ZTS.
@@ -68,7 +73,7 @@ fn open_send_file(
         }
         None => size - offset,
     };
-    Ok((file, len))
+    Ok(FileSlice { file, len })
 }
 
 /// # Safety
@@ -80,17 +85,20 @@ pub(super) unsafe fn send_file_core(
     length: Option<u64>,
     eos: bool,
 ) -> Verb {
-    if st.client_closed() {
+    if st.cancelled() {
         discard_unit(st);
         return Verb::Discarded;
     }
     if st.stage == Stage::Finalized {
         return Verb::Finalized;
     }
-    let (file, len) = match open_send_file(path, offset, length) {
+    let FileSlice { file, len } = match open_send_file(path, offset, length) {
         Ok(opened) => opened,
         Err(msg) => return Verb::FileNotSendable(msg),
     };
+    if st.declared_cl.is_some_and(|cl| st.sent_body + len > cl) {
+        return Verb::ContentLengthExceeded;
+    }
     unsafe {
         send_body(st, len, eos, |n| Frame::File {
             file,

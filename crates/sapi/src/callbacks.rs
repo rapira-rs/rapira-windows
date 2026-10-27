@@ -13,7 +13,7 @@ use std::io::Read;
 use std::mem::ManuallyDrop;
 use std::os::raw::{c_char, c_int};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::ptr::null_mut;
+use std::ptr::{null, null_mut};
 
 // Only this catch_unwind turns a panic inside PHP into a failed request and a
 // recycled worker instead of a process abort. The build enforces the strategy.
@@ -236,11 +236,35 @@ pub(crate) unsafe extern "C" fn read_post(buf: *mut c_char, count: usize) -> usi
         reader.read(dst).unwrap_or(0)
     })
 }
+/// # Safety
+/// `body` must point at a writable pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rapira_rs_raw_body(body: *mut *const c_char) -> usize {
+    with_ctx(0, |ctx| {
+        let crate::types::Body::Raw(reader) = &ctx.req.body else {
+            return 0;
+        };
+        let bytes = reader.get_ref();
+        unsafe { *body = bytes.as_ptr().cast() };
+        bytes.len()
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rapira_rs_authorization() -> *const c_char {
+    with_ctx(null(), |ctx| {
+        ctx.c
+            .authorization
+            .as_ref()
+            .map_or(null(), |auth| auth.as_ptr())
+    })
+}
+
 pub(crate) unsafe extern "C" fn read_cookies() -> *mut c_char {
     with_ctx(null_mut(), |ctx| {
         ctx.c
+            .cookie
             .as_ref()
-            .and_then(|c| c.cookie.as_ref())
             .map_or(null_mut(), |c| c.as_ptr() as *mut c_char)
     })
 }
@@ -254,7 +278,7 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         return;
     }
     with_ctx((), |ctx| {
-        let Some(reqc) = ctx.c.as_ref() else { return };
+        let reqc = &ctx.c;
         // One allocation for the whole array: the names below, one HTTP_* name per field, and the entries php_register_server_variables adds after this callback.
         let size = SERVER_VARS_MAX + ctx.req.headers.keys_len() as u32;
         unsafe { zend_hash_extend((*track_vars_array).value.arr, size, false) };
@@ -292,9 +316,9 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         put(c"QUERY_STRING", query);
         put_bytes(c"SCRIPT_FILENAME", reqc.script.to_bytes());
         crate::context::with_script(|script| put(c"SCRIPT_NAME", &script.script_name));
-        put(c"SERVER_PROTOCOL", &ctx.req.protocol);
+        put(c"SERVER_PROTOCOL", ctx.req.protocol);
         put(c"SERVER_SOFTWARE", "Rapira");
-        put(c"SERVER_NAME", &ctx.req.server_name);
+        put(c"SERVER_NAME", ctx.req.server_name);
         put(c"SERVER_PORT", &reqc.server_port);
         put(c"REMOTE_ADDR", &reqc.remote_addr);
         put(c"GATEWAY_INTERFACE", "CGI/1.1");
@@ -367,6 +391,14 @@ pub fn send_error_head(c: &mut Context, status: u16) {
         return;
     }
     c.commit_head(status, HeaderMap::new());
+}
+
+/// A normal callback exit can cause a bailout without a fatal diagnostic.
+pub(crate) fn fatal_error_recorded() -> bool {
+    unsafe {
+        let pg = &*rapira_pg();
+        !pg.last_error_message.is_null() && pg.last_error_type & E_FATAL_ERRORS as c_int != 0
+    }
 }
 
 pub(crate) fn finalize_response(c: &mut Context, errored: bool) -> bool {

@@ -63,7 +63,7 @@ ZEND_FUNCTION(Rapira_handle_request) {
     if (rapira_mode != RAPIRA_MODE_WORKER) {
         zend_throw_exception(
             rapira_ce_not_in_worker_mode_error,
-            "no host hands jobs to this process outside worker mode", 0);
+            "Requests are only handed out in Mode::Worker", 0);
         RETURN_THROWS();
     }
     if (rapira_in_handle_request) {
@@ -103,7 +103,7 @@ ZEND_FUNCTION(Rapira_log) {
     }
 }
 
-void rapira_sapi_receive(INTERNAL_FUNCTION_PARAMETERS) {
+ZEND_FUNCTION(rapira_sapi_receive) {
     zend_long timeout = -1;
     ZEND_PARSE_PARAMETERS_START(0, 1)
     Z_PARAM_OPTIONAL
@@ -114,24 +114,33 @@ void rapira_sapi_receive(INTERNAL_FUNCTION_PARAMETERS) {
         rapira_rs_receive((int64_t)timeout, return_value), "receive");
 }
 
-void rapira_sapi_try_receive(INTERNAL_FUNCTION_PARAMETERS) {
+ZEND_FUNCTION(rapira_sapi_try_receive) {
     ZEND_PARSE_PARAMETERS_NONE();
     RAPIRA_RETURN_THROWS_UNLESS(rapira_rs_try_receive(return_value),
                                 "tryReceive");
 }
 
-void rapira_sapi_get_info(INTERNAL_FUNCTION_PARAMETERS) {
+ZEND_FUNCTION(rapira_sapi_get_info) {
     ZEND_PARSE_PARAMETERS_NONE();
     RAPIRA_RETURN_THROWS_UNLESS(rapira_rs_dispatcher_info(return_value),
                                 "getInfo");
 }
 
-void rapira_sapi_pending_count(INTERNAL_FUNCTION_PARAMETERS) {
+ZEND_FUNCTION(rapira_sapi_pending_count) {
     ZEND_PARSE_PARAMETERS_NONE();
     RETURN_LONG(rapira_dispatcher_info_from(Z_OBJ_P(ZEND_THIS))->pending);
 }
 
-void rapira_sapi_active_count(INTERNAL_FUNCTION_PARAMETERS) {
+ZEND_FUNCTION(rapira_sapi_active_count) {
     ZEND_PARSE_PARAMETERS_NONE();
     RETURN_LONG(rapira_dispatcher_info_from(Z_OBJ_P(ZEND_THIS))->active);
+}
+
+ZEND_FUNCTION(rapira_sapi_dispatcher_construct) {
+    zend_throw_error(NULL,
+                     "host-created; obtain it from \\Rapira\\get_dispatcher()");
+}
+
+ZEND_FUNCTION(rapira_sapi_host_created) {
+    zend_throw_error(NULL, "host-created");
 }

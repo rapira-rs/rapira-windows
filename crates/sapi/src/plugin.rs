@@ -4,14 +4,14 @@ use std::time::Duration;
 use anyhow::anyhow;
 use tokio::sync::watch;
 
-use crate::work::{DispatcherClasses, Sink};
+use crate::work::{DispatcherClasses, Intake};
 
 pub use rapira_config::Mode;
 
 /// What the worker hands to [`Plugin::serve`].
 pub struct Worker {
     pub handle: tokio::runtime::Handle,
-    pub sink: Sink,
+    pub intake: Intake,
     /// Set to true once. The plugin stops accepting, drains within `drain_grace`, and returns from `serve`.
     pub stop: watch::Receiver<bool>,
     /// The plugin drain limit. The root leaves time for interpreter teardown within its shutdown deadline.
@@ -82,7 +82,7 @@ impl Stopper {
 /// `stopper` stops the plugin. `drain_grace` goes to [`Worker::drain_grace`].
 pub fn run_plugin(
     plugin: Box<dyn Plugin>,
-    sink: Sink,
+    intake: Intake,
     stopper: Stopper,
     drain_grace: Duration,
 ) -> anyhow::Result<Running> {
@@ -95,7 +95,7 @@ pub fn run_plugin(
         .map_err(|e| anyhow!("building the {name} runtime: {e}"))?;
     let worker = Worker {
         handle: rt.handle().clone(),
-        sink,
+        intake,
         stop: stopper.flag.subscribe(),
         drain_grace,
     };

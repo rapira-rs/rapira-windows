@@ -10,15 +10,15 @@ The grpc plugin of the `rapira` binary. It serves unary RPCs from PHP over gRPC,
 - `modes()` accepts dispatcher mode only.
 - `dispatcher()` returns the dispatcher classes. MINIT calls `rapira_grpc_register_classes` after registering the base classes.
 - `prepare()` runs on the boot thread before PHP starts. It sets the service list, binds the listener, and builds the health and reflection routes.
-- `serve()` runs on the `rapira-grpc` plugin thread. Its `Worker` holds a two-thread tokio runtime handle, the PHP pool sink, the stop flag, and `drain_grace`. The plugin drains within this limit after a stop.
+- `serve()` runs on the `rapira-grpc` plugin thread. Its `Worker` holds a two-thread tokio runtime handle, the PHP pool intake, the stop flag, and `drain_grace`. The plugin drains within this limit after a stop.
 
-`serve()` takes the pool `Sink` and the prepared listener through `rapira_net::Acceptor`. `PhpDispatcher` builds a `Call` for each unary method and submits it to the interpreter queue. PHP finalizes the call with `respond()` or `fail()`. The plugin sends the result to the client.
+`serve()` takes the pool `Intake` and the prepared listener through `rapira_net::Acceptor`. `PhpDispatcher` builds a `GrpcState` for each unary call and submits it to the interpreter queue. PHP finalizes the call with `respond()` or `fail()`. The plugin sends the result to the client.
 
-`Call` is the work unit. It implements `rapira_sapi::work::Work`:
+`GrpcState` is the queued unit and the state held by PHP. It implements `rapira_sapi::work::Work`:
 
 - `cancelled()` returns true when the call is closed: the client cancelled it, closed the connection, or the deadline passed. `receive()` skips such a unit.
 - `attach()` connects the unit to the `Rapira\Grpc\UnaryCall` object that `receive()` returns.
-- `into_cgi()` returns None: a grpc unit cannot run in the classic or worker mode.
+- `into_cgi()` is unreachable: boot rejects a gRPC pool in classic or worker mode.
 - `shed()` answers UNAVAILABLE when the PHP boot of the worker failed.
 
 ## Crate layout
@@ -28,14 +28,14 @@ The grpc plugin of the `rapira` binary. It serves unary RPCs from PHP over gRPC,
 - `rapira_grpc.stub.php`: the PHP stub of the `Rapira\Grpc` and `Rapira\Internal\Grpc` classes.
 - `rapira_grpc_arginfo.h`: generated from the stub by `dev.ps1 -Task stubs`. Do not edit it.
 - `rapira_grpc.h`: the C layouts of the call object and the response metadata object, and the class entries.
-- `rapira_grpc_classes.c`: `rapira_grpc_register_classes`, the object handlers, the constructors of the internal classes, and the shells of `receive()`, `tryReceive()`, `getInfo()` and the dispatcher info counters. MINIT calls `rapira_grpc_register_classes` after the base classes.
+- `rapira_grpc_classes.c`: `rapira_grpc_register_classes`, the object handlers, and the constructors of the internal classes. Dispatcher methods use the shared SAPI shells. MINIT calls `rapira_grpc_register_classes` after the base classes.
 - `rapira_grpc.c`: the other method shells: the value classes, `name()` and `getServices()` of the dispatcher, the call and the response metadata.
 - `src/lib.rs`: `Config`, `Server` and its `Plugin` impl.
 - `src/config.rs`: `Section` (the `[grpc]` table), `Settings`, `resolve` with the boot checks, and `Server::from_settings`, which loads the descriptor set.
 - `src/serve.rs`: the accept loop, one connect-rust connection per accepted socket, and the drain.
 - `src/dispatch.rs`: `PhpDispatcher`: the route to PHP, the JSON transcoding, and the map from the PHP outcome to a status.
 - `src/schema.rs`: the descriptor set, the method routes, the JSON transcoding, and the service list of `getServices()`.
-- `src/call.rs`: the `Call` unit and its `Work` impl, and the `UnaryCall`, `UnaryReply` and `RpcStatus` types.
+- `src/call.rs`: the `UnaryCall`, `UnaryReply` and `RpcStatus` types.
 - `src/php/`: the Rust behind the PHP methods: the class entries and `DISPATCHER_CLASSES` (`mod.rs`), the call and its metadata (`call.rs`), and the value class constructors (`values.rs`).
 
 ## Protocols
@@ -51,7 +51,8 @@ connect-rust handles the framing, the compression, the timeout headers and the e
 - The boot logs a warning for each streaming method of a configured service.
 - A streaming method, a method of a service the pool does not serve, and an unknown method answer UNIMPLEMENTED. A Connect unary request (`application/proto` or `application/json`) gets the HTTP status 404. A Connect streaming request (`application/connect+proto` or `application/connect+json`) gets the HTTP status 200 with the error in the end-of-stream message.
 - A method with `option idempotency_level = NO_SIDE_EFFECTS;` also accepts a Connect GET request. A GET to any other method answers 405.
-- Messages can use gzip compression. A request with a different message encoding answers UNIMPLEMENTED.
+- Messages can use gzip compression. A request with a different message encoding answers UNIMPLEMENTED. Replies of at least 1 KiB can use gzip. A gRPC or gRPC-Web reply uses gzip only when the request does. Connect replies use `Accept-Encoding` and include `Vary: accept-encoding`.
+- A request message above 4 MiB answers RESOURCE_EXHAUSTED before PHP receives it.
 
 ## Remote address
 
@@ -107,7 +108,7 @@ The pool runs in dispatcher mode only. `\Rapira\get_dispatcher()` returns a `Rap
 - `fail()` takes the `google.rpc.Status` triple: a code, a message and a list of `ErrorDetail`. For gRPC and gRPC-Web, the plugin sends `grpc-status`, `grpc-message` and `grpc-status-details-bin`. For Connect, the plugin sends the HTTP status of the code and a JSON error body. A Connect detail has the bare type name, for example `google.rpc.ErrorInfo`, and an unpadded base64 value.
 - `fail()` is the only way to send an error status. The plugin does not catch `Rapira\Grpc\Exception\GrpcException`. Catch it and call `$call->fail($e->status)`.
 - A call that PHP does not finalize is lost. The client gets INTERNAL with the message `internal error`, and the plugin logs a warning under the `grpc` target. An uncaught throwable also loses the call. The client does not see the message of the throwable.
-- The client gets UNAVAILABLE when the plugin refuses the call before PHP sees it: the intake of the worker stays full for 30 seconds, the pool stops, or the PHP boot of the worker failed.
+- The client gets UNAVAILABLE when the plugin refuses the call before PHP sees it: the pool byte budget is full, all intake slots stay full for 30 seconds, the pool stops, or PHP boot failed. The pool has 1024 slots and a 64 MiB budget for queued message bytes.
 
 ## Deadlines
 

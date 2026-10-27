@@ -29,7 +29,14 @@ pub(crate) struct ReplyBody {
     guard: Arc<InflightReqCount>,
 }
 
-type FileRead = tokio::task::JoinHandle<(std::fs::File, std::io::Result<Vec<u8>>)>;
+type FileRead = tokio::task::JoinHandle<SliceRead>;
+
+struct SliceRead {
+    file: std::fs::File,
+    slice: std::io::Result<Vec<u8>>,
+}
+
+const SLICE: u64 = 256 * 1024;
 
 struct FilePump {
     join: FileRead,
@@ -39,14 +46,16 @@ struct FilePump {
 }
 
 fn read_slice(file: std::fs::File, off: u64, want: usize) -> FileRead {
+    // Allocate on the IO thread that frees the buffer after the write.
+    let mut buf = Vec::with_capacity(want);
     tokio::task::spawn_blocking(move || {
         use std::os::windows::fs::FileExt;
-        let mut buf = vec![0u8; want];
-        let res = file.seek_read(&mut buf, off).map(|n| {
+        buf.resize(want, 0);
+        let slice = file.seek_read(&mut buf, off).map(|n| {
             buf.truncate(n);
             buf
         });
-        (file, res)
+        SliceRead { file, slice }
     })
 }
 
@@ -96,7 +105,9 @@ impl hyper::body::Body for ReplyBody {
                 return Poll::Ready(Some(Err("php response truncated".into())));
             }
             if let Some(fp) = &mut this.file {
-                let (file, res) = match std::task::ready!(Pin::new(&mut fp.join).poll(cx)) {
+                let SliceRead { file, slice } = match std::task::ready!(
+                    Pin::new(&mut fp.join).poll(cx)
+                ) {
                     Ok(v) => v,
                     Err(e) => {
                         if e.is_cancelled() {
@@ -107,7 +118,7 @@ impl hyper::body::Body for ReplyBody {
                         return this.terminal_error(cx);
                     }
                 };
-                let buf = match res {
+                let buf = match slice {
                     Ok(buf) => buf,
                     Err(e) => {
                         tracing::error!(
@@ -129,7 +140,7 @@ impl hyper::body::Body for ReplyBody {
                 fp.done += buf.len() as u64;
                 this.sent += buf.len() as u64;
                 if fp.done < fp.len {
-                    let want = std::cmp::min(64 * 1024, fp.len - fp.done) as usize;
+                    let want = std::cmp::min(SLICE, fp.len - fp.done) as usize;
                     fp.join = read_slice(file, fp.offset + fp.done, want);
                 } else {
                     this.file = None;
@@ -158,7 +169,7 @@ impl hyper::body::Body for ReplyBody {
                     return Poll::Ready(Some(Ok(hyper::body::Frame::data(b))));
                 }
                 Some(Frame::File { file, offset, len }) => {
-                    let want = std::cmp::min(64 * 1024, len) as usize;
+                    let want = std::cmp::min(SLICE, len) as usize;
                     this.file = Some(FilePump {
                         join: read_slice(file, offset, want),
                         offset,

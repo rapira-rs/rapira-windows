@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: 5b83231d20feb13e26c55e66f1adfdf0da477bf4 */
+ * Stub hash: 7860ce745cb23bf48a940cbd1dfb86def222ecd3 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Rapira_Http_FormField___construct, 0, 0, 3)
 	ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
@@ -33,6 +33,12 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Rapira_Http_Request___construct, 0, 0, 11)
 	ZEND_ARG_OBJ_TYPE_MASK(0, server, Rapira\\InetAddress|Rapira\\\125nixAddress, 0, NULL)
 	ZEND_ARG_OBJ_INFO(0, tls, Rapira\\Tls, 1)
 	ZEND_ARG_TYPE_INFO(0, receivedAt, IS_DOUBLE, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Rapira_Http_HttpDispatcherInfo_serverName, 0, 0, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Rapira_Http_HttpDispatcherInfo_serverPort, 0, 0, IS_LONG, 0)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Rapira_Http_Exchange_getRequest, 0, 0, Rapira\\Http\\Request, 0)
@@ -75,8 +81,7 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Rapira_Internal_Http_Dispatcher___construct, 0, 0, 0)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Rapira_Internal_Http_Dispatcher_name, 0, 0, IS_STRING, 0)
-ZEND_END_ARG_INFO()
+#define arginfo_class_Rapira_Internal_Http_Dispatcher_name arginfo_class_Rapira_Http_HttpDispatcherInfo_serverName
 
 #define arginfo_class_Rapira_Internal_Http_Dispatcher_tryReceive arginfo_class_Rapira_Http_HttpDispatcher_tryReceive
 
@@ -86,10 +91,13 @@ ZEND_END_ARG_INFO()
 
 #define arginfo_class_Rapira_Internal_Http_DispatcherInfo___construct arginfo_class_Rapira_Internal_Http_Dispatcher___construct
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Rapira_Internal_Http_DispatcherInfo_pendingCount, 0, 0, IS_LONG, 0)
-ZEND_END_ARG_INFO()
+#define arginfo_class_Rapira_Internal_Http_DispatcherInfo_pendingCount arginfo_class_Rapira_Http_HttpDispatcherInfo_serverPort
 
-#define arginfo_class_Rapira_Internal_Http_DispatcherInfo_activeCount arginfo_class_Rapira_Internal_Http_DispatcherInfo_pendingCount
+#define arginfo_class_Rapira_Internal_Http_DispatcherInfo_activeCount arginfo_class_Rapira_Http_HttpDispatcherInfo_serverPort
+
+#define arginfo_class_Rapira_Internal_Http_DispatcherInfo_serverName arginfo_class_Rapira_Http_HttpDispatcherInfo_serverName
+
+#define arginfo_class_Rapira_Internal_Http_DispatcherInfo_serverPort arginfo_class_Rapira_Http_HttpDispatcherInfo_serverPort
 
 #define arginfo_class_Rapira_Internal_Http_Exchange___construct arginfo_class_Rapira_Internal_Http_Dispatcher___construct
 
@@ -114,14 +122,16 @@ ZEND_METHOD(Rapira_Http_FormField, __construct);
 ZEND_METHOD(Rapira_Http_UploadedFile, __construct);
 ZEND_METHOD(Rapira_Http_Multipart, __construct);
 ZEND_METHOD(Rapira_Http_Request, __construct);
-ZEND_METHOD(Rapira_Internal_Http_Dispatcher, __construct);
+ZEND_FUNCTION(rapira_sapi_dispatcher_construct);
 ZEND_METHOD(Rapira_Internal_Http_Dispatcher, name);
-ZEND_METHOD(Rapira_Internal_Http_Dispatcher, tryReceive);
-ZEND_METHOD(Rapira_Internal_Http_Dispatcher, receive);
-ZEND_METHOD(Rapira_Internal_Http_Dispatcher, getInfo);
-ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, __construct);
-ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, pendingCount);
-ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, activeCount);
+ZEND_FUNCTION(rapira_sapi_try_receive);
+ZEND_FUNCTION(rapira_sapi_receive);
+ZEND_FUNCTION(rapira_sapi_get_info);
+ZEND_FUNCTION(rapira_sapi_host_created);
+ZEND_FUNCTION(rapira_sapi_pending_count);
+ZEND_FUNCTION(rapira_sapi_active_count);
+ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, serverName);
+ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, serverPort);
 ZEND_METHOD(Rapira_Internal_Http_Exchange, isFinalized);
 ZEND_METHOD(Rapira_Internal_Http_Exchange, isCancelled);
 ZEND_METHOD(Rapira_Internal_Http_Exchange, getRequest);
@@ -151,6 +161,12 @@ static const zend_function_entry class_Rapira_Http_Request_methods[] = {
 	ZEND_FE_END
 };
 
+static const zend_function_entry class_Rapira_Http_HttpDispatcherInfo_methods[] = {
+	ZEND_RAW_FENTRY("serverName", NULL, arginfo_class_Rapira_Http_HttpDispatcherInfo_serverName, ZEND_ACC_PUBLIC|ZEND_ACC_ABSTRACT, NULL, NULL)
+	ZEND_RAW_FENTRY("serverPort", NULL, arginfo_class_Rapira_Http_HttpDispatcherInfo_serverPort, ZEND_ACC_PUBLIC|ZEND_ACC_ABSTRACT, NULL, NULL)
+	ZEND_FE_END
+};
+
 static const zend_function_entry class_Rapira_Http_Exchange_methods[] = {
 	ZEND_RAW_FENTRY("getRequest", NULL, arginfo_class_Rapira_Http_Exchange_getRequest, ZEND_ACC_PUBLIC|ZEND_ACC_ABSTRACT, NULL, NULL)
 	ZEND_RAW_FENTRY("writeHead", NULL, arginfo_class_Rapira_Http_Exchange_writeHead, ZEND_ACC_PUBLIC|ZEND_ACC_ABSTRACT, NULL, NULL)
@@ -169,23 +185,25 @@ static const zend_function_entry class_Rapira_Http_HttpDispatcher_methods[] = {
 };
 
 static const zend_function_entry class_Rapira_Internal_Http_Dispatcher_methods[] = {
-	ZEND_ME(Rapira_Internal_Http_Dispatcher, __construct, arginfo_class_Rapira_Internal_Http_Dispatcher___construct, ZEND_ACC_PRIVATE)
+	ZEND_RAW_FENTRY("__construct", zif_rapira_sapi_dispatcher_construct, arginfo_class_Rapira_Internal_Http_Dispatcher___construct, ZEND_ACC_PRIVATE, NULL, NULL)
 	ZEND_ME(Rapira_Internal_Http_Dispatcher, name, arginfo_class_Rapira_Internal_Http_Dispatcher_name, ZEND_ACC_PUBLIC)
-	ZEND_ME(Rapira_Internal_Http_Dispatcher, tryReceive, arginfo_class_Rapira_Internal_Http_Dispatcher_tryReceive, ZEND_ACC_PUBLIC)
-	ZEND_ME(Rapira_Internal_Http_Dispatcher, receive, arginfo_class_Rapira_Internal_Http_Dispatcher_receive, ZEND_ACC_PUBLIC)
-	ZEND_ME(Rapira_Internal_Http_Dispatcher, getInfo, arginfo_class_Rapira_Internal_Http_Dispatcher_getInfo, ZEND_ACC_PUBLIC)
+	ZEND_RAW_FENTRY("tryReceive", zif_rapira_sapi_try_receive, arginfo_class_Rapira_Internal_Http_Dispatcher_tryReceive, ZEND_ACC_PUBLIC, NULL, NULL)
+	ZEND_RAW_FENTRY("receive", zif_rapira_sapi_receive, arginfo_class_Rapira_Internal_Http_Dispatcher_receive, ZEND_ACC_PUBLIC, NULL, NULL)
+	ZEND_RAW_FENTRY("getInfo", zif_rapira_sapi_get_info, arginfo_class_Rapira_Internal_Http_Dispatcher_getInfo, ZEND_ACC_PUBLIC, NULL, NULL)
 	ZEND_FE_END
 };
 
 static const zend_function_entry class_Rapira_Internal_Http_DispatcherInfo_methods[] = {
-	ZEND_ME(Rapira_Internal_Http_DispatcherInfo, __construct, arginfo_class_Rapira_Internal_Http_DispatcherInfo___construct, ZEND_ACC_PRIVATE)
-	ZEND_ME(Rapira_Internal_Http_DispatcherInfo, pendingCount, arginfo_class_Rapira_Internal_Http_DispatcherInfo_pendingCount, ZEND_ACC_PUBLIC)
-	ZEND_ME(Rapira_Internal_Http_DispatcherInfo, activeCount, arginfo_class_Rapira_Internal_Http_DispatcherInfo_activeCount, ZEND_ACC_PUBLIC)
+	ZEND_RAW_FENTRY("__construct", zif_rapira_sapi_host_created, arginfo_class_Rapira_Internal_Http_DispatcherInfo___construct, ZEND_ACC_PRIVATE, NULL, NULL)
+	ZEND_RAW_FENTRY("pendingCount", zif_rapira_sapi_pending_count, arginfo_class_Rapira_Internal_Http_DispatcherInfo_pendingCount, ZEND_ACC_PUBLIC, NULL, NULL)
+	ZEND_RAW_FENTRY("activeCount", zif_rapira_sapi_active_count, arginfo_class_Rapira_Internal_Http_DispatcherInfo_activeCount, ZEND_ACC_PUBLIC, NULL, NULL)
+	ZEND_ME(Rapira_Internal_Http_DispatcherInfo, serverName, arginfo_class_Rapira_Internal_Http_DispatcherInfo_serverName, ZEND_ACC_PUBLIC)
+	ZEND_ME(Rapira_Internal_Http_DispatcherInfo, serverPort, arginfo_class_Rapira_Internal_Http_DispatcherInfo_serverPort, ZEND_ACC_PUBLIC)
 	ZEND_FE_END
 };
 
 static const zend_function_entry class_Rapira_Internal_Http_Exchange_methods[] = {
-	ZEND_RAW_FENTRY("__construct", zim_Rapira_Internal_Http_DispatcherInfo___construct, arginfo_class_Rapira_Internal_Http_Exchange___construct, ZEND_ACC_PRIVATE, NULL, NULL)
+	ZEND_RAW_FENTRY("__construct", zif_rapira_sapi_host_created, arginfo_class_Rapira_Internal_Http_Exchange___construct, ZEND_ACC_PRIVATE, NULL, NULL)
 	ZEND_ME(Rapira_Internal_Http_Exchange, isFinalized, arginfo_class_Rapira_Internal_Http_Exchange_isFinalized, ZEND_ACC_PUBLIC)
 	ZEND_ME(Rapira_Internal_Http_Exchange, isCancelled, arginfo_class_Rapira_Internal_Http_Exchange_isCancelled, ZEND_ACC_PUBLIC)
 	ZEND_ME(Rapira_Internal_Http_Exchange, getRequest, arginfo_class_Rapira_Internal_Http_Exchange_getRequest, ZEND_ACC_PUBLIC)
@@ -383,7 +401,7 @@ static zend_class_entry *register_class_Rapira_Http_HttpDispatcherInfo(zend_clas
 {
 	zend_class_entry ce, *class_entry;
 
-	INIT_NS_CLASS_ENTRY(ce, "Rapira\\Http", "HttpDispatcherInfo", NULL);
+	INIT_NS_CLASS_ENTRY(ce, "Rapira\\Http", "HttpDispatcherInfo", class_Rapira_Http_HttpDispatcherInfo_methods);
 	class_entry = zend_register_internal_interface(&ce);
 	zend_class_implements(class_entry, 1, class_entry_Rapira_DispatcherInfo);
 

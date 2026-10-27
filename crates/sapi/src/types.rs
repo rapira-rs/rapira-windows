@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use http::header::{AUTHORIZATION, COOKIE, HeaderMap, HeaderName};
+use http::header::{AUTHORIZATION, CONTENT_LENGTH, COOKIE, HeaderMap, HeaderName};
 use std::ffi::CString;
 use std::path::PathBuf;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
@@ -115,11 +115,11 @@ pub struct Request {
     pub authority: Option<Vec<u8>>,
     pub https: bool,
     /// Wire/CGI spelling ("HTTP/2.0"); mapped to the contract spelling at the exchange view.
-    pub protocol: String,
+    pub protocol: &'static str,
     pub remote: Addr,
     pub server: Addr,
     /// Configured CGI SERVER_NAME/SERVER_PORT, also the $uri synthesis fallback.
-    pub server_name: String,
+    pub server_name: &'static str,
     pub server_port: u16,
     pub headers: HeaderMap,
     /// First content-type field line, raw bytes.
@@ -164,12 +164,23 @@ pub struct ReqC {
     pub server_port: String,
 }
 
-fn cgi_addr_strings(addr: &Addr) -> (String, String) {
+struct CgiAddr {
+    addr: String,
+    port: String,
+}
+
+fn cgi_addr_strings(addr: &Addr) -> CgiAddr {
     match addr {
-        Addr::Inet(sa) => (sa.ip().to_string(), sa.port().to_string()),
+        Addr::Inet(sa) => CgiAddr {
+            addr: sa.ip().to_string(),
+            port: sa.port().to_string(),
+        },
         // REMOTE_ADDR must hold a hostnumber (RFC 3875 §4.1.8); loopback stands in for a unix peer.
         // https://www.rfc-editor.org/rfc/rfc3875#section-4.1.8
-        Addr::Unix(_) => ("127.0.0.1".to_owned(), "0".to_owned()),
+        Addr::Unix(_) => CgiAddr {
+            addr: "127.0.0.1".to_owned(),
+            port: "0".to_owned(),
+        },
     }
 }
 
@@ -194,7 +205,10 @@ impl ReqC {
             .get(AUTHORIZATION)
             .map(|v| cgi_cstring("Authorization", v.as_bytes()));
 
-        let (remote_addr, remote_port) = cgi_addr_strings(&r.remote);
+        let CgiAddr {
+            addr: remote_addr,
+            port: remote_port,
+        } = cgi_addr_strings(&r.remote);
 
         Self {
             method: cgi_cstring("REQUEST_METHOD", r.method.as_bytes()),
@@ -227,18 +241,17 @@ pub enum StreamState {
 
 pub struct Context {
     pub req: Request,
-    /// None on the dispatcher path, which binds no server context and runs no CGI callbacks.
-    pub c: Option<ReqC>,
+    pub c: ReqC,
     pub sender: Option<Sender<Frame>>,
     pub head: Option<ResponseHead>,
     pub body: Vec<u8>,
     pub stream: StreamState,
     pub tearing_down: bool,
+    pub errored: bool,
 }
 
 impl Context {
-    pub fn new(req: Request, sender: Sender<Frame>, script: Option<&str>) -> Self {
-        let c = script.map(|script| ReqC::build(&req, script));
+    pub fn new(req: Request, sender: Sender<Frame>, c: ReqC) -> Self {
         Self {
             req,
             c,
@@ -247,6 +260,7 @@ impl Context {
             body: Vec::new(),
             stream: StreamState::NotSent,
             tearing_down: false,
+            errored: false,
         }
     }
 
@@ -273,10 +287,17 @@ impl Context {
         };
         let body = std::mem::take(&mut self.body);
         if let Some(head) = self.head.take() {
-            let bodiless = matches!(head.status, 204 | 304)
-                || (100..200).contains(&head.status)
-                || self.req.method.eq_ignore_ascii_case("HEAD");
-            let content_length = (!bodiless && !truncated).then_some(body.len() as u64);
+            let no_content = matches!(head.status, 204 | 304) || (100..200).contains(&head.status);
+            let bodiless = no_content || self.req.method == "HEAD";
+            let content_length = if no_content {
+                None
+            } else if bodiless {
+                head.headers
+                    .get(CONTENT_LENGTH)
+                    .and_then(|value| value.to_str().ok()?.parse().ok())
+            } else {
+                (!truncated).then_some(body.len() as u64)
+            };
             send(
                 &tx,
                 Frame::Head {
@@ -335,10 +356,10 @@ mod tests {
                 target: None,
                 authority: None,
                 https: false,
-                protocol: String::new(),
+                protocol: "HTTP/1.1",
                 remote: Addr::Inet(([127, 0, 0, 1], 8080).into()),
                 server: Addr::Inet(([127, 0, 0, 1], 8080).into()),
-                server_name: String::new(),
+                server_name: "",
                 server_port: 8080,
                 headers: HeaderMap::new(),
                 content_type: None,
@@ -347,12 +368,24 @@ mod tests {
                 received_at: 0.0,
                 tls: None,
             },
-            c: None,
+            c: ReqC {
+                method: CString::default(),
+                query: CString::default(),
+                uri: CString::default(),
+                script: CString::default(),
+                ctype: None,
+                cookie: None,
+                authorization: None,
+                remote_addr: String::new(),
+                remote_port: String::new(),
+                server_port: String::new(),
+            },
             sender: None,
             head: None,
             body: Vec::new(),
             stream: StreamState::NotSent,
             tearing_down: false,
+            errored: false,
         };
         let headers = headers
             .iter()

@@ -1,51 +1,50 @@
-use tokio::sync::mpsc::{self, Sender};
+use tokio::sync::mpsc::Sender;
 
 use rapira_sapi::callbacks::send_error_head;
-use rapira_sapi::types::{Context, Frame, Request};
+use rapira_sapi::types::{Context, Frame, ReqC, Request};
 use rapira_sapi::work::{Held, Work};
 use rapira_sapi::zend_object;
 
 use crate::php::{ExchangeState, exchange_from};
 
-// cap 4 lets a buffered Head+Chunk+End trio, plus a stray interim head, queue without parking the PHP thread
-const FRAME_CAP: usize = 4;
+// Keep up to 1 MiB of 64 KiB writes queued before the PHP thread waits.
+pub(crate) const FRAME_CAP: usize = 16;
 
 /// One HTTP request on the intake.
 pub(crate) struct Exchange {
-    /// The request, the frame sender, and the CGI view when `new` built one.
-    ctx: Context,
+    req: Request,
+    sender: Sender<Frame>,
+    cgi: Option<ReqC>,
 }
 
 impl Exchange {
-    /// `rx` is the reply the transport reads.
-    /// `superglobals` builds the CGI view here, on the transport thread: true in the classic and worker modes.
-    pub(crate) fn new(req: Request, script: Option<&str>) -> (Self, mpsc::Receiver<Frame>) {
-        let (tx, rx) = mpsc::channel(FRAME_CAP);
-        let ctx = Context::new(req, tx, script);
-        (Self { ctx }, rx)
+    /// Build the CGI view on the transport thread for classic and worker modes.
+    pub(crate) fn new(req: Request, sender: Sender<Frame>, script: Option<&str>) -> Self {
+        let cgi = script.map(|script| ReqC::build(&req, script));
+        Self { req, sender, cgi }
     }
 }
 
 impl Work for Exchange {
     fn cancelled(&self) -> bool {
-        self.ctx.sender.as_ref().is_some_and(Sender::is_closed)
+        self.sender.is_closed()
     }
 
     unsafe fn attach(self: Box<Self>, obj: *mut zend_object) -> *mut dyn Held {
-        let Context { req, sender, .. } = self.ctx;
-        let tx = sender.expect("a queued exchange holds its sender");
-        let ptr = Box::into_raw(Box::new(ExchangeState::new(req, tx)));
+        let Self { req, sender, .. } = *self;
+        let ptr = Box::into_raw(Box::new(ExchangeState::new(req, sender)));
         // SAFETY: the caller passes a live Rapira\Internal\Http\Exchange object.
-        unsafe { (*exchange_from(obj)).job = ptr.cast() };
+        unsafe { (*exchange_from(obj)).unit = ptr.cast() };
         ptr
     }
 
-    fn into_cgi(self: Box<Self>) -> Option<Context> {
-        Some(self.ctx)
+    fn into_cgi(self: Box<Self>) -> Context {
+        let cgi = self.cgi.unwrap_or_else(|| ReqC::build(&self.req, ""));
+        Context::new(self.req, self.sender, cgi)
     }
 
     fn shed(self: Box<Self>) {
-        let mut ctx = self.ctx;
+        let mut ctx = self.into_cgi();
         send_error_head(&mut ctx, 503);
         ctx.finish(false);
     }

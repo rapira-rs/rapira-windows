@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering::{Relaxed, Release};
 use rapira_scoreboard::{SLOT_ACTIVE, SLOT_DRAINING, SLOT_IDLE, SLOT_STARTING, SharedSlot};
 
 thread_local! {
-    pub static SB: Cell<Option<&'static SharedSlot>> = const { Cell::new(None) };
+    static SB: Cell<Option<&'static SharedSlot>> = const { Cell::new(None) };
     static DRAINING: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -12,14 +12,13 @@ pub enum Event {
     Handled(bool),
     Shed,
     Recycled,
-    Unhealthy,
     Idle,
     Active,
     Draining,
     BootFailed,
 }
 
-pub fn sb_set(slot: &'static SharedSlot) {
+pub(crate) fn sb_set(slot: &'static SharedSlot) {
     DRAINING.set(false);
     SB.set(Some(slot));
 }
@@ -41,7 +40,6 @@ pub fn sb_update(event: Event) {
         Event::Recycled => {
             s.recycles.fetch_add(1, Relaxed);
         }
-        Event::Unhealthy => crate::quota::fire_unhealthy(),
         Event::Idle => s.state.store(draining_or(SLOT_IDLE), Release),
         Event::Active => {
             s.state.store(SLOT_ACTIVE, Release);

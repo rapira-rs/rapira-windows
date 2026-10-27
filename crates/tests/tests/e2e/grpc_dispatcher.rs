@@ -238,7 +238,7 @@ const OUTCOME_CASES: &[OutcomeCase] = &[
         steps: &[("busy", Want::Ok("busy"))],
         log: Some((
             "busy",
-            "receive() while a Rapira\\Grpc\\UnaryCall is unfinalized",
+            "this worker holds one unit at a time, and its Rapira\\Grpc\\UnaryCall is unfinalized",
         )),
     },
     OutcomeCase {

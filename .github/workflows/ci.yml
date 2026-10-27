@@ -19,7 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: rustfmt
       - name: Format
@@ -98,10 +98,10 @@ jobs:
         with:
           path: ${{ env.PHP_INSTALL_DIR }}
           key: ${{ steps.php-cache.outputs.cache-primary-key }}
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           cache-on-failure: true
           key: ${{ matrix.arch }}-php-${{ fromJSON(matrix.spec).php_version }}
@@ -110,7 +110,7 @@ jobs:
       - name: Workspace tests
         run: ./dev.ps1 -Task test -Devel $env:PHP_DEVEL_DIR -Runtime $env:PHP_RUNTIME
       - name: End-to-end tests
-        run: ./dev.ps1 -Task test_e2e -Devel $env:PHP_DEVEL_DIR -Runtime $env:PHP_RUNTIME
+        run: ./dev.ps1 -Task test_e2e -Release:('${{ matrix.arch }}' -eq 'x86_64') -Devel $env:PHP_DEVEL_DIR -Runtime $env:PHP_RUNTIME
       - name: Release bundle
         run: |
           ./dev.ps1 -Task build -Release -Devel $env:PHP_DEVEL_DIR -Runtime $env:PHP_RUNTIME
@@ -142,21 +142,22 @@ jobs:
             -SourceUrl '${{ fromJSON(needs.prepare.outputs.php85).source_url }}' `
             -SourceSha256 '${{ fromJSON(needs.prepare.outputs.php85).source_sha256 }}' `
             -InstallDirectory $env:PHP_INSTALL_DIR
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: llvm-tools-preview
-      - uses: taiki-e/install-action@b1d53d4d726d74b5a950a5b3798a3c6ede4e0f64 # cargo-llvm-cov
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
-          tool: cargo-llvm-cov
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+          tool: cargo-llvm-cov@0.9.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           cache-on-failure: true
           key: coverage-php-${{ fromJSON(needs.prepare.outputs.php85).php_version }}
       - name: Generate coverage
         run: ./dev.ps1 -Task coverage -Devel $env:PHP_DEVEL_DIR -Runtime $env:PHP_RUNTIME
       - name: Upload to Codecov
-        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: lcov.info
+          version: v11.3.1
           use_oidc: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
           fail_ci_if_error: true

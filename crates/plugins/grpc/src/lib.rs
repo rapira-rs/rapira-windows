@@ -17,7 +17,7 @@ mod php;
 mod schema;
 mod serve;
 
-use call::{Call, RpcStatus, UnaryCall, UnaryReply};
+use call::{RpcStatus, StatusDetail, UnaryCall, UnaryReply};
 pub use php::rapira_grpc_register_classes;
 use schema::{MethodInfo, Schema, set_services};
 
@@ -103,6 +103,6 @@ impl Plugin for Server {
         let Some(prepared) = prepared else {
             return Err(anyhow!("grpc listener was not prepared"));
         };
-        serve::serve(worker.sink.clone(), config, prepared, worker)
+        serve::serve(config, prepared, worker)
     }
 }

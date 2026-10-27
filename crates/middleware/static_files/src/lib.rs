@@ -6,7 +6,7 @@ pub use config::{Section, Settings, resolve};
 use std::path::PathBuf;
 
 use bytes::Bytes;
-use http::{Method, StatusCode};
+use http::{Method, StatusCode, header};
 use http_body_util::combinators::UnsyncBoxBody;
 use http_body_util::{BodyExt, Empty};
 use tower_http::services::ServeDir;
@@ -37,7 +37,8 @@ impl StaticFiles {
             // The URL space belongs to PHP: a directory URL is the app's route, not an
             // implicit index.html.
             dir: ServeDir::with_backend(root, CachingBackend::default())
-                .append_index_html_on_directories(false),
+                .append_index_html_on_directories(false)
+                .ignore_multi_range_requests(true),
             forbid,
         }
     }
@@ -101,13 +102,19 @@ impl StaticFiles {
             return None;
         }
 
-        let mut probe = http::Request::new(Empty::<Bytes>::new());
-        *probe.method_mut() = req.method.clone();
-        *probe.uri_mut() = req.uri.clone();
-        *probe.headers_mut() = req.headers.clone();
-
         let mut dir = self.dir.clone();
-        match dir.try_call(probe).await {
+        let mut served = dir.try_call(probe(req)).await;
+        // A different If-Range validator requires the whole file: https://www.rfc-editor.org/rfc/rfc9110#section-13.1.5
+        if let Ok(res) = &served
+            && res.headers().contains_key(header::CONTENT_RANGE)
+            && let Some(validator) = req.headers.get(header::IF_RANGE)
+            && res.headers().get(header::ETAG) != Some(validator)
+        {
+            let mut whole = probe(req);
+            whole.headers_mut().remove(header::RANGE);
+            served = dir.try_call(whole).await;
+        }
+        match served {
             Ok(res) if res.status() != StatusCode::NOT_FOUND => {
                 Some(res.map(|b| b.map_err(|e| -> BoxError { Box::new(e) }).boxed_unsync()))
             }
@@ -127,6 +134,14 @@ impl StaticFiles {
             }
         }
     }
+}
+
+fn probe(req: &http::request::Parts) -> http::Request<Empty<Bytes>> {
+    let mut probe = http::Request::new(Empty::<Bytes>::new());
+    *probe.method_mut() = req.method.clone();
+    *probe.uri_mut() = req.uri.clone();
+    *probe.headers_mut() = req.headers.clone();
+    probe
 }
 
 #[cfg(test)]

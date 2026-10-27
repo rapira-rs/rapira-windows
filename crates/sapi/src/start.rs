@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError, bounded};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError, bounded, unbounded};
 use rapira_scoreboard::Pool;
 use tracing::{error, info};
 
@@ -17,11 +17,11 @@ use crate::plugin::Mode;
 use crate::quota;
 use crate::rapira_worker::{WorkerExit, rapira_worker};
 use crate::scoreboard::{Event, sb_set, sb_update};
-use crate::work::{DispatcherClasses, Sink, Work};
+use crate::work::{DispatcherClasses, Entry, Intake, Work};
 use crate::*;
 
 thread_local! {
-    static JOB_RX: RefCell<Option<JobRx>> = const { RefCell::new(None) };
+    static UNIT_RX: RefCell<Option<UnitRx>> = const { RefCell::new(None) };
     static REGISTER_FNS: RefCell<Vec<unsafe extern "C" fn()>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -40,20 +40,20 @@ pub(crate) unsafe fn run_script(script: &Path) -> bool {
 }
 
 #[derive(Clone)]
-struct JobRx {
-    rx: Receiver<Box<dyn Work>>,
+struct UnitRx {
+    rx: Receiver<Entry>,
     pool: Arc<Pool>,
     stop: Receiver<()>,
     stopping: Arc<AtomicBool>,
     handled: Arc<AtomicBool>,
 }
 
-impl JobRx {
+impl UnitRx {
     fn recv(&self, timeout: Option<Duration>) -> Pulled {
         if self.stopping.load(Ordering::Acquire) {
             return Pulled::Closed;
         }
-        let got = match timeout {
+        let wait = |timeout| match timeout {
             None => crossbeam_channel::select_biased! {
                 recv(self.stop) -> _ => Err(RecvTimeoutError::Disconnected),
                 recv(self.rx) -> unit => unit.map_err(|_| RecvTimeoutError::Disconnected),
@@ -64,16 +64,25 @@ impl JobRx {
                 default(timeout) => Err(RecvTimeoutError::Timeout),
             },
         };
+        let first = timeout.map_or(IDLE_PURGE_AFTER, |t| t.min(IDLE_PURGE_AFTER));
+        let mut got = wait(Some(first));
+        if matches!(got, Err(RecvTimeoutError::Timeout)) && first == IDLE_PURGE_AFTER {
+            // Release unused allocator pages after an idle interval.
+            unsafe { libmimalloc_sys::mi_collect(true) };
+            got = wait(timeout.map(|t| t - first));
+        }
         match got {
             Ok(unit) => {
                 self.pool.pending.fetch_sub(1, Ordering::Relaxed);
-                Pulled::Job(unit)
+                Pulled::Unit(unit.unit)
             }
             Err(RecvTimeoutError::Timeout) => Pulled::Timeout,
             Err(RecvTimeoutError::Disconnected) => Pulled::Closed,
         }
     }
 }
+
+const IDLE_PURGE_AFTER: Duration = Duration::from_secs(2);
 
 pub struct PhpModule {
     active: Arc<AtomicUsize>,
@@ -183,6 +192,7 @@ pub fn boot_master(
         _not_send: PhantomData,
     };
     anyhow::ensure!(started, "php_module_startup failed");
+    unsafe { rapira_register_post_reader() };
     Ok(module)
 }
 
@@ -196,7 +206,7 @@ pub extern "C" fn rapira_rs_register_plugin_classes() {
 }
 
 pub struct Rapira {
-    sink: Option<Sink>,
+    intake: Option<Intake>,
     workers: Vec<JoinHandle<()>>,
     stopping: Arc<AtomicBool>,
     stop_tx: Option<Sender<()>>,
@@ -219,10 +229,10 @@ impl Rapira {
                 .to_string_lossy()
                 .as_bytes(),
         )?;
-        let (tx, rx) = bounded(1024);
+        let (tx, rx) = unbounded();
         let (stop_tx, stop) = bounded(0);
         let stopping = Arc::new(AtomicBool::new(false));
-        let job = JobRx {
+        let job = UnitRx {
             rx,
             pool: board.clone(),
             stop,
@@ -231,7 +241,7 @@ impl Rapira {
         };
         let (gate_tx, gate_rx) = bounded(board.slots.len());
         let mut pool = Self {
-            sink: Some(Sink::new(tx, board.clone())),
+            intake: Some(Intake::new(tx, board.clone())),
             workers: Vec::with_capacity(board.slots.len()),
             stopping,
             stop_tx: Some(stop_tx),
@@ -274,14 +284,16 @@ impl Rapira {
         Ok(pool)
     }
 
-    pub fn sink(&self) -> Sink {
-        self.sink.as_ref().expect("active pool").clone()
+    pub fn intake(&self) -> Intake {
+        self.intake.as_ref().expect("active pool").clone()
     }
 
     pub fn stop(&mut self) {
         self.stopping.store(true, Ordering::Release);
+        if let Some(intake) = self.intake.take() {
+            intake.close();
+        }
         self.stop_tx = None;
-        self.sink = None;
     }
 
     pub fn join(&mut self, deadline: Instant) -> bool {
@@ -320,7 +332,7 @@ fn worker_main(
     mode: Mode,
     entrypoint: PathBuf,
     directory: CString,
-    job: JobRx,
+    job: UnitRx,
     slot: &'static rapira_scoreboard::SharedSlot,
     index: usize,
     max_requests: u64,
@@ -330,7 +342,7 @@ fn worker_main(
     let name = job.pool.name;
     slot.bind(std::process::id());
     crate::context::set_script(&entrypoint);
-    JOB_RX.set(Some(job.clone()));
+    UNIT_RX.set(Some(job.clone()));
     crate::exchange::set_classes(classes);
     let mut streak: u32 = 0;
     loop {
@@ -397,37 +409,37 @@ fn worker_main(
     slot.pid.store(0, Ordering::Relaxed);
     slot.state
         .store(rapira_scoreboard::SLOT_FREE, Ordering::Release);
-    JOB_RX.set(None);
+    UNIT_RX.set(None);
 }
 
 pub(crate) fn note_handled() {
-    JOB_RX.with_borrow(|slot| {
+    UNIT_RX.with_borrow(|slot| {
         if let Some(job) = slot {
             job.handled.store(true, Ordering::Release);
         }
     });
 }
 
-pub(crate) fn pull_job() -> Option<Box<dyn Work>> {
-    match pull_job_wait(None) {
-        Pulled::Job(job) => Some(job),
+pub(crate) fn pull_unit() -> Option<Box<dyn Work>> {
+    match pull_unit_wait(None) {
+        Pulled::Unit(unit) => Some(unit),
         _ => None,
     }
 }
 
 pub(crate) enum Pulled {
-    Job(Box<dyn Work>),
+    Unit(Box<dyn Work>),
     Timeout,
     Empty,
     Closed,
 }
 
-pub(crate) fn pull_job_wait(timeout: Option<Duration>) -> Pulled {
+pub(crate) fn pull_unit_wait(timeout: Option<Duration>) -> Pulled {
     if quota::is_draining() {
         sb_update(Event::Idle);
         return Pulled::Closed;
     }
-    JOB_RX.with_borrow(|slot| {
+    UNIT_RX.with_borrow(|slot| {
         let Some(job) = slot else {
             return Pulled::Closed;
         };
@@ -443,22 +455,22 @@ pub(crate) fn pull_job_wait(timeout: Option<Duration>) -> Pulled {
 }
 
 /// Failed boot waits preserve the slot state because PHP cannot accept work.
-pub(crate) fn pull_job_to_shed(timeout: Duration) -> Pulled {
+pub(crate) fn pull_unit_to_shed(timeout: Duration) -> Pulled {
     if quota::is_draining() {
         return Pulled::Closed;
     }
-    JOB_RX.with_borrow(|slot| match slot {
+    UNIT_RX.with_borrow(|slot| match slot {
         Some(job) => job.recv(Some(timeout)),
         None => Pulled::Closed,
     })
 }
 
-pub(crate) fn pull_job_try() -> Pulled {
+pub(crate) fn pull_unit_try() -> Pulled {
     if quota::is_draining() {
         sb_update(Event::Idle);
         return Pulled::Closed;
     }
-    JOB_RX.with_borrow(|slot| {
+    UNIT_RX.with_borrow(|slot| {
         let Some(job) = slot else {
             return Pulled::Closed;
         };
@@ -476,7 +488,7 @@ pub(crate) fn pull_job_try() -> Pulled {
         match got {
             Ok(unit) => {
                 job.pool.pending.fetch_sub(1, Ordering::Relaxed);
-                Pulled::Job(unit)
+                Pulled::Unit(unit.unit)
             }
             Err(TryRecvError::Empty) => Pulled::Empty,
             Err(TryRecvError::Disconnected) => Pulled::Closed,
@@ -485,7 +497,7 @@ pub(crate) fn pull_job_try() -> Pulled {
 }
 
 pub(crate) fn pending_depth() -> u64 {
-    JOB_RX.with_borrow(|slot| {
+    UNIT_RX.with_borrow(|slot| {
         slot.as_ref()
             .map_or(0, |job| job.pool.pending.load(Ordering::Relaxed))
     })

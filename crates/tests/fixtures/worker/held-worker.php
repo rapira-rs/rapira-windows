@@ -10,7 +10,14 @@ $handler = static function (): void {
     }
     Seen::$runs++;
     \Rapira\log('held');
-    usleep(400000);
+    if (isset($_GET['release'])) {
+        while (!file_exists($_GET['release'])) {
+            usleep(10000);
+            clearstatcache();
+        }
+    } else {
+        usleep(400000);
+    }
     echo 'done';
 };
 while (\Rapira\handle_request($handler)) {

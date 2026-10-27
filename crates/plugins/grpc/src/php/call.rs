@@ -10,7 +10,7 @@ use connectrpc::http::{HeaderMap, HeaderName, HeaderValue};
 use rapira_sapi::callbacks::guard;
 use rapira_sapi::exchange::{AddrOwned, add_list, build_address, header_key};
 use rapira_sapi::scoreboard::{Event, sb_update};
-use rapira_sapi::work::{Held, release};
+use rapira_sapi::work::{Held, now_unix_f64, release};
 use rapira_sapi::{
     HashTable, IS_OBJECT, IS_STRING, add_next_index_object, object_init_ex, rapira_array_init,
     rapira_ce_already_finalized_error, rapira_ce_work_discarded_exception, rapira_zval_enum_case,
@@ -25,7 +25,7 @@ use super::{
     rapira_ce_grpc_protocol, rapira_ce_grpc_service_info, rapira_ce_grpc_status,
     rapira_ce_internal_grpc_response_metadata,
 };
-use crate::{Call, MethodInfo, RpcStatus, UnaryCall, UnaryReply};
+use crate::{MethodInfo, RpcStatus, StatusDetail, UnaryCall, UnaryReply};
 
 /// # Safety
 /// `dst` writable; engine active on this thread.
@@ -193,15 +193,10 @@ pub(crate) struct GrpcState {
 }
 
 impl GrpcState {
-    pub(crate) fn new(call: Call) -> Self {
-        let Call {
-            call: req,
-            received_at,
-            reply,
-        } = call;
+    pub(crate) fn new(req: UnaryCall, reply: oneshot::Sender<UnaryReply>) -> Self {
         Self {
             req,
-            received_at,
+            received_at: now_unix_f64(),
             reply: Some(reply),
             discarded: false,
             headers: Fields::new(),
@@ -211,19 +206,49 @@ impl GrpcState {
     }
 }
 
+impl rapira_sapi::work::Work for GrpcState {
+    fn cancelled(&self) -> bool {
+        Held::cancelled(self)
+    }
+
+    unsafe fn attach(self: Box<Self>, obj: *mut zend_object) -> *mut dyn Held {
+        let ptr = Box::into_raw(self);
+        unsafe { (*grpc_call_from(obj)).state = ptr.cast() };
+        ptr
+    }
+
+    fn into_cgi(self: Box<Self>) -> rapira_sapi::types::Context {
+        unreachable!("gRPC supports dispatcher mode only")
+    }
+
+    fn shed(self: Box<Self>) {
+        if let Some(reply) = self.reply {
+            let _ = reply.send(UnaryReply {
+                headers: HeaderMap::new(),
+                trailers: HeaderMap::new(),
+                outcome: Err(RpcStatus {
+                    code: 14,
+                    message: "the worker failed to boot".into(),
+                    details: Vec::new(),
+                }),
+            });
+        }
+    }
+}
+
 impl Held for GrpcState {
-    fn finalized(&self) -> bool {
+    fn settled(&self) -> bool {
         self.reply.is_none()
     }
 
     /// The plugin dropped the receiver: the deadline passed or the client left.
-    fn client_closed(&self) -> bool {
+    fn cancelled(&self) -> bool {
         self.discarded || self.reply.as_ref().is_some_and(oneshot::Sender::is_closed)
     }
 
     /// Dropping `reply` finalizes the call, so `rapira_rs_grpc_drop`/`reclaim_current` do not count it a second time.
     fn discard(&mut self) {
-        if self.finalized() {
+        if self.settled() {
             return;
         }
         self.discarded = true;
@@ -282,7 +307,7 @@ fn add_core(
         return Verb::Finalized;
     };
     // a call that the plugin closed keeps the entry, and finish() gives WorkDiscardedException
-    if st.finalized() {
+    if st.settled() {
         return Verb::Finalized;
     }
     let half = if trailer {
@@ -299,11 +324,11 @@ fn add_core(
 
 /// Sends the one outcome of the call, with both metadata halves in wire form.
 fn finish(st: &mut GrpcState, result: Result<Bytes, RpcStatus>) -> Verb {
-    if st.client_closed() {
+    if st.cancelled() {
         st.discard();
         return Verb::Discarded;
     }
-    if st.finalized() {
+    if st.settled() {
         return Verb::Finalized;
     }
     let outcome = UnaryReply {
@@ -311,7 +336,7 @@ fn finish(st: &mut GrpcState, result: Result<Bytes, RpcStatus>) -> Verb {
         trailers: wire(&st.trailers),
         outcome: result,
     };
-    // the receiver can drop after the client_closed() check
+    // The receiver can drop after the cancelled() check.
     if st
         .reply
         .take()
@@ -432,13 +457,13 @@ unsafe fn detail_prop<'a>(obj: *mut zend_object, name: &CStr) -> Option<&'a [u8]
     }
 }
 
-/// `Status::$details` as owned pairs, or the first item that is not an ErrorDetail.
+/// `Status::$details` as owned details, or the first item that is not an ErrorDetail.
 /// # Safety
 /// `details` a live array.
-unsafe fn read_details(details: *mut HashTable) -> Result<Vec<(String, Bytes)>, *mut zval> {
+unsafe fn read_details(details: *mut HashTable) -> Result<Vec<StatusDetail>, *mut zval> {
     unsafe {
         let mut out = Vec::new();
-        for (_, item) in zend::entries(details) {
+        for zend::Entry { val: item, .. } in zend::entries(details) {
             let pair = if zend::zval_type(item) == IS_OBJECT
                 && zend::instanceof((*(*item).value.obj).ce, rapira_ce_grpc_error_detail)
             {
@@ -450,10 +475,10 @@ unsafe fn read_details(details: *mut HashTable) -> Result<Vec<(String, Bytes)>, 
             let Some((url, value)) = pair else {
                 return Err(item);
             };
-            out.push((
-                String::from_utf8_lossy(url).into_owned(),
-                Bytes::copy_from_slice(value),
-            ));
+            out.push(StatusDetail {
+                type_url: String::from_utf8_lossy(url).into_owned(),
+                value: Bytes::copy_from_slice(value),
+            });
         }
         Ok(out)
     }
@@ -473,7 +498,7 @@ pub unsafe extern "C" fn rapira_rs_grpc_is_finalized(state: *const c_void) -> bo
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_is_cancelled(state: *const c_void) -> bool {
     guard(false, || unsafe {
-        (*state.cast::<GrpcState>()).client_closed()
+        (*state.cast::<GrpcState>()).cancelled()
     })
 }
 
@@ -653,8 +678,8 @@ mod tests {
             remote: Addr::Inet(([127, 0, 0, 1], 50051).into()),
             message: Bytes::new(),
         };
-        let (call, rx) = Call::new(req);
-        (GrpcState::new(call), rx)
+        let (tx, rx) = oneshot::channel();
+        (GrpcState::new(req, tx), rx)
     }
 
     /// `from_bytes` takes the obs-text bytes that a client can send.
@@ -1074,7 +1099,10 @@ mod tests {
             message: message.to_owned(),
             details: details
                 .iter()
-                .map(|&(url, value)| (url.to_owned(), Bytes::copy_from_slice(value)))
+                .map(|&(url, value)| StatusDetail {
+                    type_url: url.to_owned(),
+                    value: Bytes::copy_from_slice(value),
+                })
                 .collect(),
         }
     }
@@ -1192,7 +1220,7 @@ mod tests {
                 .collect();
             assert_eq!(verbs, c.verbs, "{}", c.name);
             assert_eq!(st.is_finalized(), c.finalized, "{}: finalized", c.name);
-            assert_eq!(st.client_closed(), c.cancelled, "{}: cancelled", c.name);
+            assert_eq!(st.cancelled(), c.cancelled, "{}: cancelled", c.name);
             drop(st);
 
             match &c.sent {

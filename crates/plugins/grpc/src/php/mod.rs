@@ -6,7 +6,7 @@ use rapira_sapi::{zend_class_entry, zend_object, zval};
 mod call;
 mod values;
 
-pub(crate) use call::{GrpcState, grpc_call_from};
+pub(crate) use call::GrpcState;
 
 // Class entries of the grpc stub; rapira_grpc_register_classes assigns them in MINIT (rapira_grpc.h).
 unsafe extern "C" {
@@ -47,5 +47,5 @@ pub static DISPATCHER_CLASSES: DispatcherClasses = DispatcherClasses {
     dispatcher: || unsafe { rapira_ce_internal_grpc_dispatcher },
     info: || unsafe { rapira_ce_internal_grpc_dispatcher_info },
     unit: || unsafe { rapira_ce_internal_grpc_unary_call },
-    busy: c"receive() while a Rapira\\Grpc\\UnaryCall is unfinalized; finalize it first",
+    busy: c"this worker holds one unit at a time, and its Rapira\\Grpc\\UnaryCall is unfinalized; finalize it first",
 };

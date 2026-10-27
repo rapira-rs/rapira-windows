@@ -53,6 +53,21 @@ fn worker_singleton() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn header_callback_fatal_keeps_the_server() -> anyhow::Result<()> {
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture("dispatcher/header-callback-fatal-worker.php"),
+    )
+    .spawn();
+    for _ in 0..2 {
+        let (status, body) = drain(submit(srv.addr, req("/"))?);
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body, srv.pid().to_string());
+    }
+    Ok(())
+}
+
 /// `new` on the Internal classes must be refused by the private constructor.
 #[test]
 fn host_created_only() -> anyhow::Result<()> {

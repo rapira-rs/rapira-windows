@@ -2,6 +2,114 @@ use crate::harness::*;
 use std::time::{Duration, Instant};
 
 #[test]
+fn head_framing_preserves_length_and_method_case() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        mode: rapira_sapi::Mode,
+        method: &'static str,
+        body: &'static [u8],
+    }
+    let cases = [
+        Case {
+            name: "worker HEAD",
+            mode: rapira_sapi::Mode::Worker,
+            method: "HEAD",
+            body: b"",
+        },
+        Case {
+            name: "worker extension method",
+            mode: rapira_sapi::Mode::Worker,
+            method: "head",
+            body: b"hello world",
+        },
+        Case {
+            name: "classic HEAD",
+            mode: rapira_sapi::Mode::Classic,
+            method: "HEAD",
+            body: b"",
+        },
+        Case {
+            name: "classic extension method",
+            mode: rapira_sapi::Mode::Classic,
+            method: "head",
+            body: b"hello world",
+        },
+    ];
+    for case in cases {
+        let srv = Spawn::http(case.mode, tests::fixture("shared/head-length.php")).spawn();
+        let request = format!(
+            "{} / HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n",
+            case.method
+        );
+        let raw = http_raw_bytes(
+            srv.addr,
+            request.as_bytes(),
+            std::time::Duration::from_secs(10),
+        )?;
+        let head = String::from_utf8_lossy(&raw).to_ascii_lowercase();
+        assert!(
+            head.contains("\r\ncontent-length: 11\r\n"),
+            "{}: {head}",
+            case.name
+        );
+        let (status, body) = parse_status_and_body(&raw)?;
+        assert_eq!((status, body), (200, case.body), "{}", case.name);
+    }
+    Ok(())
+}
+
+#[test]
+fn held_connection_survives_interpreter_recycling() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        mode: rapira_sapi::Mode,
+        script: std::path::PathBuf,
+    }
+    let cases = [
+        Case {
+            name: "worker",
+            mode: rapira_sapi::Mode::Worker,
+            script: tests::fixture("shared/worker.php"),
+        },
+        Case {
+            name: "dispatcher",
+            mode: rapira_sapi::Mode::Dispatcher,
+            script: fixture_path("shared/echo-worker.php"),
+        },
+    ];
+    for case in cases {
+        let srv = Spawn::http(case.mode, case.script)
+            .http_pool("max_requests = 1")
+            .spawn();
+        let mut conn = Conn::open(srv.addr, BOOT)?;
+        for _ in 0..6 {
+            conn.send(b"GET / HTTP/1.1\r\nHost: e2e\r\n\r\n")?;
+            let (status, headers) = conn.read_head(BOOT)?;
+            assert_eq!(status, 200, "{}", case.name);
+            assert!(
+                !headers
+                    .iter()
+                    .any(|(name, value)| name == "connection" && value == "close"),
+                "{}",
+                case.name
+            );
+            let len = headers
+                .iter()
+                .find(|(name, _)| name == "content-length")
+                .and_then(|(_, value)| value.parse().ok())
+                .expect("buffered body length");
+            assert!(!conn.read_n(len, BOOT)?.is_empty(), "{}", case.name);
+        }
+        assert!(
+            wait_log_contains(&srv, "recycling", BOOT),
+            "{}",
+            diagnostics(&srv)
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn boot_retries_without_application_traffic() {
     let srv = Spawn::http(
         rapira_sapi::Mode::Dispatcher,
@@ -282,7 +390,7 @@ fn abandoned_exchange_is_discarded_by_next_receive() {
     assert_eq!(status, 200, "\n{}", diagnostics(&srv));
     assert_eq!(
         body,
-        format!("{pid}:2:cancelled").into_bytes(),
+        format!("{pid}:2:cancelled active=0").into_bytes(),
         "the next request must preserve the worker and script cycle\n{}",
         diagnostics(&srv)
     );
@@ -635,7 +743,7 @@ fn dispatcher_request_fidelity_over_the_wire() {
     assert_eq!(code, 400, "missing Host on HTTP/1.1 must answer 400");
 }
 
-/// A PHP-written head crosses the wire: the status line, one field line per list value, the plugin's own framing, and a HEAD carrying neither body nor content-length.
+/// A PHP-written head preserves its status, fields, and declared length. HEAD carries no body.
 /// RFC 9110 §8.6: https://www.rfc-editor.org/rfc/rfc9110#section-8.6
 #[test]
 fn dispatcher_write_head_reaches_the_wire() {
@@ -678,8 +786,8 @@ fn dispatcher_write_head_reaches_the_wire() {
         diagnostics(&srv)
     );
     assert!(
-        !text.contains("\r\ncontent-length:"),
-        "no content-length on a HEAD response\n{}",
+        text.contains("\r\ncontent-length: 999\r\n"),
+        "HEAD preserves the declared content-length\n{}",
         diagnostics(&srv)
     );
     assert!(

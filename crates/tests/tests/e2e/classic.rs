@@ -3,6 +3,43 @@ use std::time::Duration;
 
 const REQ: Duration = Duration::from_secs(10);
 
+#[test]
+fn exit_in_a_frameless_callback_ends_the_reply_complete() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        query: &'static str,
+        status: u16,
+        body: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "exception handler",
+            query: "/?exit=handler",
+            status: 404,
+            body: "Not Found\n",
+        },
+        Case {
+            name: "shutdown callback",
+            query: "/?exit=shutdown",
+            status: 200,
+            body: "ok\nbye\n",
+        },
+    ];
+    let srv = harness::Spawn::http(
+        rapira_sapi::Mode::Classic,
+        harness::fixture_path("classic/exit-in-callback.php"),
+    )
+    .spawn();
+    for case in &cases {
+        let response = tests::drain_resp(tests::wire::submit(srv.addr, tests::req(case.query))?);
+        assert_eq!(response.status(), case.status, "{}", case.name);
+        assert_eq!(response.body_string(), case.body, "{}", case.name);
+        assert!(response.ended && !response.truncated, "{}", case.name);
+    }
+    harness::slot_line(&srv, "handled 2 errors 0 ");
+    Ok(())
+}
+
 /// A worker enters the entrypoint directory once and stays there, so a userland chdir outlives the request that made it.
 #[test]
 fn classic_mode_keeps_the_working_directory_across_requests() {

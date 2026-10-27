@@ -424,6 +424,11 @@ fn static_files_route_each_request_over_the_wire() {
     assert_eq!(head_field(&raw, "content-range"), "bytes */10");
     assert_eq!(head_field(&raw, "x-rapira-target"), "");
 
+    let raw = http_get_raw(srv.addr, "/data.bin", &[("Range", "bytes=0-1,5-6")], T)
+        .expect("multiple ranges");
+    assert_eq!(split_response(&raw), (200, &b"abcdefghij"[..]));
+    assert_eq!(head_field(&raw, "content-range"), "");
+
     let raw = http_get_raw(srv.addr, "/loop.css", &[], T).expect("GET /loop.css");
     assert_eq!(
         split_response(&raw),
@@ -434,6 +439,89 @@ fn static_files_route_each_request_over_the_wire() {
     assert_eq!(head_field(&raw, "x-rapira-target"), "");
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn static_files_check_if_range() {
+    let root = static_root(&[("data.bin", "abcdefghij")]);
+    let srv = spawn_echo_loop(&root, None);
+    let raw = http_get_raw(srv.addr, "/data.bin", &[], T).expect("GET /data.bin");
+    let etag = head_field(&raw, "etag");
+    assert!(etag.starts_with('"'), "a strong ETag: {etag:?}");
+    let weak = format!("W/{etag}");
+    struct Case<'a> {
+        name: &'static str,
+        range: &'static str,
+        validator: &'a str,
+        status: u16,
+        content_range: &'static str,
+        body: &'static [u8],
+    }
+    let cases = [
+        Case {
+            name: "current ETag",
+            range: "bytes=5-",
+            validator: &etag,
+            status: 206,
+            content_range: "bytes 5-9/10",
+            body: b"fghij",
+        },
+        Case {
+            name: "stale ETag",
+            range: "bytes=5-",
+            validator: "\"stale\"",
+            status: 200,
+            content_range: "",
+            body: b"abcdefghij",
+        },
+        Case {
+            name: "weak ETag",
+            range: "bytes=5-",
+            validator: &weak,
+            status: 200,
+            content_range: "",
+            body: b"abcdefghij",
+        },
+        Case {
+            name: "stale date",
+            range: "bytes=5-",
+            validator: "Thu, 01 Jan 1970 00:00:00 GMT",
+            status: 200,
+            content_range: "",
+            body: b"abcdefghij",
+        },
+        Case {
+            name: "stale ETag and unsatisfiable range",
+            range: "bytes=100-200",
+            validator: "\"stale\"",
+            status: 200,
+            content_range: "",
+            body: b"abcdefghij",
+        },
+    ];
+    for case in cases {
+        let raw = http_get_raw(
+            srv.addr,
+            "/data.bin",
+            &[("Range", case.range), ("If-Range", case.validator)],
+            T,
+        )
+        .expect(case.name);
+        assert_eq!(
+            split_response(&raw),
+            (case.status, case.body),
+            "{}",
+            case.name
+        );
+        assert_eq!(
+            head_field(&raw, "content-range"),
+            case.content_range,
+            "{}",
+            case.name
+        );
+    }
+    drop(srv);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 /// `http.static.forbid` decides which sources stay with PHP. Each case boots its own master.

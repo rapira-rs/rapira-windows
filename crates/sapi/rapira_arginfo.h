@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: c24c004a4de0f0fd60dc4fabfec9a60349801f1d */
+ * Stub hash: fe2e9658b80b4e937e21b45f57510f7b7ee63094 */
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_rapira_finish_request, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()

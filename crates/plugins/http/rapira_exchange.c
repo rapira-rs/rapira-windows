@@ -20,7 +20,7 @@ extern bool rapira_rs_exchange_write_trailers(void *job, HashTable *trailers);
 
 // receive() sets job before PHP code can reach the object
 static void *exchange_job(zval *this_ptr) {
-    void *job = rapira_exchange_from(Z_OBJ_P(this_ptr))->job;
+    void *job = rapira_exchange_from(Z_OBJ_P(this_ptr))->unit;
     ZEND_ASSERT(job != NULL);
     return job;
 }

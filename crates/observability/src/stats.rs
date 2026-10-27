@@ -3,11 +3,28 @@ use std::sync::atomic::Ordering::Relaxed;
 
 use rapira_scoreboard::{Pool, SLOT_ACTIVE, SLOT_DRAINING, SLOT_IDLE, SLOT_STARTING};
 
-pub(crate) const STATES: [(u32, &str); 4] = [
-    (SLOT_STARTING, "starting"),
-    (SLOT_IDLE, "idle"),
-    (SLOT_ACTIVE, "active"),
-    (SLOT_DRAINING, "draining"),
+pub(crate) struct StateLabel {
+    pub state: u32,
+    pub label: &'static str,
+}
+
+pub(crate) const STATES: [StateLabel; 4] = [
+    StateLabel {
+        state: SLOT_STARTING,
+        label: "starting",
+    },
+    StateLabel {
+        state: SLOT_IDLE,
+        label: "idle",
+    },
+    StateLabel {
+        state: SLOT_ACTIVE,
+        label: "active",
+    },
+    StateLabel {
+        state: SLOT_DRAINING,
+        label: "draining",
+    },
 ];
 
 #[derive(Debug, Default, PartialEq)]
@@ -42,7 +59,7 @@ pub(crate) fn board_stats(pools: &[Arc<Pool>]) -> Vec<PoolStats> {
                 stats.script_restarts += slot.recycles.load(Relaxed);
                 let state = slot.state.load(Relaxed);
                 if slot.pid.load(Relaxed) != 0
-                    && let Some(i) = STATES.iter().position(|&(value, _)| value == state)
+                    && let Some(i) = STATES.iter().position(|known| known.state == state)
                 {
                     stats.states[i] += 1;
                 }

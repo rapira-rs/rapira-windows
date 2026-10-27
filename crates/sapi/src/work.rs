@@ -1,26 +1,29 @@
-use crossbeam_channel::{Sender, TrySendError};
+use crossbeam_channel::Sender;
 use std::ffi::CStr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
 use crate::scoreboard::{Event, sb_update};
 use crate::{zend_class_entry, zend_object};
 use rapira_scoreboard::Pool;
 
 pub(crate) const INTAKE_WAIT: Duration = Duration::from_secs(30);
+const INTAKE_SLOTS: usize = 1024;
+const BODY_BUDGET: usize = 64 << 20;
 
 /// The cycle bookkeeping view of a unit that receive() handed out.
 pub trait Held {
     /// The worker committed the outcome, or discarded the unit.
-    fn finalized(&self) -> bool;
+    fn settled(&self) -> bool;
     /// The unit takes no outcome: the client left, or the plugin closed the unit. Work::isCancelled().
-    fn client_closed(&self) -> bool;
+    fn cancelled(&self) -> bool;
     fn discard(&mut self);
 
     /// Work::isFinalized().
     fn is_finalized(&self) -> bool {
-        self.finalized() || self.client_closed()
+        self.settled() || self.cancelled()
     }
 }
 
@@ -30,7 +33,7 @@ pub trait Held {
 pub unsafe fn release<T: Held + ?Sized>(ptr: *mut T) -> Box<T> {
     crate::exchange::forget_held(ptr.cast::<()>());
     let st = unsafe { Box::from_raw(ptr) };
-    if !st.finalized() {
+    if !st.settled() {
         sb_update(Event::Handled(true));
     }
     st
@@ -44,10 +47,17 @@ pub trait Work: Send + 'static {
     /// # Safety
     /// `obj` is a live object of that class on the PHP thread.
     unsafe fn attach(self: Box<Self>, obj: *mut zend_object) -> *mut dyn Held;
-    /// The classic and worker modes. None: this unit cannot run there.
-    fn into_cgi(self: Box<Self>) -> Option<crate::types::Context>;
+    /// The classic and worker modes.
+    fn into_cgi(self: Box<Self>) -> crate::types::Context;
     /// A worker that cannot serve: the plugin's refusal, 503 or UNAVAILABLE.
     fn shed(self: Box<Self>);
+}
+
+/// A queued unit owns its permits until dequeue or queue destruction.
+pub(crate) struct Entry {
+    pub(crate) unit: Box<dyn Work>,
+    _bytes: OwnedSemaphorePermit,
+    _slot: OwnedSemaphorePermit,
 }
 
 /// The class entries of one plugin's dispatcher surface. Set once per worker.
@@ -63,6 +73,7 @@ pub struct DispatcherClasses {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refused {
     Saturated,
+    OverBudget,
     Stopped,
 }
 
@@ -70,6 +81,11 @@ impl std::fmt::Display for Refused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Saturated => write!(f, "worker pool saturated for {INTAKE_WAIT:?}"),
+            Self::OverBudget => write!(
+                f,
+                "request bodies that wait for the pool use all {} MiB",
+                BODY_BUDGET >> 20
+            ),
             Self::Stopped => write!(f, "worker pool stopped"),
         }
     }
@@ -86,14 +102,16 @@ pub fn now_unix_f64() -> f64 {
 
 /// The queue from a plugin thread to the PHP thread. Clone per plugin task.
 #[derive(Clone)]
-pub struct Sink {
-    tx: Sender<Box<dyn Work>>,
+pub struct Intake {
+    tx: Sender<Entry>,
     pool: Arc<Pool>,
+    budget: Arc<Semaphore>,
+    slots: Arc<Semaphore>,
 }
 
 struct PendingGuard<'a> {
     pool: Option<&'a Pool>,
-    deadline: Option<Instant>,
+    found_full: bool,
 }
 
 impl<'a> PendingGuard<'a> {
@@ -101,7 +119,7 @@ impl<'a> PendingGuard<'a> {
         pool.pending.fetch_add(1, Ordering::Relaxed);
         Self {
             pool: Some(pool),
-            deadline: None,
+            found_full: false,
         }
     }
     fn disarm(mut self) {
@@ -113,32 +131,52 @@ impl Drop for PendingGuard<'_> {
     fn drop(&mut self) {
         if let Some(pool) = self.pool.take() {
             pool.pending.fetch_sub(1, Ordering::Relaxed);
-            if self.deadline.is_some() {
+            if self.found_full {
                 pool.failed_on_full_queue.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
 }
 
-impl Sink {
-    pub(crate) fn new(tx: Sender<Box<dyn Work>>, pool: Arc<Pool>) -> Self {
-        Self { tx, pool }
+impl Intake {
+    pub(crate) fn new(tx: Sender<Entry>, pool: Arc<Pool>) -> Self {
+        Self {
+            tx,
+            pool,
+            budget: Arc::new(Semaphore::new(BODY_BUDGET)),
+            slots: Arc::new(Semaphore::new(INTAKE_SLOTS)),
+        }
     }
 
-    /// pending is incremented before the send: the consumer decrements as soon as it wakes, so the reverse order could wrap the counter below zero.
-    pub async fn submit(&self, mut unit: Box<dyn Work>) -> Result<(), Refused> {
-        let mut pending = PendingGuard::arm(&self.pool);
-        loop {
-            match self.tx.try_send(unit) {
-                Ok(()) => {
-                    pending.disarm();
-                    return Ok(());
+    pub(crate) fn close(&self) {
+        self.budget.close();
+        self.slots.close();
+    }
+
+    /// Charge body bytes, including multipart spool files, while the unit waits for PHP.
+    /// Increment pending before send because the consumer can wake immediately.
+    pub async fn submit(&self, unit: Box<dyn Work>, bytes: usize) -> Result<(), Refused> {
+        let held =
+            match Arc::clone(&self.budget).try_acquire_many_owned(bytes.min(BODY_BUDGET) as u32) {
+                Ok(held) => held,
+                Err(TryAcquireError::Closed) => return Err(Refused::Stopped),
+                Err(TryAcquireError::NoPermits) => {
+                    self.pool.shed.fetch_add(1, Ordering::Relaxed);
+                    return Err(Refused::OverBudget);
                 }
-                Err(TrySendError::Full(u)) => {
-                    let deadline = *pending
-                        .deadline
-                        .get_or_insert_with(|| Instant::now() + INTAKE_WAIT);
-                    if Instant::now() > deadline {
+            };
+        let mut pending = PendingGuard::arm(&self.pool);
+        let slot = match Arc::clone(&self.slots).try_acquire_owned() {
+            Ok(slot) => slot,
+            Err(TryAcquireError::Closed) => return Err(Refused::Stopped),
+            Err(TryAcquireError::NoPermits) => {
+                pending.found_full = true;
+                match tokio::time::timeout(INTAKE_WAIT, Arc::clone(&self.slots).acquire_owned())
+                    .await
+                {
+                    Ok(Ok(slot)) => slot,
+                    Ok(Err(_)) => return Err(Refused::Stopped),
+                    Err(_) => {
                         tracing::warn!(
                             target: "rapira",
                             "intake full for {INTAKE_WAIT:?} ({} pending); shedding the request",
@@ -147,11 +185,18 @@ impl Sink {
                         self.pool.shed.fetch_add(1, Ordering::Relaxed);
                         return Err(Refused::Saturated);
                     }
-                    unit = u;
-                    tokio::time::sleep(Duration::from_millis(1)).await;
                 }
-                Err(TrySendError::Disconnected(_)) => return Err(Refused::Stopped),
             }
+        };
+        let entry = Entry {
+            unit,
+            _bytes: held,
+            _slot: slot,
+        };
+        if self.tx.send(entry).is_err() {
+            return Err(Refused::Stopped);
         }
+        pending.disarm();
+        Ok(())
     }
 }

@@ -1,5 +1,4 @@
 use crate::*;
-use callbacks;
 use std::{
     os::raw::c_char,
     ptr::{null, null_mut},
@@ -40,7 +39,7 @@ pub(crate) fn build_sapi_module() -> sapi_module_struct {
         pretty_name: c"Rapira".as_ptr() as *mut c_char,
         startup: None,
         shutdown: None,
-        activate: Some(context::activate),
+        activate: Some(context::rapira_rs_activate),
         deactivate: Some(context::deactivate),
         ub_write: Some(rapira_ub_write),
         flush: None,

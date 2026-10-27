@@ -41,7 +41,7 @@
     "add_assoc_zval_ex", "add_next_index_stringl", "add_next_index_object", "zval_add_ref",
     "zend_object", "zend_class_entry", "zval_ptr_dtor",
     "zend_hash_str_update", "zend_string_init_interned",
-    "php_default_post_reader", "php_default_treat_data", "php_default_input_filter", "php_handle_auth_data",
+    "php_default_post_reader", "php_default_treat_data", "php_default_input_filter",
     "SAPI_HEADER_SENT_SUCCESSFULLY", "SAPI_HEADER_SEND_FAILED", "IS_UNDEF", "IS_STRING",
     "E_WARNING", "E_CORE_WARNING", "E_COMPILE_WARNING", "E_USER_WARNING",
     "E_NOTICE", "E_USER_NOTICE", "E_DEPRECATED", "E_USER_DEPRECATED", "E_CORE", "E_FATAL_ERRORS",

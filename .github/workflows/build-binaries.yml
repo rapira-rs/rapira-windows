@@ -163,10 +163,10 @@ jobs:
                   path: ${{ steps.php-path.outputs.install_dir }}
                   key: ${{ steps.sourcephpcache.outputs.cache-primary-key }}
 
-            - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+            - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
               with:
                   targets: ${{ matrix.target }}
-            - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+            - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
               with:
                   cache-on-failure: true
                   key: ${{ matrix.asset_arch }}-php-${{ fromJSON(matrix.spec).php_version }}
@@ -186,7 +186,7 @@ jobs:
                   $bundle = Join-Path 'dist' $env:STEM
                   Compress-Archive -LiteralPath $bundle -DestinationPath "dist\$env:STEM.zip"
 
-            - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+            - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
               with:
                   name: art-windows-${{ matrix.asset_arch }}-php${{ matrix.php_branch }}
                   path: dist/*.zip
@@ -206,7 +206,7 @@ jobs:
             GH_REPO: ${{ github.repository }}
         steps:
             # A called workflow shares the caller's artifact namespace. This pattern selects the binary build artifacts.
-            - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+            - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
               with:
                   path: incoming
                   pattern: "art-*"
@@ -228,7 +228,7 @@ jobs:
                       ( cd dist && sha256sum rapira-v"${VERSION}"-php*-windows-"${arch}".zip > "rapira-v${VERSION}-windows-${arch}-SHA256SUMS.txt" )
                   done
 
-            - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+            - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
               if: inputs.upload_to == ''
               with:
                   name: dist

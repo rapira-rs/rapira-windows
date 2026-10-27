@@ -28,6 +28,7 @@ The gRPC plugin supports bearer-token authentication before calls reach PHP. See
 ## Process model and control
 
 - Rapira starts one process. Each plugin has a fixed pool of PHP interpreter threads and its own work queue.
+- Each pool has 1024 intake slots and a 64 MiB budget for waiting request bodies. A body uses at most 64 MiB of this budget. A request that cannot fit the free budget is refused at once. A request that needs a slot waits at most 30 seconds.
 - MINIT runs once before the interpreter threads start.
 - `<plugin>.pool.processes` sets the interpreter thread count for that plugin.
 - The Windows build supports only a static pool. It rejects the main build's scaling settings. It does not support reload or status requests.
@@ -74,7 +75,7 @@ Metrics with a `pool` label describe one plugin pool. A worker is an interpreter
 | `rapira_script_restarts_total` | Entrypoint restarts in interpreter threads |
 | `rapira_build_info` | Rapira and linked PHP version labels, with value 1 |
 
-An intake timeout adds one request and one failure. A cancelled submission that found a full queue adds only to the full-queue failure counter. The Windows endpoint has no per-worker process-exit or memory series because all interpreters share one process.
+An intake timeout or body-budget refusal adds one request and one failure. A cancelled submission that found a full queue adds only to the full-queue failure counter. A cancelled queued request counts as shed when an interpreter receives it and does not use the request quota. The Windows endpoint has no per-worker process-exit or memory series because all interpreters share one process.
 
 ## Windows file and socket behavior
 
