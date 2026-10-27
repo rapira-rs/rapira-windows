@@ -205,6 +205,14 @@ fn filter_exception() -> anyhow::Result<()> {
 }
 
 #[test]
+fn sodium_exception() -> anyhow::Result<()> {
+    exception(
+        "php_ext/sodium-worker.php",
+        "sodium:94dc0c93428ad3519ec5ec157a5c3c53b7b6056ba3fff7ad773a19e0b4f3fd5a",
+    )
+}
+
+#[test]
 fn bcmath_success() -> anyhow::Result<()> {
     success("php_ext/bcmath-worker.php", "bcmath:0.30")
 }

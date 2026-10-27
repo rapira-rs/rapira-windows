@@ -59,7 +59,7 @@ pub(super) struct Closed;
 /// Engine active on this thread.
 pub(super) unsafe fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<(), Closed> {
     let (result, parked) = {
-        let Some(tx) = st.ctx.sender.as_ref() else {
+        let Some(tx) = st.sender.as_ref() else {
             return Err(Closed);
         };
         match tx.try_send(frame) {
@@ -131,7 +131,7 @@ pub(super) fn discard_unit(st: &mut ExchangeState) {
     st.stage = Stage::Finalized;
     st.body.unlink_spools();
     sb_update(Event::Handled(true));
-    if let Some(tx) = st.ctx.sender.take() {
+    if let Some(tx) = st.sender.take() {
         let _ = tx.try_send(Frame::End {
             trailers: HeaderMap::new(),
             truncated: true,
@@ -142,7 +142,7 @@ pub(super) fn discard_unit(st: &mut ExchangeState) {
 /// # Safety
 /// As `send_frame`.
 pub(super) unsafe fn write_trailers_core(st: &mut ExchangeState, trailers: HeaderMap) -> Verb {
-    if st.client_closed() {
+    if st.cancelled() {
         discard_unit(st);
         return Verb::Discarded;
     }
@@ -203,7 +203,7 @@ pub(super) unsafe fn write_head_core(
     status: u16,
     headers: HeaderMap,
 ) -> Verb {
-    if st.client_closed() {
+    if st.cancelled() {
         discard_unit(st);
         return Verb::Discarded;
     }
@@ -273,7 +273,7 @@ pub(super) unsafe fn write_body_core(
     len: usize,
     eos: bool,
 ) -> Verb {
-    if st.client_closed() {
+    if st.cancelled() {
         discard_unit(st);
         return Verb::Discarded;
     }
@@ -374,7 +374,7 @@ pub(super) unsafe fn seal(st: &mut ExchangeState, truncated: bool, trailers: Hea
             },
         )
     };
-    st.ctx.sender = None;
+    st.sender = None;
 }
 
 /// # Safety
@@ -383,7 +383,7 @@ pub(super) unsafe fn seal(st: &mut ExchangeState, truncated: bool, trailers: Hea
 pub unsafe extern "C" fn rapira_rs_exchange_flush(job: *mut c_void) -> bool {
     guard(false, || unsafe {
         let st = &mut *job.cast::<ExchangeState>();
-        let v = if st.client_closed() {
+        let v = if st.cancelled() {
             discard_unit(st);
             Verb::Discarded
         } else if st.stage == Stage::Finalized {
@@ -416,7 +416,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_is_finalized(job: *const c_void) -> 
 pub unsafe extern "C" fn rapira_rs_exchange_is_cancelled(job: *const c_void) -> bool {
     guard(false, || unsafe {
         let st = &*job.cast::<ExchangeState>();
-        st.client_closed()
+        st.cancelled()
     })
 }
 
@@ -430,7 +430,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_drop(job: *mut c_void) {
         let cycle_died = unsafe { (*rapira_sapi::rapira_cg()).unclean_shutdown };
         if st.stage != Stage::Finalized && !cycle_died {
             st.body.unlink_spools();
-            if let Some(tx) = st.ctx.sender.take() {
+            if let Some(tx) = st.sender.take() {
                 if st.head_sent {
                     let _ = tx.try_send(Frame::End {
                         trailers: HeaderMap::new(),

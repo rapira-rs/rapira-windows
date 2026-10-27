@@ -7,6 +7,44 @@ use tests::{drain, fixture, req, server_log};
 use crate::harness::{Server, Spawn, scratch_dir, slot_line};
 
 #[test]
+fn worker_survives_a_fatal_in_a_released_exception() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        query: &'static str,
+        prefix: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "shutdown exception destructor",
+            query: "/?boom=shutdown",
+            prefix: "ok counter=2",
+        },
+        Case {
+            name: "output callback exception destructor",
+            query: "/?boom=teardown",
+            prefix: "buffered",
+        },
+    ];
+    let srv = Spawn::http(Mode::Worker, fixture("shared/release-fatal-worker.php")).spawn();
+    assert_eq!(
+        drain(submit(srv.addr, req("/"))?),
+        (200, "ok counter=1".into())
+    );
+    for case in cases {
+        let (status, body) = drain(submit(srv.addr, req(case.query))?);
+        assert_eq!(status, 200, "{}: {body}", case.name);
+        assert!(body.starts_with(case.prefix), "{}: {body}", case.name);
+        assert_eq!(
+            drain(submit(srv.addr, req("/"))?),
+            (200, "ok counter=1".into()),
+            "{}",
+            case.name
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn fibers_stress_classic() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Classic, fixture("basic_tests/fibers.php")).spawn();
     let (status, body) = drain(submit(srv.addr, req("/"))?);
@@ -393,12 +431,12 @@ fn php_diagnostics_log_at_their_error_type_level() -> anyhow::Result<()> {
     );
     assert_eq!(
         php_levels(&logged, "REPORTED-WARNING"),
-        vec![tracing::Level::WARN, tracing::Level::WARN],
+        vec![tracing::Level::WARN],
         "an unmasked E_USER_WARNING logs at warn (captured: {logged:?})"
     );
     assert_eq!(
         php_levels(&logged, "REPORTED-FATAL"),
-        vec![tracing::Level::ERROR, tracing::Level::ERROR],
+        vec![tracing::Level::ERROR],
         "an uncaught throw stays an error-level diagnostic (captured: {logged:?})"
     );
     Ok(())
@@ -420,9 +458,9 @@ fn masked_fatal_still_logs_at_error() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// log_errors routes a deprecation through the SAPI log callback too; both paths must report debug.
+/// An unmasked deprecation produces one debug record.
 #[test]
-fn logged_deprecation_stays_at_debug_on_both_paths() -> anyhow::Result<()> {
+fn logged_deprecation_produces_one_debug_record() -> anyhow::Result<()> {
     let mut srv = error_levels_worker();
     let (status, _) = drain(submit(srv.addr, req("/?step=logged"))?);
     srv.stop();
@@ -431,7 +469,7 @@ fn logged_deprecation_stays_at_debug_on_both_paths() -> anyhow::Result<()> {
     let logged = server_log::records(&srv.log_file());
     assert_eq!(
         php_levels(&logged, "LOGGED-DEPRECATION"),
-        vec![tracing::Level::DEBUG, tracing::Level::DEBUG],
+        vec![tracing::Level::DEBUG],
         "the log callback reports a deprecation at debug (captured: {logged:?})"
     );
     Ok(())

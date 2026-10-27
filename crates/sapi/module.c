@@ -1,16 +1,25 @@
 #include "php.h"
 #include "rapira_sapi.h"
 #include "zend_types.h"
+#include <main/php_content_types.h>
 
 extern void rapira_rs_finish_response(void);
 
-// php_handle_aborted_connection (main.c:2722) longjmps past Rust's catch_unwind
+ZEND_TLS bool rapira_in_handler = false;
+
+// End an aborted worker request without restarting its application.
 extern size_t rapira_rs_ub_write(const char *str, size_t len, bool *aborted);
 size_t rapira_ub_write(const char *str, size_t len) {
     bool aborted = false;
     size_t written = rapira_rs_ub_write(str, len, &aborted);
-    if (aborted) {
+    if (aborted && rapira_get_mode() != RAPIRA_MODE_WORKER) {
         php_handle_aborted_connection();
+    } else if (aborted) {
+        PG(connection_status) = PHP_CONNECTION_ABORTED;
+        php_output_set_status(PHP_OUTPUT_DISABLED);
+        if (rapira_in_handler && !PG(ignore_user_abort) && !EG(exception)) {
+            zend_throw_unwind_exit();
+        }
     }
     return written;
 }
@@ -256,10 +265,8 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
     // cppcheck-suppress autoVariables
     fci->retval = &retval;
 
-    // only _zend_bailout sets it mid-request (zend.c:1264): 0->1 proves bailout
-    bool unclean_at_entry = CG(unclean_shutdown);
-
     zend_execute_data *observed_base = EG(current_observed_frame);
+    rapira_in_handler = true;
     RAPIRA_GUARD(
         {
             zend_call_function(fci, fcc);
@@ -294,15 +301,14 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
     // freeing the table releases closure captures, which can run __destruct
     RAPIRA_OBSERVER_CLOSE(php_free_shutdown_functions(), observed_base);
 
-    // must follow every step that runs userland code, or it rethrows later
-    if (EG(exception)) {
-        zend_clear_exception();
-    }
+    // Exception release can run a destructor that causes a bailout.
+    RAPIRA_GUARD(
+        if (EG(exception)) { zend_clear_exception(); }, outcome, observed_base);
 
     gc_protect(false); // _zend_bailout can leave it engaged
+    rapira_in_handler = false;
 
-    if (outcome != RAPIRA_BAILOUT && !unclean_at_entry &&
-        CG(unclean_shutdown)) {
+    if (outcome != RAPIRA_BAILOUT && CG(unclean_shutdown)) {
         outcome = RAPIRA_BAILOUT;
         rapira_observer_end_to(observed_base);
     }
@@ -343,7 +349,14 @@ int rapira_request_teardown(void) {
     // the VM stack is popped when handle_request returns, so close frames here
     zend_execute_data *observed_base = EG(current_observed_frame);
 
-    RAPIRA_GUARD(php_output_end_all(), bailed, observed_base);
+    // Publish the complete response before module and SAPI teardown.
+    RAPIRA_GUARD(
+        {
+            php_output_end_all();
+            php_header();
+        },
+        bailed, observed_base);
+    rapira_rs_finish_response();
     RAPIRA_GUARD(rapira_modules_request(false), bailed, observed_base);
     RAPIRA_GUARD(rapira_reset_session(), bailed, observed_base);
     RAPIRA_GUARD(php_output_deactivate(), bailed, observed_base);
@@ -353,13 +366,11 @@ int rapira_request_teardown(void) {
     zend_try { zend_unset_timeout(); }
     zend_end_try();
 
-    // _zend_bailout leaves gc_protect engaged, disabling GC for the next job
-    gc_protect(false);
+    RAPIRA_GUARD(
+        if (EG(exception)) { zend_clear_exception(); }, bailed, observed_base);
 
-    // teardown can run __destruct; a pending throw surfaces in the next job
-    if (EG(exception)) {
-        zend_clear_exception();
-    }
+    // _zend_bailout leaves gc_protect engaged, disabling GC for the next job.
+    gc_protect(false);
 
     SG(request_info).request_method = NULL;
     SG(request_info).query_string = NULL;
@@ -419,13 +430,85 @@ void rapira_release_temporary_streams(void) {
     ZEND_HASH_FOREACH_END();
 }
 
+extern size_t rapira_rs_raw_body(const char **body);
+extern const char *rapira_rs_authorization(void);
+extern int rapira_rs_activate(void);
+
+// The memory limit keeps this temporary stream off disk.
+// https://github.com/php/php-src/blob/php-8.5.12/main/streams/memory.c
+static void rapira_install_body(void) {
+    const char *body = NULL;
+    size_t len = rapira_rs_raw_body(&body);
+    if (len == 0) {
+        return;
+    }
+    php_stream *stream = php_stream_temp_create(TEMP_STREAM_DEFAULT, len + 1);
+    php_stream_write(stream, body, len);
+    php_stream_rewind(stream);
+    SG(request_info).request_body = stream;
+    SG(read_post_bytes) = (int64_t)len;
+    SG(post_read) = 1;
+}
+
+static void rapira_post_reader(void) {
+    zend_long post_max_size =
+        REQUEST_PARSE_BODY_OPTION_GET(post_max_size, SG(post_max_size));
+    if (post_max_size > 0 && SG(request_info).content_length > post_max_size) {
+        php_error_docref(NULL, E_WARNING,
+                         "POST Content-Length of " ZEND_LONG_FMT
+                         " bytes exceeds the limit of " ZEND_LONG_FMT " bytes",
+                         SG(request_info).content_length, post_max_size);
+        return;
+    }
+    rapira_install_body();
+}
+
+static void rapira_default_post_reader(void) {
+    if (!strcmp(SG(request_info).request_method, "POST") &&
+        !SG(request_info).post_entry) {
+        rapira_post_reader();
+    }
+}
+
+static int rapira_activate(void) {
+    int result = rapira_rs_activate();
+    if (result != SUCCESS) {
+        return result;
+    }
+    if (!SG(request_info).request_body && !SG(request_info).post_entry) {
+        rapira_install_body();
+    }
+    // PHP allocations stay inside the C request activation boundary.
+    php_handle_auth_data(rapira_rs_authorization());
+    return SUCCESS;
+}
+
+// Set process-wide callbacks after MINIT and before interpreter threads start.
+void rapira_register_post_reader(void) {
+    sapi_register_default_post_reader(rapira_default_post_reader);
+    sapi_module.activate = rapira_activate;
+}
+
+// Each ZTS interpreter owns its POST table. Preserve its registered handler.
+// https://github.com/php/php-src/blob/php-8.5.12/main/SAPI.c#L52-L57
+static void rapira_thread_post_reader(void) {
+    sapi_post_entry *entry = zend_hash_str_find_ptr(
+        &SG(known_post_content_types), DEFAULT_POST_CONTENT_TYPE,
+        sizeof(DEFAULT_POST_CONTENT_TYPE) - 1);
+    if (entry) {
+        entry->post_reader = rapira_post_reader;
+    }
+}
+
 // Boot-registered shutdown functions run once, at cycle end.
 ZEND_TLS HashTable *rapira_boot_shutdown_functions = NULL;
 
 int rapira_thread_init(int mode, const char *directory) {
     rapira_job_timeout = -1;
+    rapira_in_handler = false;
     rapira_boot_shutdown_functions = NULL;
     rapira_dispatcher_thread_init(mode);
+    rapira_thread_post_reader();
     SG(options) |= SAPI_OPTION_NO_CHDIR;
     return VCWD_CHDIR(directory);
 }

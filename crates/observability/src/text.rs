@@ -10,66 +10,72 @@ pub struct Build {
 
 pub(crate) const CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 
-type PoolFamily = (
-    &'static str,
-    &'static str,
-    &'static str,
-    fn(&PoolStats) -> u64,
-);
+struct PoolFamily {
+    name: &'static str,
+    kind: &'static str,
+    help: &'static str,
+    value: fn(&PoolStats) -> u64,
+}
 
 /// Fixed pool names and version strings need no label escaping. https://prometheus.io/docs/instrumenting/exposition_formats/#prometheus-text-format
 pub(crate) fn render(pools: &[PoolStats], build: &Build) -> String {
     let mut out = String::new();
     family(&mut out, "rapira_workers", "gauge", "Workers per state.");
     for pool in pools {
-        for (&(_, state), &count) in STATES.iter().zip(&pool.states) {
+        for (state, &count) in STATES.iter().zip(&pool.states) {
             sample(
                 &mut out,
                 "rapira_workers",
-                &[("pool", pool.name), ("state", state)],
+                &[("pool", pool.name), ("state", state.label)],
                 count,
             );
         }
     }
     let families: [PoolFamily; 6] = [
-        (
-            "rapira_workers_configured",
-            "gauge",
-            "The processes value of the pool config.",
-            |p| p.configured as u64,
-        ),
-        (
-            "rapira_requests_total",
-            "counter",
-            "Units of work that the workers finished in any way.",
-            |p| p.requests,
-        ),
-        (
-            "rapira_requests_failed_total",
-            "counter",
-            "Units of work that the host could not complete.",
-            |p| p.failed,
-        ),
-        (
-            "rapira_requests_failed_on_full_queue_total",
-            "counter",
-            "Units of work that found the worker queue full and never entered it.",
-            |p| p.failed_on_full_queue,
-        ),
-        (
-            "rapira_requests_queued",
-            "gauge",
-            "Units of work that wait for a PHP thread.",
-            |p| p.queued,
-        ),
-        (
-            "rapira_script_restarts_total",
-            "counter",
-            "Entrypoint restarts in interpreter threads.",
-            |p| p.script_restarts,
-        ),
+        PoolFamily {
+            name: "rapira_workers_configured",
+            kind: "gauge",
+            help: "The processes value of the pool config.",
+            value: |p| p.configured as u64,
+        },
+        PoolFamily {
+            name: "rapira_requests_total",
+            kind: "counter",
+            help: "Units of work that the workers finished in any way.",
+            value: |p| p.requests,
+        },
+        PoolFamily {
+            name: "rapira_requests_failed_total",
+            kind: "counter",
+            help: "Units of work that the host could not complete.",
+            value: |p| p.failed,
+        },
+        PoolFamily {
+            name: "rapira_requests_failed_on_full_queue_total",
+            kind: "counter",
+            help: "Units of work that found the worker queue full and never entered it.",
+            value: |p| p.failed_on_full_queue,
+        },
+        PoolFamily {
+            name: "rapira_requests_queued",
+            kind: "gauge",
+            help: "Units of work that wait for a PHP thread.",
+            value: |p| p.queued,
+        },
+        PoolFamily {
+            name: "rapira_script_restarts_total",
+            kind: "counter",
+            help: "Entrypoint restarts in interpreter threads.",
+            value: |p| p.script_restarts,
+        },
     ];
-    for (name, kind, help, value) in families {
+    for PoolFamily {
+        name,
+        kind,
+        help,
+        value,
+    } in families
+    {
         family(&mut out, name, kind, help);
         for pool in pools {
             sample(&mut out, name, &[("pool", pool.name)], value(pool));

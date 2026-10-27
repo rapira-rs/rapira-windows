@@ -141,7 +141,11 @@ PHP_MINIT_FUNCTION(rapira) {
     return SUCCESS;
 }
 
+extern void rapira_rs_finish_response(void);
+
 PHP_RSHUTDOWN_FUNCTION(rapira) {
+    php_header();
+    rapira_rs_finish_response();
     (void)type;
     (void)module_number;
     rapira_rs_dispatcher_release();

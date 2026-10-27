@@ -49,6 +49,9 @@ function serve(UnaryCall $call): void
         case 'many-ids':
             $call->respond("\x1a\xc0\xcf\x24" . str_repeat("\x01", 600_000));
             return;
+        case 'large-text':
+            $call->respond("\x0a\x80\x80\x80\x10" . str_repeat('x', 32 * 1024 * 1024));
+            return;
         case 'none':
             return; // never finalized: the plugin loses this call
     }

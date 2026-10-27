@@ -17,10 +17,11 @@ rapira_scoreboard = { workspace = true }
 bytes = { workspace = true }
 http = { workspace = true }
 crossbeam-channel = { workspace = true }
+libmimalloc-sys = { version = "0.1", features = ["extended"] }
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Threading"] }
 
 [build-dependencies]
-bindgen = "0"
+bindgen = { version = "0", default-features = false, features = ["runtime"] }
 rapira_php_build = { workspace = true }
 
 [dev-dependencies]

@@ -12,14 +12,14 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
     unsafe {
         let classes = classes();
         if let Some(ptr) = UNIT.get()
-            && !(*ptr).finalized()
-            && (*ptr).client_closed()
+            && !(*ptr).settled()
+            && (*ptr).cancelled()
         {
             tracing::debug!(target: "rapira", "receive() discarded an unfinalized unit whose client left");
             (*ptr).discard();
         }
         if let Some(ptr) = UNIT.get()
-            && !(*ptr).finalized()
+            && !(*ptr).settled()
         {
             zend::throw_error(classes.busy);
             return false;
@@ -34,15 +34,15 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
         }
         loop {
             let pulled = match mode {
-                RecvMode::Wait(_) if armed => pull_job_try(),
-                RecvMode::Try | RecvMode::Wait(0) => pull_job_try(),
-                RecvMode::Wait(-1) => pull_job_wait(None),
-                RecvMode::Wait(t) => pull_job_wait(Some(Duration::from_micros(t as u64))),
+                RecvMode::Wait(_) if armed => pull_unit_try(),
+                RecvMode::Try | RecvMode::Wait(0) => pull_unit_try(),
+                RecvMode::Wait(-1) => pull_unit_wait(None),
+                RecvMode::Wait(t) => pull_unit_wait(Some(Duration::from_micros(t as u64))),
             };
             match pulled {
-                Pulled::Job(unit) => {
+                Pulled::Unit(unit) => {
                     if unit.cancelled() {
-                        sb_update(Event::Handled(true));
+                        sb_update(Event::Shed);
                         continue;
                     }
                     // SAFETY: plain zend timer bookkeeping; no bailout path.
@@ -64,7 +64,7 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
                     zval_ptr_dtor(&mut obj);
                     zend::throw_exception(
                         rapira_ce_closed_exception,
-                        c"no more work will ever arrive",
+                        c"no more work for this app instance",
                     );
                     return false;
                 }
@@ -116,13 +116,13 @@ pub unsafe extern "C" fn rapira_rs_dispatcher_info(return_value: *mut zval) -> b
         let _ = object_init_ex(return_value, (classes().info)());
         let info = info_from((*return_value).value.obj);
         (*info).pending = pending_depth() as i64;
-        (*info).active = i64::from(UNIT.get().is_some_and(|p| !(*p).finalized()));
+        (*info).active = i64::from(UNIT.get().is_some_and(|p| !(*p).is_finalized()));
         true
     })
 }
 
 thread_local! {
-    static DISPATCHER: Cell<Option<zval>> = const { Cell::new(None) };
+    pub(super) static DISPATCHER: Cell<Option<zval>> = const { Cell::new(None) };
 }
 
 pub(crate) fn forget_dispatcher() {
@@ -137,7 +137,7 @@ pub unsafe extern "C" fn rapira_rs_get_dispatcher(return_value: *mut zval) -> bo
         if crate::rapira_get_mode() != RAPIRA_MODE_DISPATCHER as c_int {
             zend::throw_exception(
                 rapira_ce_no_dispatcher_error,
-                c"nothing dispatches work to this process outside dispatcher mode",
+                c"Dispatcher is only available in Mode::Dispatcher",
             );
             return false;
         }

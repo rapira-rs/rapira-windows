@@ -140,8 +140,7 @@ namespace Rapira {
     function get_dispatcher(): Dispatcher {}
 
     /**
-     * Hand one job to $handler, which reads the superglobals and responds through
-     * echo/header(). False means the worker is draining: exit the loop.
+     * Hand one unit to $handler, which reads the superglobals and responds through echo/header(). False means this app instance gets no more requests: exit the loop.
      * Call it only from the boot script's top level; a call from a shutdown
      * function or a destructor is undefined.
      *

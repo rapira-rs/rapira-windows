@@ -69,23 +69,39 @@ fn a_blocked_native_call_exits_within_the_shutdown_budget() {
 
 #[test]
 fn a_second_ctrl_break_forces_exit_during_drain_and_php_join() {
-    for join in [false, true] {
+    struct Case {
+        name: &'static str,
+        join: bool,
+    }
+    let cases = [
+        Case {
+            name: "second event during plugin drain",
+            join: false,
+        },
+        Case {
+            name: "second event during PHP join",
+            join: true,
+        },
+    ];
+    for case in cases {
         let mut srv = server(30);
-        let mut conn = Conn::open(srv.addr, T).unwrap();
-        if join {
+        let _conn = if case.join {
             assert_eq!(
                 http_get(srv.addr, "/?join=1", T).unwrap(),
                 (200, b"done".to_vec())
             );
             assert!(wait_log_contains(&srv, "lifecycle-join-blocked", T));
+            None
         } else {
+            let mut conn = Conn::open(srv.addr, T).unwrap();
             conn.send(b"GET /?hold=1 HTTP/1.1\r\nHost: e2e\r\n\r\n")
                 .unwrap();
             assert!(wait_log_contains(&srv, "lifecycle-hold-entered", T));
-        }
+            Some(conn)
+        };
         send_ctrl_break(srv.pid());
-        assert!(wait_log_contains(&srv, DRAINING, T));
-        if join {
+        assert!(wait_log_contains(&srv, DRAINING, T), "{}", case.name);
+        if case.join {
             assert!(wait_log_contains(
                 &srv,
                 "drained cleanly; accept loop stopped",

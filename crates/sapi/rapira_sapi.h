@@ -180,11 +180,13 @@ void rapira_register_classes(void);
 
 // The Dispatcher and DispatcherInfo method bodies; a plugin's method shells
 // call them.
-void rapira_sapi_receive(INTERNAL_FUNCTION_PARAMETERS);
-void rapira_sapi_try_receive(INTERNAL_FUNCTION_PARAMETERS);
-void rapira_sapi_get_info(INTERNAL_FUNCTION_PARAMETERS);
-void rapira_sapi_pending_count(INTERNAL_FUNCTION_PARAMETERS);
-void rapira_sapi_active_count(INTERNAL_FUNCTION_PARAMETERS);
+ZEND_FUNCTION(rapira_sapi_receive);
+ZEND_FUNCTION(rapira_sapi_try_receive);
+ZEND_FUNCTION(rapira_sapi_get_info);
+ZEND_FUNCTION(rapira_sapi_pending_count);
+ZEND_FUNCTION(rapira_sapi_active_count);
+ZEND_FUNCTION(rapira_sapi_dispatcher_construct);
+ZEND_FUNCTION(rapira_sapi_host_created);
 
 // Rust sets an exception before it returns false.
 #define RAPIRA_RETURN_THROWS_UNLESS(call, what)                                \

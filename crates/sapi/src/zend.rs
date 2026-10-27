@@ -265,6 +265,12 @@ pub enum Key {
     Index(zend_ulong),
 }
 
+/// One entry of a HashTable, with its value dereferenced.
+pub struct Entry {
+    pub key: Key,
+    pub val: *mut zval,
+}
+
 /// The position advances before each result. The caller must keep the table unchanged.
 pub struct Entries {
     ht: *mut HashTable,
@@ -280,7 +286,7 @@ pub unsafe fn entries(ht: *mut HashTable) -> Entries {
 }
 
 impl Iterator for Entries {
-    type Item = (Key, *mut zval);
+    type Item = Entry;
 
     fn next(&mut self) -> Option<Self::Item> {
         unsafe {
@@ -297,7 +303,10 @@ impl Iterator for Entries {
             } else {
                 Key::Index(nkey)
             };
-            Some((key, deref(entry)))
+            Some(Entry {
+                key,
+                val: deref(entry),
+            })
         }
     }
 }

@@ -24,7 +24,7 @@ pub use php::rapira_http_register_classes;
 
 pub(crate) struct Config {
     pub listen: SocketAddr,
-    pub server_name: String,
+    pub server_name: &'static str,
     pub server_port: u16,
     pub max_body_size: usize,
     pub unsafe_field_names: UnsafeFieldNames,
@@ -76,6 +76,8 @@ impl Plugin for Server {
     }
 
     fn prepare(&mut self) -> Result<()> {
+        php::set_server_identity(self.config.server_name, self.config.server_port);
+        php::set_sendfile_root(self.config.sendfile_root.clone());
         if let Some(uploads) = &self.config.uploads {
             multipart::sweep_spool_dirs(&uploads.dir);
         }
@@ -90,7 +92,6 @@ impl Plugin for Server {
         let Some(prepared) = prepared else {
             return Err(anyhow!("http listener was not prepared"));
         };
-        php::set_sendfile_root(config.sendfile_root.clone());
-        serve::serve(worker.sink.clone(), config, prepared, worker)
+        serve::serve(config, prepared, worker)
     }
 }

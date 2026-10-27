@@ -8,8 +8,14 @@ pub struct Php {
     pub includes: Vec<String>,
     pub lib_dir: PathBuf,
     pub lib_name: String,
-    pub version: (u32, u32),
+    pub version: PhpVersion,
     pub debug: bool,
+}
+
+#[derive(PartialEq, PartialOrd)]
+pub struct PhpVersion {
+    pub major: u32,
+    pub minor: u32,
 }
 
 pub fn discover() -> anyhow::Result<Php> {
@@ -27,8 +33,20 @@ pub fn discover() -> anyhow::Result<Php> {
             .trim()
             .parse()?)
     };
-    let version = (number("PHP_MAJOR_VERSION")?, number("PHP_MINOR_VERSION")?);
-    anyhow::ensure!(matches!(version, (8, 4 | 5)), "PHP 8.4 or 8.5 is required");
+    let version = PhpVersion {
+        major: number("PHP_MAJOR_VERSION")?,
+        minor: number("PHP_MINOR_VERSION")?,
+    };
+    anyhow::ensure!(
+        matches!(
+            version,
+            PhpVersion {
+                major: 8,
+                minor: 4 | 5
+            }
+        ),
+        "PHP 8.4 or 8.5 is required"
+    );
     let lib_dir = root.join("lib");
     let debug = lib_dir.join("php8ts_debug.lib").is_file();
     let lib_name = if debug { "php8ts_debug" } else { "php8ts" }.to_string();

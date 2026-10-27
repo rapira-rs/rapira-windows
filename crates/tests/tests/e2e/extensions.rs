@@ -16,11 +16,14 @@ fn rng_draw(body: &str) -> (String, String) {
     (pid.to_owned(), first.to_owned())
 }
 
-/// No two workers may emit identical first draws; the cached draw also pins that the entrypoint top level runs once per worker (random_bytes() never uses OpenSSL).
-#[test]
-fn interpreter_threads_have_distinct_openssl_draws() {
-    let srv = spawn_with_config("extensions/openssl-rng-worker.php", 4, "");
+/// Each interpreter keeps its first draw and has a distinct value.
+fn assert_distinct_first_draws(fixture: &str) {
+    let srv = spawn_with_config(fixture, 4, "");
     let workers = wait_workers(&srv, Duration::from_secs(20), "4 workers", |p| p.len() == 4);
+    if http_get(srv.addr, "/", REQ).expect("GET /").1 == b"skip" {
+        tests::assert_skip_allowed(fixture);
+        return;
+    }
 
     let mut per_pid: HashMap<String, String> = HashMap::new();
     for _ in 0..5 {
@@ -60,6 +63,16 @@ fn interpreter_threads_have_distinct_openssl_draws() {
         per_pid.len(),
         "distinct workers must draw distinct first bytes (per pid: {per_pid:?})"
     );
+}
+
+#[test]
+fn interpreter_threads_have_distinct_openssl_draws() {
+    assert_distinct_first_draws("extensions/openssl-rng-worker.php");
+}
+
+#[test]
+fn interpreter_threads_have_distinct_sodium_draws() {
+    assert_distinct_first_draws("extensions/sodium-rng-worker.php");
 }
 
 fn browscap_ini() -> String {

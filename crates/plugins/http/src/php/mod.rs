@@ -9,9 +9,7 @@ use hyper::body::Bytes;
 use rapira_sapi::callbacks::{MAX_BUFFERED_BODY, guard};
 use rapira_sapi::exchange::{AddrOwned, add_list, build_address, header_key, path_bytes};
 use rapira_sapi::scoreboard::{Event, sb_update};
-use rapira_sapi::types::{
-    Addr, Body, Context, FormField, Frame, Request, ResponseHead, Tls, UploadedFile,
-};
+use rapira_sapi::types::{Addr, Body, FormField, Frame, Request, ResponseHead, Tls, UploadedFile};
 use rapira_sapi::work::{DispatcherClasses, Held, release};
 use rapira_sapi::{
     HashTable, IS_ARRAY, IS_STRING, add_next_index_object, object_init_ex, rapira_array_init,
@@ -21,6 +19,7 @@ use rapira_sapi::{
 use tokio::sync::mpsc::{Sender, error::TrySendError};
 
 mod headers;
+mod info;
 mod request;
 mod respond;
 mod sendfile;
@@ -28,6 +27,7 @@ mod sendfile;
 mod tests;
 mod values;
 
+pub(crate) use info::set_server_identity;
 pub(crate) use sendfile::set_sendfile_root;
 
 // Class entries of the http stub; rapira_http_register_classes assigns them in MINIT (rapira_http.h).
@@ -49,7 +49,7 @@ unsafe extern "C" {
 /// Mirrors `rapira_exchange_obj` in rapira_http.h. The C fields sit before `std`.
 #[repr(C)]
 pub struct ExchangeObj {
-    pub job: *mut c_void,
+    pub unit: *mut c_void,
     pub request: zval,
     pub std: zend_object,
 }
@@ -58,7 +58,7 @@ pub static DISPATCHER_CLASSES: DispatcherClasses = DispatcherClasses {
     dispatcher: || unsafe { rapira_ce_internal_http_dispatcher },
     info: || unsafe { rapira_ce_internal_http_dispatcher_info },
     unit: || unsafe { rapira_ce_internal_http_exchange },
-    busy: c"receive() while a Rapira\\Http\\Exchange is unfinalized; finalize it first",
+    busy: c"this worker holds one unit at a time, and its Rapira\\Http\\Exchange is unfinalized; finalize it first",
 };
 
 /// The head locks on the first head or body write: a body chunk commits an implicit 200 first.
@@ -174,9 +174,10 @@ impl RequestView {
 }
 
 pub struct ExchangeState {
-    // body above ctx: declaration drop order unlinks the spool files before the frame sender closes
+    // Drop spool files before the frame sender closes.
     body: BodyState,
-    ctx: Context,
+    req: Request,
+    sender: Option<Sender<Frame>>,
     /// Filled by the first `getRequest()`.
     view: Option<RequestView>,
     stage: Stage,
@@ -193,12 +194,8 @@ pub struct ExchangeState {
 }
 
 impl ExchangeState {
-    pub(crate) fn new(req: Request, tx: Sender<Frame>) -> Self {
-        let mut ctx = Context::new(req, tx, None);
-        let taken = std::mem::replace(
-            &mut ctx.req.body,
-            Body::Raw(std::io::Cursor::new(Vec::new())),
-        );
+    pub(crate) fn new(mut req: Request, tx: Sender<Frame>) -> Self {
+        let taken = std::mem::replace(&mut req.body, Body::Raw(std::io::Cursor::new(Vec::new())));
         let body = match taken {
             Body::Raw(cursor) => BodyState::Raw(cursor.into_inner()),
             Body::Multipart(mb) => BodyState::Multipart {
@@ -221,11 +218,12 @@ impl ExchangeState {
                     .collect(),
             },
         };
-        let bodiless = ctx.req.method.eq_ignore_ascii_case("HEAD");
+        let bodiless = req.method == "HEAD";
 
         Self {
-            ctx,
             body,
+            req,
+            sender: Some(tx),
             view: None,
             stage: Stage::Open,
             head_sent: false,
@@ -240,14 +238,14 @@ impl ExchangeState {
 }
 
 impl Held for ExchangeState {
-    fn finalized(&self) -> bool {
+    fn settled(&self) -> bool {
         self.stage == Stage::Finalized
     }
 
-    fn client_closed(&self) -> bool {
+    fn cancelled(&self) -> bool {
         self.discarded
             || (self.stage != Stage::Finalized
-                && self.ctx.sender.as_ref().is_some_and(Sender::is_closed))
+                && self.sender.as_ref().is_some_and(Sender::is_closed))
     }
 
     fn discard(&mut self) {

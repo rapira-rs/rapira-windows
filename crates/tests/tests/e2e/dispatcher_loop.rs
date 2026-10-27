@@ -255,7 +255,7 @@ fn receive_while_unfinalized_throws() -> anyhow::Result<()> {
     let (status, body) = verbs_probe("/?probe=busy")?;
     assert_eq!(status, 200);
     assert!(
-        body.contains("busy:receive() while a Rapira\\Http\\Exchange is unfinalized"),
+        body.contains("busy:this worker holds one unit at a time, and its Rapira\\Http\\Exchange is unfinalized"),
         "single-flight error must surface: {body:?}"
     );
     Ok(())
@@ -871,6 +871,60 @@ fn get_info_counts_the_outstanding_unit() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn get_info_reports_server_identity_before_the_first_receive() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        extra: &'static str,
+        server: &'static str,
+        port: Option<u16>,
+    }
+    let cases = [
+        Case {
+            name: "listen defaults",
+            extra: "",
+            server: "localhost",
+            port: None,
+        },
+        Case {
+            name: "configured identity",
+            extra: "server_name = \"app.example\"\nserver_port = 8443",
+            server: "app.example",
+            port: Some(8443),
+        },
+    ];
+    for case in cases {
+        let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/identity-worker.php"))
+            .http_extra(case.extra)
+            .processes(8, 1)
+            .json_log()
+            .spawn();
+        let want = format!(
+            "name={} port={}",
+            case.server,
+            case.port.unwrap_or(srv.addr.port())
+        );
+        let booted = poll(READ, || {
+            let records = server_log::app_contexts(&srv.log_file(), "identity");
+            (records.len() == 8).then_some(records)
+        })
+        .context("every interpreter reports its boot identity")?;
+        assert!(
+            booted.iter().all(|record| record.contains(&want)),
+            "{}: {booted:?}",
+            case.name
+        );
+        let response = drain_resp(submit(srv.addr, req("/"))?);
+        assert_eq!(
+            (response.status(), response.body_string()),
+            (200, want),
+            "{}",
+            case.name
+        );
+    }
+    Ok(())
+}
+
 // ---- streaming (stream-worker.php): the frame protocol past the buffered one-shot
 
 /// A dispatcher pool over stream-worker.php with a JSON log, and the frames of one request to `query`.
@@ -1016,6 +1070,21 @@ fn declared_content_length_rides_the_head_frame() -> anyhow::Result<()> {
 
 // ---- sendFile (stream-worker.php): plugin-streamed files
 
+#[test]
+fn an_exchange_passed_to_a_method_keeps_its_state() -> anyhow::Result<()> {
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture("dispatcher/method-exchange-worker.php"),
+    )
+    .spawn();
+    for _ in 0..3 {
+        let response = drain_resp(submit(srv.addr, req("/"))?);
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.body_string(), "cancelled=false finalized=false");
+    }
+    Ok(())
+}
+
 /// A dispatcher pool over stream-worker.php whose sendfile root is the scratch dir.
 fn sendfile_server() -> Server {
     Spawn::http(Mode::Dispatcher, fixture("dispatcher/stream-worker.php"))
@@ -1083,6 +1152,48 @@ fn sendfile_missing_file_still_answers_404() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn sendfile_past_the_declared_length_writes_nothing() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        query: &'static str,
+        body: &'static [u8],
+    }
+    let srv = sendfile_server();
+    let path = sendfile_payload(&srv);
+    let cases = [
+        Case {
+            name: "whole file exceeds length",
+            query: "",
+            body: b"fixed",
+        },
+        Case {
+            name: "slice exceeds length",
+            query: "&offset=2&length=6",
+            body: b"fixed",
+        },
+        Case {
+            name: "slice fits length",
+            query: "&offset=2&length=5",
+            body: b"cdefg",
+        },
+        Case {
+            name: "remaining file fits length",
+            query: "&offset=21",
+            body: b"vwxyz",
+        },
+    ];
+    for case in cases {
+        let target = format!("/?probe=sendfile-over-cl{}", case.query);
+        let resp = drain_resp(submit(srv.addr, with_path_header(&target, &path))?);
+        assert_eq!(resp.status(), 200, "{}", case.name);
+        assert_eq!(resp.content_length, Some(5), "{}", case.name);
+        assert_eq!(resp.body, case.body, "{}", case.name);
+        assert!(resp.ended && !resp.truncated, "{}", case.name);
+    }
+    Ok(())
+}
+
 /// A path outside the configured root is not sendable, symlinks resolved.
 #[test]
 fn sendfile_outside_the_root_is_denied() -> anyhow::Result<()> {
@@ -1098,7 +1209,7 @@ fn sendfile_outside_the_root_is_denied() -> anyhow::Result<()> {
 }
 
 /// sendFile rejects a directory, an offset or a slice past the end of the file, and a symlink out of the root before anything is written, so the handler answers 403.
-/// A symlink inside the root stays sendable, and a slice longer than one 64 KiB plugin read keeps its offset across the reads.
+/// A slice longer than two 256 KiB reads keeps its offset across the reads.
 #[test]
 fn sendfile_validates_the_path_and_the_slice() -> anyhow::Result<()> {
     struct Case {
@@ -1111,7 +1222,7 @@ fn sendfile_validates_the_path_and_the_slice() -> anyhow::Result<()> {
     let srv = sendfile_server();
     let payload = sendfile_payload(&srv);
     // A prime period, so a read at a wrong offset returns other bytes.
-    let pattern: Vec<u8> = (0..100 * 1024).map(|i| (i % 251) as u8).collect();
+    let pattern: Vec<u8> = (0..600 * 1024).map(|i| (i % 251) as u8).collect();
     let patterned = srv.dir.join("patterned");
     std::fs::write(&patterned, &pattern)?;
     let link_in = srv.dir.join("link-in");
@@ -1155,11 +1266,11 @@ fn sendfile_validates_the_path_and_the_slice() -> anyhow::Result<()> {
             body: b"abcdefghijklmnopqrstuvwxyz".to_vec(),
         },
         Case {
-            name: "slice over two plugin reads",
+            name: "slice over three plugin reads",
             path: patterned,
-            query: "&offset=1024&length=81920",
+            query: "&offset=1024&length=540672",
             status: 200,
-            body: pattern[1024..1024 + 80 * 1024].to_vec(),
+            body: pattern[1024..1024 + 528 * 1024].to_vec(),
         },
     ];
 

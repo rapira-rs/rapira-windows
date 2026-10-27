@@ -1,5 +1,5 @@
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -7,7 +7,8 @@ use std::time::Duration;
 use http::header::CONTENT_TYPE;
 use http_body_util::BodyExt;
 use hyper::body::{Body, Bytes, Frame as BodyFrame, Incoming, SizeHint};
-use rapira_sapi::work::{Refused, Sink};
+use rapira_sapi::types::ResponseHead;
+use rapira_sapi::work::{Intake, Refused};
 use rapira_sapi::{Addr, Frame, Request};
 use tokio::time::timeout;
 
@@ -18,15 +19,16 @@ use crate::{Config, Exchange, bridge, multipart, request};
 
 pub(crate) struct Shared {
     pub cfg: Config,
-    pub intake: Sink,
+    pub intake: Intake,
     pub inflight: Arc<AtomicUsize>,
+    pub closing: AtomicBool,
 }
 
 impl From<Refused> for Rejection {
     fn from(e: Refused) -> Self {
         Self {
             status: match e {
-                Refused::Saturated => http::StatusCode::SERVICE_UNAVAILABLE,
+                Refused::Saturated | Refused::OverBudget => http::StatusCode::SERVICE_UNAVAILABLE,
                 Refused::Stopped => http::StatusCode::INTERNAL_SERVER_ERROR,
             },
             reason: e.to_string(),
@@ -60,9 +62,13 @@ impl Drop for InflightReqCount {
 pub(crate) struct RespBody {
     kind: BodyKind,
     guard: Arc<InflightReqCount>,
-    /// Declared body bytes still to pass through, with the connection state that holds the flush count.
     /// Armed by [`respond`] for the final response body.
-    transport: Option<(u64, tokio::sync::watch::Receiver<bridge::ConnectionState>)>,
+    transport: Option<Declared>,
+}
+
+struct Declared {
+    remaining: u64,
+    closed: tokio::sync::watch::Receiver<bridge::ConnectionState>,
 }
 
 #[expect(
@@ -97,7 +103,7 @@ impl Body for RespBody {
             BodyKind::Empty => Poll::Ready(None),
             BodyKind::Boxed(b) => Pin::new(b).poll_frame(cx),
         };
-        if let Some((remaining, closed)) = &mut this.transport
+        if let Some(Declared { remaining, closed }) = &mut this.transport
             && let Poll::Ready(Some(Ok(frame))) = &poll
             && let Some(data) = frame.data_ref()
         {
@@ -133,13 +139,23 @@ pub(crate) async fn respond(
 ) -> http::Response<RespBody> {
     let closed = handler.closed.clone();
     let method = req.method().clone();
+    let shared = Arc::clone(&handler.shared);
     let mut response = handle(handler, req).await;
+    if shared.closing.load(Ordering::Acquire) {
+        response.headers_mut().insert(
+            http::header::CONNECTION,
+            http::HeaderValue::from_static("close"),
+        );
+    }
     if let Some(length) = framed_length(&method, &response) {
         let body = response.body_mut();
         if length == 0 {
             body.guard.end_flush.get_or_init(|| closed.borrow().flushes);
         } else {
-            body.transport = Some((length, closed));
+            body.transport = Some(Declared {
+                remaining: length,
+                closed,
+            });
         }
     }
     response
@@ -241,6 +257,12 @@ impl Conn {
     }
 }
 
+struct ReplyHead {
+    head: ResponseHead,
+    content_length: Option<u64>,
+    bodiless: bool,
+}
+
 async fn serve_php(
     shared: &Shared,
     closed: &tokio::sync::watch::Receiver<bridge::ConnectionState>,
@@ -292,7 +314,11 @@ async fn serve_php(
         }
     };
 
-    let (status, headers, content_length, bodiless) = loop {
+    let ReplyHead {
+        head: ResponseHead { status, headers },
+        content_length,
+        bodiless,
+    } = loop {
         match reply.recv().await {
             None => {
                 tracing::error!(target: "http", "php worker died before a response head");
@@ -305,7 +331,13 @@ async fn serve_php(
                 head,
                 content_length,
                 bodiless,
-            }) => break (head.status, head.headers, content_length, bodiless),
+            }) => {
+                break ReplyHead {
+                    head,
+                    content_length,
+                    bodiless,
+                };
+            }
             Some(Frame::End { .. }) => {
                 tracing::error!(target: "http", "php produced no response head");
                 return refused(http::StatusCode::BAD_GATEWAY, guard);
@@ -358,7 +390,8 @@ async fn serve_php(
         transport: None,
     });
     *res.status_mut() = status;
-    *res.headers_mut() = response_headers(headers, declared_cl);
+    let header_cl = content_length.filter(|_| !matches!(status.as_u16(), 204 | 304));
+    *res.headers_mut() = response_headers(headers, header_cl);
     res
 }
 
@@ -367,17 +400,22 @@ async fn submit(
     shared: &Shared,
     request: Request,
 ) -> Result<tokio::sync::mpsc::Receiver<Frame>, Rejection> {
+    let bytes = request.content_length.max(0) as usize;
     let request = parse_multipart(request, shared.cfg.uploads.as_ref()).await?;
-    let (exchange, reply) = Exchange::new(
+    let (tx, reply) = tokio::sync::mpsc::channel(crate::exchange::FRAME_CAP);
+    let exchange = Exchange::new(
         request,
+        tx,
         shared
             .cfg
             .superglobals
             .then_some(shared.cfg.entrypoint.as_str()),
     );
-    shared.intake.submit(Box::new(exchange)).await?;
+    shared.intake.submit(Box::new(exchange), bytes).await?;
     Ok(reply)
 }
+
+const INLINE_PARSE_MAX: usize = 256 << 10;
 
 /// Parses a multipart body before submit, so a rejected body never reaches the pending and active counters. `limits` is None outside dispatcher mode.
 async fn parse_multipart(
@@ -410,6 +448,11 @@ async fn parse_multipart(
         return Ok(req);
     }
     let boundary = multipart::boundary(content_type)?;
+    if raw.get_ref().len() <= INLINE_PARSE_MAX {
+        let parsed = multipart::parse(raw.get_ref(), &boundary, limits)?;
+        req.body = rapira_sapi::types::Body::Multipart(parsed);
+        return Ok(req);
+    }
     let bytes = std::mem::take(raw.get_mut());
     let limits = limits.clone();
     let parsed = tokio::task::spawn_blocking(move || multipart::parse(&bytes, &boundary, &limits))

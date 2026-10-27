@@ -262,6 +262,178 @@ async fn each_protocol_reaches_php_over_the_wire() {
     stop(on_tcp).await;
 }
 
+#[tokio::test]
+async fn reply_compression_follows_the_client() {
+    struct Case<'a> {
+        name: &'static str,
+        wire: Wire,
+        method: Method,
+        path: &'a str,
+        headers: Fields,
+        body: &'a [u8],
+        grpc_status: Option<&'static str>,
+        compressed: bool,
+        vary: Option<&'static str>,
+    }
+    let large = [&[0x0a, 0x80, 0x10][..], &[b'a'; 2048]].concat();
+    let large_frame = envelope(&large);
+    // The same protobuf message in a gzip envelope from the core regression test.
+    let large_gzip: &[u8] = b"\x01\x00\x00\x00\x25\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff\xe3\x6a\x10\x48\x1c\x05\xa3\x60\x14\x8c\x82\x51\x30\x0a\x46\xc1\x88\x03\x00\x93\x5d\xf0\xa7\x03\x08\x00\x00";
+    let large_json = format!(r#"{{"text":"{}"}}"#, "a".repeat(2048));
+    let get = format!(
+        "/rapira.test.v1.EchoService/Get?encoding=json&message=%7B%22text%22%3A%22{}%22%7D",
+        "a".repeat(2048)
+    );
+    let cases = [
+        Case {
+            name: "grpc accepts gzip with a plain request",
+            wire: Wire::H2,
+            method: Method::POST,
+            path: ECHO_PATH,
+            headers: &[
+                ("content-type", "application/grpc"),
+                ("te", "trailers"),
+                ("grpc-accept-encoding", "gzip"),
+            ],
+            body: &large_frame,
+            grpc_status: Some("0"),
+            compressed: false,
+            vary: None,
+        },
+        Case {
+            name: "grpc gzip request",
+            wire: Wire::H2,
+            method: Method::POST,
+            path: ECHO_PATH,
+            headers: &[
+                ("content-type", "application/grpc"),
+                ("te", "trailers"),
+                ("grpc-encoding", "gzip"),
+                ("grpc-accept-encoding", "gzip"),
+            ],
+            body: large_gzip,
+            grpc_status: Some("0"),
+            compressed: true,
+            vary: None,
+        },
+        Case {
+            name: "grpc-web identity request",
+            wire: Wire::Http1,
+            method: Method::POST,
+            path: ECHO_PATH,
+            headers: &[
+                ("content-type", "application/grpc-web+proto"),
+                ("grpc-encoding", "identity"),
+                ("grpc-accept-encoding", "gzip"),
+            ],
+            body: &large_frame,
+            grpc_status: Some("0"),
+            compressed: false,
+            vary: None,
+        },
+        Case {
+            name: "grpc-web gzip request",
+            wire: Wire::Http1,
+            method: Method::POST,
+            path: ECHO_PATH,
+            headers: &[
+                ("content-type", "application/grpc-web+proto"),
+                ("grpc-encoding", "gzip"),
+                ("grpc-accept-encoding", "gzip"),
+            ],
+            body: large_gzip,
+            grpc_status: Some("0"),
+            compressed: true,
+            vary: None,
+        },
+        Case {
+            name: "Connect proto accepts gzip",
+            wire: Wire::Http1,
+            method: Method::POST,
+            path: ECHO_PATH,
+            headers: &[
+                ("content-type", "application/proto"),
+                ("accept-encoding", "gzip"),
+            ],
+            body: &large,
+            grpc_status: None,
+            compressed: true,
+            vary: Some("accept-encoding"),
+        },
+        Case {
+            name: "Connect JSON without gzip",
+            wire: Wire::Http1,
+            method: Method::POST,
+            path: ECHO_PATH,
+            headers: &[("content-type", "application/json")],
+            body: large_json.as_bytes(),
+            grpc_status: None,
+            compressed: false,
+            vary: Some("accept-encoding"),
+        },
+        Case {
+            name: "Connect GET accepts gzip",
+            wire: Wire::Http1,
+            method: Method::GET,
+            path: &get,
+            headers: &[("accept-encoding", "gzip")],
+            body: b"",
+            grpc_status: None,
+            compressed: true,
+            vary: Some("accept-encoding"),
+        },
+        Case {
+            name: "Connect reply below compression threshold",
+            wire: Wire::Http1,
+            method: Method::POST,
+            path: ECHO_PATH,
+            headers: &[
+                ("content-type", "application/proto"),
+                ("accept-encoding", "gzip"),
+            ],
+            body: HI,
+            grpc_status: None,
+            compressed: false,
+            vary: Some("accept-encoding"),
+        },
+    ];
+    let srv = Spawn::grpc(wire_worker()).spawn();
+    for case in cases {
+        let mut conn = Conn::open(&srv.addr, case.wire).await.expect(case.name);
+        let got = conn
+            .send(case.method, case.path, case.headers, case.body)
+            .await
+            .expect(case.name);
+        assert_eq!(got.status, 200, "{}", case.name);
+        let content_type = case
+            .headers
+            .iter()
+            .find(|(name, _)| *name == "content-type")
+            .map_or("", |(_, value)| *value);
+        let web = (content_type == "application/grpc-web+proto").then(|| web_trailers(&got.body));
+        let status = match &web {
+            Some(web) => web.get("grpc-status").and_then(|v| v.to_str().ok()),
+            None => got.grpc_status(),
+        };
+        assert_eq!(status, case.grpc_status, "{}", case.name);
+        let compressed = if content_type.starts_with("application/grpc") {
+            got.body.first() == Some(&1)
+        } else {
+            got.headers
+                .get("content-encoding")
+                .is_some_and(|v| v == "gzip")
+        };
+        assert_eq!(compressed, case.compressed, "{}", case.name);
+        assert_eq!(
+            got.headers.get("vary").map(|v| v.as_bytes()),
+            case.vary.map(str::as_bytes),
+            "{}",
+            case.name
+        );
+    }
+    stop(srv).await;
+}
+
 /// Sources: PROTOCOL-HTTP2 and PROTOCOL-WEB (the status fields, `grpc-status-details-bin`, Response-Headers without a status field), the Connect protocol (error codes, unpadded base64 detail values, `trailer-` fields of a unary response). connectrpc adds `type.googleapis.com/` to a bare name, so gRPC keeps a type URL whole and Connect sends the bare name.
 #[tokio::test]
 async fn statuses_and_metadata_encode_per_protocol() {
@@ -861,6 +1033,74 @@ async fn drain_waits_for_calls_within_the_grace() {
                 "{}: {error:?}",
                 case.name
             ),
+        }
+    }
+}
+
+#[tokio::test]
+async fn drain_reports_a_cut_response_body() {
+    struct Case {
+        name: &'static str,
+        wire: Wire,
+        headers: Fields,
+        request: &'static [u8],
+    }
+    let cases = [
+        Case {
+            name: "unread Connect body over HTTP/1.1",
+            wire: Wire::Http1,
+            headers: &[
+                ("content-type", "application/proto"),
+                ("connect-protocol-version", "1"),
+                ("x-reply", "large-text"),
+            ],
+            request: HI,
+        },
+        Case {
+            name: "unread gRPC body over HTTP/2",
+            wire: Wire::H2,
+            headers: &[
+                ("content-type", "application/grpc"),
+                ("te", "trailers"),
+                ("x-reply", "large-text"),
+            ],
+            request: HI_FRAME,
+        },
+    ];
+    for case in cases {
+        let srv = Spawn::grpc(wire_worker())
+            .toml("[supervisor]\nprocess_control_timeout_secs = 4")
+            .json_log()
+            .spawn();
+        let mut conn = Conn::open(&listen(&srv), case.wire).await.expect("connect");
+        let response = conn
+            .request(Method::POST, ECHO_PATH, case.headers, case.request)
+            .await
+            .unwrap_or_else(|e| panic!("{}: {e:#}", case.name));
+        assert_eq!(response.status(), 200, "{}", case.name);
+
+        // Hold the body unread until shutdown completes.
+        send_ctrl_break(srv.pid());
+        let (srv, status) = tokio::task::spawn_blocking(move || {
+            let mut srv = srv;
+            let status = srv.wait_exit(super::harness::STOP_BUDGET);
+            (srv, status)
+        })
+        .await
+        .unwrap();
+        let error = plugin_error(&srv);
+        if matches!(case.wire, Wire::Http1) && status.is_some_and(|s| s.success()) {
+            let body =
+                tokio::time::timeout(Duration::from_secs(10), response.into_body().collect())
+                    .await
+                    .expect("response after shutdown")
+                    .expect("a clean exit requires a complete response")
+                    .to_bytes();
+            assert_eq!(body.len(), 32 * 1024 * 1024 + 5, "{}", case.name);
+            assert!(error.is_none(), "{}: {error:?}", case.name);
+        } else {
+            super::harness::assert_exit_code(status, 1, &srv);
+            assert!(error.is_some(), "{}: missing drain error", case.name);
         }
     }
 }

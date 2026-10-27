@@ -232,6 +232,7 @@ fn spawn_attempt(
             "ffi",
             "gettext",
             "openssl",
+            "sodium",
             "pdo_sqlite",
             "sqlite3",
             "intl",

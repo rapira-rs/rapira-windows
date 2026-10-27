@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use http::Method;
@@ -5,9 +6,9 @@ use http::header::{CONTENT_TYPE, HeaderName, HeaderValue};
 use rapira_sapi::Mode;
 use serde_json::Value;
 use tests::wire::submit;
-use tests::{drain, drain_resp, drain_resp_deadline, fixture, req, server_log};
+use tests::{drain, drain_resp, drain_resp_deadline, fixture, poll, req, server_log};
 
-use crate::harness::{Spawn, slot_line};
+use crate::harness::{Spawn, free_port, http_get, slot_line};
 
 /// Superglobals are rebuilt per job over the resident loop: query state must not leak.
 #[test]
@@ -180,6 +181,7 @@ fn post_location_redirects_303_in_classic_mode() -> anyhow::Result<()> {
 fn queued_client_gone_is_discarded_before_handout() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("worker/held-worker.php"))
         .json_log()
+        .http_pool("max_requests = 1")
         .spawn();
 
     let rx_a = submit(srv.addr, req("/"))?;
@@ -193,8 +195,84 @@ fn queued_client_gone_is_discarded_before_handout() -> anyhow::Result<()> {
 
     let resp = drain_resp(submit(srv.addr, req("/?probe=count"))?);
     assert_eq!(resp.body_string(), "runs=1");
-    // A unit discarded at handout counts as handled with an error, so this line shows that B reached the intake.
+    // A cancelled queued unit counts as shed and does not use the request quota.
     slot_line(&srv, "handled 3 errors 1 ");
+    Ok(())
+}
+
+#[test]
+fn waiting_bodies_share_a_byte_budget() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        cancel: bool,
+        runs: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "dequeued body releases its budget",
+            cancel: false,
+            runs: "runs=2",
+        },
+        Case {
+            name: "cancelled body keeps its budget until dequeue",
+            cancel: true,
+            runs: "runs=1",
+        },
+    ];
+    for case in cases {
+        let observability = SocketAddr::from(([127, 0, 0, 1], free_port()));
+        let srv = Spawn::http(Mode::Worker, fixture("worker/held-worker.php"))
+            .json_log()
+            .http_extra("max_body_size_mb = 40")
+            .toml(&format!(
+                "[observability]\nlisten = \"{observability}\"\n[observability.metrics]"
+            ))
+            .spawn();
+        let release = srv.dir.join("release");
+        let path = format!("/?release={}", release.to_string_lossy().replace('\\', "/"));
+        let post = |size: usize| {
+            let mut request = req(&path);
+            *request.method_mut() = Method::POST;
+            *request.body_mut() = vec![b'x'; size];
+            request
+        };
+        let active = submit(srv.addr, req(&path))?;
+        server_log::wait_app_record(&srv.log_file(), "held");
+        let queued = submit(srv.addr, post(40 << 20))?;
+        poll(Duration::from_secs(10), || {
+            let (_, body) = http_get(observability, "/metrics", Duration::from_secs(10)).ok()?;
+            let samples = tests::metrics::samples(&String::from_utf8_lossy(&body));
+            (samples.get(r#"rapira_requests_queued{pool="http"}"#) == Some(&1)).then_some(())
+        })
+        .expect("the large body must wait in the queue");
+        let queued = if case.cancel {
+            drop(queued);
+            None
+        } else {
+            Some(queued)
+        };
+        let mut refused = submit(srv.addr, post(30 << 20))?;
+        let response = drain_resp_deadline(&mut refused, Instant::now() + Duration::from_secs(10))
+            .expect("the budget refusal must precede the queue timeout");
+        assert_eq!(response.status(), 503, "{}", case.name);
+        std::fs::write(&release, "")?;
+        assert_eq!(drain_resp(active).body_string(), "done");
+        if let Some(queued) = queued {
+            assert_eq!(drain_resp(queued).body_string(), "done");
+        }
+        assert_eq!(
+            drain_resp(submit(srv.addr, req("/?probe=count"))?).body_string(),
+            case.runs,
+            "{}",
+            case.name
+        );
+        assert_eq!(
+            drain_resp(submit(srv.addr, post(40 << 20))?).body_string(),
+            "done",
+            "{}",
+            case.name
+        );
+    }
     Ok(())
 }
 

@@ -1,10 +1,10 @@
-use std::{ops::Deref, path::Path};
+use std::{ops::Deref, path::Path, time::Duration};
 
 use http::Method;
 use http::header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, HeaderValue, SET_COOKIE};
 use rapira_sapi::Mode;
 use tests::wire::submit;
-use tests::{Resp, drain, drain_resp, fixture, req, server_log};
+use tests::{Resp, drain, drain_resp, fixture, poll, req, server_log};
 
 use crate::harness::Spawn;
 
@@ -523,9 +523,14 @@ fn assert_upload_and_cleanup(status: u16, body: &str) {
         content, "bar",
         "tmp file must hold the uploaded bytes (got: {body:?})"
     );
+    // The response can finish before PHP removes its temporary files.
     assert!(
-        !tmp.is_empty() && !Path::new(tmp).exists(),
-        "upload tmp file must be deleted after the request (path: {tmp:?})"
+        !tmp.is_empty()
+            && poll(Duration::from_secs(5), || {
+                (!Path::new(tmp).exists()).then_some(())
+            })
+            .is_some(),
+        "upload tmp file must be deleted during request teardown (path: {tmp:?})"
     );
 }
 
@@ -997,5 +1002,108 @@ fn unrepresentable_header_does_not_sink_the_response_worker() -> anyhow::Result<
     assert_eq!(resp.header("X-Keep").as_deref(), Some("kept"));
     assert!(resp.header("Content Type").is_none());
     assert!(resp.header("X-Ctl").is_none());
+    Ok(())
+}
+
+#[test]
+fn request_bodies_worker() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        method: Method,
+        content_type: Option<&'static str>,
+        body: Vec<u8>,
+        ini: &'static str,
+        post_count: usize,
+        post_last: &'static str,
+        refused: bool,
+    }
+    const NO_TMP: &str =
+        "sys_temp_dir = Z:/rapira-missing-temp\nupload_tmp_dir = Z:/rapira-missing-temp";
+    let form = || {
+        let mut fields: Vec<String> = (0..256)
+            .map(|i| format!("k{i}={}", "v".repeat(240)))
+            .collect();
+        fields.push("z=end".into());
+        fields.join("&").into_bytes()
+    };
+    let cases = [
+        Case {
+            name: "form exceeds the PHP read block",
+            method: Method::POST,
+            content_type: Some("application/x-www-form-urlencoded"),
+            body: form(),
+            ini: NO_TMP,
+            post_count: 257,
+            post_last: "end",
+            refused: false,
+        },
+        Case {
+            name: "binary POST stays in memory",
+            method: Method::POST,
+            content_type: Some("application/octet-stream"),
+            body: vec![b'x'; 1 << 20],
+            ini: NO_TMP,
+            post_count: 0,
+            post_last: "-",
+            refused: false,
+        },
+        Case {
+            name: "PUT without content type",
+            method: Method::PUT,
+            content_type: None,
+            body: vec![b'x'; 1 << 20],
+            ini: NO_TMP,
+            post_count: 0,
+            post_last: "-",
+            refused: false,
+        },
+        Case {
+            name: "POST limit preserves raw input",
+            method: Method::POST,
+            content_type: Some("application/x-www-form-urlencoded"),
+            body: form(),
+            ini: "post_max_size = 16K",
+            post_count: 0,
+            post_last: "-",
+            refused: true,
+        },
+    ];
+    let shared = std::fs::read_to_string(fixture("ini/shared/php.ini"))?;
+    for case in cases {
+        let srv = Spawn::http(Mode::Worker, fixture("ported_tests/body-worker.php"))
+            .http_pool("max_requests = 1")
+            .php_ini(&format!("{shared}\n{}\n", case.ini))
+            .spawn();
+        let mut request = req("/");
+        *request.method_mut() = case.method;
+        if let Some(ct) = case.content_type {
+            request
+                .headers_mut()
+                .insert(CONTENT_TYPE, HeaderValue::from_static(ct));
+        }
+        request.body_mut().clone_from(&case.body);
+        let expected = format!(
+            "{}|{}|{}|{}",
+            case.post_count,
+            case.post_last,
+            case.body.len(),
+            String::from_utf8_lossy(&case.body)
+        );
+        // The quota forces interpreter initialization again during this sequence.
+        for _ in 0..4 {
+            let (status, got) = drain(submit(srv.addr, request.clone())?);
+            assert_eq!(status, 200, "{}", case.name);
+            if case.refused {
+                let warning = format!(
+                    "POST Content-Length of {} bytes exceeds the limit of 16384 bytes",
+                    case.body.len()
+                );
+                assert!(got.contains(&warning), "{}: {got:.300}", case.name);
+                assert!(got.ends_with(&expected), "{}: {got:.300}", case.name);
+            } else {
+                assert!(got == expected, "{}: {got:.300}", case.name);
+            }
+        }
+    }
     Ok(())
 }

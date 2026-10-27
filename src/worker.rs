@@ -111,11 +111,11 @@ pub fn serve(
                 plugin.dispatcher(),
             )?;
             let stopper = Stopper::default();
-            let sink = pool.sink();
+            let intake = pool.intake();
             pools.push(pool);
             running.push(run_plugin(
                 plugin,
-                sink,
+                intake,
                 stopper.clone(),
                 supervisor.drain_grace(),
             )?);

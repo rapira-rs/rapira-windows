@@ -1,8 +1,8 @@
 # Core source
 
-Core: [`13ad6f385c1660cfb93bbd8b42afeb251d397c03`](https://github.com/rapira-rs/rapira/tree/13ad6f385c1660cfb93bbd8b42afeb251d397c03).
+Core: [`6aa8bbb7cefbbbd1e5eb76410fc5c480b726def2`](https://github.com/rapira-rs/rapira/tree/6aa8bbb7cefbbbd1e5eb76410fc5c480b726def2).
 
-PHP contract: [`2621fe6426d1c84dd3f69de3be0dfcb0bef82793`](https://github.com/rapira-rs/contract/tree/2621fe6426d1c84dd3f69de3be0dfcb0bef82793).
+PHP contract: [`27324e79be73fce03ac778dfeec5f00dda716999`](https://github.com/rapira-rs/contract/tree/27324e79be73fce03ac778dfeec5f00dda716999).
 
 The source follows the core plugin architecture and binary-driven test design.
 
@@ -12,6 +12,9 @@ The source follows the core plugin architecture and binary-driven test design.
 - `crates/php_build` supplies the PHP headers, C compiler settings, and runtime link settings.
 - `crates/net` owns prepared listeners. Each plugin owns its configuration and PHP API.
 - HTTP supports classic, worker, and dispatcher modes. gRPC supports dispatcher mode and unary gRPC, gRPC-Web, and Connect.
+- HTTP dispatcher info exposes the configured server name and port at boot. Shared dispatcher handlers serve both plugins.
+- Raw CGI bodies use PHP temporary streams. Worker client aborts end the request and preserve application state.
+- Intake entries own byte and slot permits until dequeue. A cancelled queued unit counts as shed and does not use the request quota.
 - gRPC supports ordered interceptors and bearer-token authentication. The token file loads before PHP starts.
 - Worker and dispatcher boot retries without client traffic. Application work pulls determine readiness. PHP 8.4 and 8.5 expose boot `argv` and `argc` with `register_argc_argv` disabled.
 - `rapira serve CONFIG` starts the configured plugin pools. Each plugin has a `<plugin>.pool` table.
@@ -19,8 +22,9 @@ The source follows the core plugin architecture and binary-driven test design.
 
 ## Windows implementation
 
-- One process initializes ZTS PHP once. Each plugin has a fixed interpreter thread pool and a bounded work queue. The `processes` key sets its thread count.
+- One process initializes ZTS PHP once. Each plugin has a fixed interpreter thread pool and one work queue. The intake has 1024 slots and a 64 MiB body budget per pool. The `processes` key sets its thread count.
 - The interpreter keeps its mode, entrypoint, dispatcher, virtual working directory, timer, and request state in thread-local storage. Interpreter recycling retains the pool size.
+- Each new interpreter installs the POST reader in its own SAPI table. Process-wide SAPI callbacks are set once after MINIT.
 - The default OPcache cache ID is unique to the server process. All its interpreters share the cache.
 - The boot thread runs module teardown after all interpreters stop. A shutdown timer covers plugin drain, interpreter teardown, and module teardown with one deadline.
 - Ctrl+C or Ctrl+Break starts shutdown. A second control event forces exit. `TerminateProcess` handles forced exit while PHP threads can still be active.
@@ -43,4 +47,4 @@ The Windows HTTP path calls static-file handling directly. It needs no Tower mid
 
 ## Dependencies
 
-`crossbeam-channel` supplies the bounded interpreter queues. `windows-sys` supplies console control, process liveness, forced exit, and pidfile APIs. The gRPC protocol and protobuf dependencies follow the pinned core source.
+`crossbeam-channel` supplies the interpreter queues. Tokio semaphores limit their slots and body bytes. `windows-sys` supplies console control, process liveness, forced exit, and pidfile APIs. `libmimalloc-sys` releases unused allocator pages after an idle interval. The gRPC protocol and protobuf dependencies follow the pinned core source. Both native PHP builds include sodium.

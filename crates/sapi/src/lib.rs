@@ -1,17 +1,17 @@
 pub mod bindings;
 
 pub mod callbacks;
-pub mod classic_worker;
-pub mod context;
-pub mod diagnostics;
-pub mod dispatcher;
+mod classic_worker;
+mod context;
+mod diagnostics;
 pub mod exchange;
-pub mod module;
+mod log;
+mod module;
 pub mod plugin;
 pub mod quota;
-pub mod rapira_worker;
+mod rapira_worker;
 pub mod scoreboard;
-pub mod start;
+mod start;
 pub mod types;
 pub mod values;
 pub mod work;
@@ -39,6 +39,7 @@ unsafe extern "C" {
     pub fn rapira_clear_last_error();
     pub fn rapira_request_teardown() -> c_int;
     pub fn rapira_process_init();
+    pub fn rapira_register_post_reader();
     pub fn rapira_release_temporary_streams();
     // Holds boot-registered shutdown functions until cycle end (module.c).
     pub fn rapira_stash_boot_shutdown_functions();

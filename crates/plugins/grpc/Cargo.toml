@@ -24,6 +24,7 @@ connectrpc-health = { workspace = true }
 connectrpc-reflection = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "sync"] }
 bytes = { workspace = true }
+http-body-util = { workspace = true }
 base64 = { workspace = true }
 tower = { workspace = true }
 
