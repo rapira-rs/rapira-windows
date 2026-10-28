@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.10.0](https://github.com/rapira-rs/rapira-windows/compare/v0.9.0...v0.10.0) (2026-10-28)
+
+
+### Features
+
+* sync compatible core changes through 6aa8bbb ([b73feb2](https://github.com/rapira-rs/rapira-windows/commit/b73feb2b382d03cdeca4dd2e4f9634e21dddb5c6))
+* sync compatible core changes through 6aa8bbb ([#23](https://github.com/rapira-rs/rapira-windows/issues/23)) ([5861f3e](https://github.com/rapira-rs/rapira-windows/commit/5861f3e66114589675f2d74efcf63a77f0c1b998))
+
+
+### Bug Fixes
+
+* bound HTTP uploads and preserve PHP failure state ([f4637af](https://github.com/rapira-rs/rapira-windows/commit/f4637aff4ae53307c6f21c561cfa4aa2531acd03))
+* bound HTTP uploads and preserve PHP failure state ([#26](https://github.com/rapira-rs/rapira-windows/issues/26)) ([00316e6](https://github.com/rapira-rs/rapira-windows/commit/00316e673f2a7bbd70b4f2b403a284e35c622e85))
+
 ## [0.9.0](https://github.com/rapira-rs/rapira-windows/compare/v0.8.0...v0.9.0) (2026-10-05)
 
 ### Core
