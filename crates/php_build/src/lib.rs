@@ -68,6 +68,8 @@ pub fn discover() -> anyhow::Result<Php> {
             .any(|line| line.trim() == format!("#define PHP_BUILD_ARCH \"{arch}\"")),
         "PHP development files do not match {target}"
     );
+    println!("cargo:rerun-if-changed={}", include.display());
+    println!("cargo:rerun-if-changed={}", lib_dir.display());
     Ok(Php {
         includes: ["", "main", "Zend", "TSRM", "ext", "win32"]
             .iter()

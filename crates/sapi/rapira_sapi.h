@@ -52,7 +52,6 @@ void rapira_sapi_startup(sapi_module_struct *sf);
 void rapira_tsrmls_cache_update(void);
 int rapira_thread_init(int mode, const char *directory);
 void rapira_thread_disarm(void);
-void rapira_timer_rearm(zend_long timeout);
 void rapira_dispatcher_thread_init(int mode);
 unsigned int rapira_headers_php_version_id(void);
 int rapira_get_mode(void);

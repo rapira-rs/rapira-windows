@@ -237,6 +237,7 @@ pub extern "C" fn rapira_rs_finish_response() {
     guard((), || unsafe {
         if let Some(c) = ctx() {
             let errored = c.errored || fatal_error_recorded();
+            c.errored = errored;
             let truncated = finalize_response(c, errored);
             c.finish(truncated);
         }

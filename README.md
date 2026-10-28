@@ -28,7 +28,7 @@ The gRPC plugin supports bearer-token authentication before calls reach PHP. See
 ## Process model and control
 
 - Rapira starts one process. Each plugin has a fixed pool of PHP interpreter threads and its own work queue.
-- Each pool has 1024 intake slots and a 64 MiB budget for waiting request bodies. A body uses at most 64 MiB of this budget. A request that cannot fit the free budget is refused at once. A request that needs a slot waits at most 30 seconds.
+- Each pool has 1024 intake slots and a 64 MiB budget for request bodies that wait for PHP. HTTP reserves this budget before it buffers a body, including incomplete uploads. A body uses at most 64 MiB of this budget. A request that cannot fit the free budget is refused at once. A request that needs a slot waits at most 30 seconds.
 - MINIT runs once before the interpreter threads start.
 - `<plugin>.pool.processes` sets the interpreter thread count for that plugin.
 - The Windows build supports only a static pool. It rejects the main build's scaling settings. It does not support reload or status requests.

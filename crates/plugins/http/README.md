@@ -21,7 +21,7 @@ The http plugin of the `rapira` binary. It terminates HTTP/1.1 on the configured
 - `into_cgi()` gives the CGI request that the classic and worker modes run.
 - `shed()` answers 503 when the PHP boot of the worker failed.
 
-The intake has 1024 slots and a 64 MiB body budget per pool. Each waiting request uses the smaller of its body size and 64 MiB, including multipart spool bytes. The client gets 503 when the free byte budget is too small or all slots stay full for 30 seconds. A stopped intake returns 500. PHP does not see these requests.
+The intake has 1024 slots and a 64 MiB body budget per pool. A declared body reserves the smaller of its size and 64 MiB before the plugin reads it. A chunked body reserves more bytes as data arrives, up to 64 MiB. The reservation stays until the request reaches PHP, including during multipart parsing and while spool files wait in the queue. The client gets 503 when the free byte budget is too small or all slots stay full for 30 seconds. A stopped intake returns 500. PHP does not see these requests.
 
 ## Crate layout
 
@@ -76,6 +76,7 @@ Multiple byte ranges return the whole file. An `If-Range` value that differs fro
 - `sendFile` rejects a slice that exceeds the declared response length before it writes any bytes. Accepted slices stream through 256 KiB reads on the blocking pool.
 - Interim (1xx) heads and trailers are dropped.
 - `write_timeout_secs` bounds a single stalled write toward the client; a connection that makes no write progress for that long is closed and the PHP unit discarded.
+- PHP's Windows execution timer includes time spent waiting to write a response. A timeout takes effect when control returns to PHP. See [`set_time_limit`](https://www.php.net/manual/en/function.set-time-limit.php).
 
 ## Shutdown
 
