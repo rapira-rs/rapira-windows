@@ -13,6 +13,57 @@ fn timeout_ini() -> String {
         .expect("read timeout.php.ini")
 }
 
+// set_time_limit starts a new execution budget. https://www.php.net/manual/en/function.set-time-limit.php
+#[test]
+fn streamed_response_preserves_a_reset_execution_budget() -> anyhow::Result<()> {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    struct Case {
+        name: &'static str,
+        limit: u32,
+    }
+    let cases = [
+        Case {
+            name: "reset timer allows the remaining work",
+            limit: 8,
+        },
+        Case {
+            name: "disabled timer allows the remaining work",
+            limit: 0,
+        },
+    ];
+    for case in cases {
+        let srv = Spawn::http(
+            Mode::Dispatcher,
+            fixture("timeout_tests/timeout-stream.php"),
+        )
+        .json_log()
+        .spawn();
+        let mut client = TcpStream::connect_timeout(&srv.addr, Duration::from_secs(10))?;
+        client.set_read_timeout(Some(Duration::from_secs(15)))?;
+        client.set_write_timeout(Some(Duration::from_secs(10)))?;
+        socket2::SockRef::from(&client).set_recv_buffer_size(4096)?;
+        write!(client, "GET /?limit={} HTTP/1.0\r\n\r\n", case.limit)?;
+        server_log::wait_app_record(&srv.log_file(), "stream timer reset");
+        // Hold the socket while PHP fills the response queue.
+        std::thread::sleep(Duration::from_millis(500));
+        socket2::SockRef::from(&client).set_recv_buffer_size(1 << 20)?;
+        let mut response = Vec::new();
+        client.read_to_end(&mut response)?;
+        assert!(response.starts_with(b"HTTP/1.0 200 "), "{}", case.name);
+        assert!(response.ends_with(b"done"), "{}", case.name);
+        assert!(
+            !server_log::records(&srv.log_file())
+                .iter()
+                .any(|record| record.message.contains("Maximum execution time")),
+            "{}",
+            case.name
+        );
+    }
+    Ok(())
+}
+
 /// Pins that receive() disarms the wall timer while parked: a worker parked past the 1s budget still serves instead of fataling and being 503-shed.
 #[test]
 fn parked_receive_outlives_the_execution_budget() -> anyhow::Result<()> {

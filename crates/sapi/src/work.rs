@@ -83,7 +83,7 @@ impl std::fmt::Display for Refused {
             Self::Saturated => write!(f, "worker pool saturated for {INTAKE_WAIT:?}"),
             Self::OverBudget => write!(
                 f,
-                "request bodies that wait for the pool use all {} MiB",
+                "request bodies use all {} MiB of the pool budget",
                 BODY_BUDGET >> 20
             ),
             Self::Stopped => write!(f, "worker pool stopped"),
@@ -153,18 +153,33 @@ impl Intake {
         self.slots.close();
     }
 
-    /// Charge body bytes, including multipart spool files, while the unit waits for PHP.
-    /// Increment pending before send because the consumer can wake immediately.
-    pub async fn submit(&self, unit: Box<dyn Work>, bytes: usize) -> Result<(), Refused> {
-        let held =
-            match Arc::clone(&self.budget).try_acquire_many_owned(bytes.min(BODY_BUDGET) as u32) {
-                Ok(held) => held,
-                Err(TryAcquireError::Closed) => return Err(Refused::Stopped),
-                Err(TryAcquireError::NoPermits) => {
-                    self.pool.shed.fetch_add(1, Ordering::Relaxed);
-                    return Err(Refused::OverBudget);
-                }
-            };
+    /// Reserve body bytes before buffering. One body uses at most the full pool budget.
+    pub fn reserve_body(&self, bytes: usize) -> Result<OwnedSemaphorePermit, Refused> {
+        match Arc::clone(&self.budget).try_acquire_many_owned(bytes.min(BODY_BUDGET) as u32) {
+            Ok(held) => Ok(held),
+            Err(TryAcquireError::Closed) => Err(Refused::Stopped),
+            Err(TryAcquireError::NoPermits) => {
+                self.pool.shed.fetch_add(1, Ordering::Relaxed);
+                Err(Refused::OverBudget)
+            }
+        }
+    }
+
+    /// Grow a streamed body's reservation without waiting on other incomplete bodies.
+    pub fn grow_body(&self, held: &mut OwnedSemaphorePermit, bytes: usize) -> Result<(), Refused> {
+        let extra = bytes.min(BODY_BUDGET).saturating_sub(held.num_permits());
+        if extra > 0 {
+            held.merge(self.reserve_body(extra)?);
+        }
+        Ok(())
+    }
+
+    /// Keep the body reservation until dequeue. Increment pending before send because the consumer can wake immediately.
+    pub async fn submit(
+        &self,
+        unit: Box<dyn Work>,
+        held: OwnedSemaphorePermit,
+    ) -> Result<(), Refused> {
         let mut pending = PendingGuard::arm(&self.pool);
         let slot = match Arc::clone(&self.slots).try_acquire_owned() {
             Ok(slot) => slot,

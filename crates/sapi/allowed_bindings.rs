@@ -11,7 +11,7 @@
     // The linked PHP version and the header version.
     "PHP_VERSION_ID", "php_version_id", "php_version", "rapira_headers_php_version_id",
     "php_tsrm_startup_ex", "ts_resource_ex", "ts_free_thread", "tsrm_shutdown",
-    "rapira_tsrmls_cache_update", "rapira_thread_init", "rapira_thread_disarm", "rapira_timer_rearm",
+    "rapira_tsrmls_cache_update", "rapira_thread_init", "rapira_thread_disarm",
     "rapira_zend_string_init_interned",
     // The embedded-object layout is in rapira_sapi.h.
     "rapira_dispatcher_info_obj",

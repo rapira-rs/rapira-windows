@@ -4,12 +4,13 @@ use std::time::Duration;
 const REQ: Duration = Duration::from_secs(10);
 
 #[test]
-fn exit_in_a_frameless_callback_ends_the_reply_complete() -> anyhow::Result<()> {
+fn callback_outcome_controls_response_completion() -> anyhow::Result<()> {
     struct Case {
         name: &'static str,
         query: &'static str,
         status: u16,
         body: &'static str,
+        truncated: bool,
     }
     let cases = [
         Case {
@@ -17,12 +18,21 @@ fn exit_in_a_frameless_callback_ends_the_reply_complete() -> anyhow::Result<()> 
             query: "/?exit=handler",
             status: 404,
             body: "Not Found\n",
+            truncated: false,
+        },
+        Case {
+            name: "fatal shutdown callback",
+            query: "/?exit=shutdown-fatal",
+            status: 200,
+            body: "partial page\n",
+            truncated: true,
         },
         Case {
             name: "shutdown callback",
             query: "/?exit=shutdown",
             status: 200,
             body: "ok\nbye\n",
+            truncated: false,
         },
     ];
     let srv = harness::Spawn::http(
@@ -34,9 +44,16 @@ fn exit_in_a_frameless_callback_ends_the_reply_complete() -> anyhow::Result<()> 
         let response = tests::drain_resp(tests::wire::submit(srv.addr, tests::req(case.query))?);
         assert_eq!(response.status(), case.status, "{}", case.name);
         assert_eq!(response.body_string(), case.body, "{}", case.name);
-        assert!(response.ended && !response.truncated, "{}", case.name);
+        assert!(response.ended, "{}", case.name);
+        assert_eq!(response.truncated, case.truncated, "{}", case.name);
+        assert_eq!(
+            response.content_length,
+            (!case.truncated).then_some(case.body.len() as u64),
+            "{}",
+            case.name
+        );
     }
-    harness::slot_line(&srv, "handled 2 errors 0 ");
+    harness::slot_line(&srv, "handled 3 errors 1 ");
     Ok(())
 }
 

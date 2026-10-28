@@ -1,7 +1,6 @@
 use std::{
     ffi::{CStr, CString, c_char, c_void},
     fmt::Write as _,
-    time::Instant,
 };
 
 use http::header::{HeaderMap, HeaderName, HeaderValue};
@@ -13,8 +12,8 @@ use rapira_sapi::types::{Addr, Body, FormField, Frame, Request, ResponseHead, Tl
 use rapira_sapi::work::{DispatcherClasses, Held, release};
 use rapira_sapi::{
     HashTable, IS_ARRAY, IS_STRING, add_next_index_object, object_init_ex, rapira_array_init,
-    rapira_ce_already_finalized_error, rapira_ce_tls, rapira_ce_work_discarded_exception,
-    rapira_eg, zend, zend_class_entry, zend_object, zval, zval_add_ref, zval_ptr_dtor,
+    rapira_ce_already_finalized_error, rapira_ce_tls, rapira_ce_work_discarded_exception, zend,
+    zend_class_entry, zend_object, zval, zval_add_ref, zval_ptr_dtor,
 };
 use tokio::sync::mpsc::{Sender, error::TrySendError};
 
@@ -189,8 +188,6 @@ pub struct ExchangeState {
     discarded: bool,
     /// 204, 304, 101, or a HEAD request: chunks are accepted and dropped.
     bodiless: bool,
-    /// Last wall-timer arm: the park guard re-arms the remaining budget.
-    armed_at: Instant,
 }
 
 impl ExchangeState {
@@ -232,7 +229,6 @@ impl ExchangeState {
             sent_body: 0,
             discarded: false,
             bodiless,
-            armed_at: Instant::now(),
         }
     }
 }

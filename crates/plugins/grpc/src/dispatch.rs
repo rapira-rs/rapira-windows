@@ -112,6 +112,9 @@ async fn unary(
             .header("grpc-encoding")
             .is_none_or(|value| value == "identity");
     let bytes = message.len();
+    let held = intake
+        .reserve_body(bytes)
+        .map_err(|e| ConnectError::unavailable(e.to_string()))?;
     let call = UnaryCall {
         method: path.clone(),
         protocol,
@@ -128,7 +131,7 @@ async fn unary(
     let (tx, reply) = oneshot::channel();
     let call = GrpcState::new(call, tx);
     // A refusal before dispatch: PHP never saw the call.
-    if let Err(e) = intake.submit(Box::new(call), bytes).await {
+    if let Err(e) = intake.submit(Box::new(call), held).await {
         return Err(ConnectError::unavailable(e.to_string()));
     }
     // A closed channel means that PHP lost the call. Dropping this future closes the call for PHP.

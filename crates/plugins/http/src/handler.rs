@@ -10,6 +10,7 @@ use hyper::body::{Body, Bytes, Frame as BodyFrame, Incoming, SizeHint};
 use rapira_sapi::types::ResponseHead;
 use rapira_sapi::work::{Intake, Refused};
 use rapira_sapi::{Addr, Frame, Request};
+use tokio::sync::OwnedSemaphorePermit;
 use tokio::time::timeout;
 
 use crate::check::{self, Rejection};
@@ -275,6 +276,13 @@ async fn serve_php(
     let cfg = &shared.cfg;
     let mut body = body;
     let reserve = body.size_hint().lower().min(cfg.max_body_size as u64) as usize;
+    let mut held = match shared.intake.reserve_body(reserve) {
+        Ok(held) => held,
+        Err(e) => {
+            tracing::warn!(target: "http", "rejected before body read: {e}");
+            return refused(Rejection::from(e).status, guard);
+        }
+    };
     let mut collected: Vec<u8> = Vec::with_capacity(reserve);
     loop {
         // hyper only times the head read, so each body frame gets its own progress bound here.
@@ -296,6 +304,13 @@ async fn serve_php(
                     tracing::warn!(target: "http", "request body exceeds max_body_size");
                     return refused(http::StatusCode::PAYLOAD_TOO_LARGE, guard);
                 }
+                if let Err(e) = shared
+                    .intake
+                    .grow_body(&mut held, collected.len() + data.len())
+                {
+                    tracing::warn!(target: "http", "rejected during body read: {e}");
+                    return refused(Rejection::from(e).status, guard);
+                }
                 collected.extend_from_slice(&data);
             }
             Some(Err(e)) => {
@@ -306,7 +321,7 @@ async fn serve_php(
     }
 
     let request = request::build(parts, authority, collected, peer, cfg);
-    let mut reply = match submit(shared, request).await {
+    let mut reply = match submit(shared, request, held).await {
         Ok(reply) => reply,
         Err(r) => {
             tracing::warn!(target: "http", "rejected before dispatch: {r}");
@@ -399,9 +414,9 @@ async fn serve_php(
 async fn submit(
     shared: &Shared,
     request: Request,
+    held: OwnedSemaphorePermit,
 ) -> Result<tokio::sync::mpsc::Receiver<Frame>, Rejection> {
-    let bytes = request.content_length.max(0) as usize;
-    let request = parse_multipart(request, shared.cfg.uploads.as_ref()).await?;
+    let (request, held) = parse_multipart(request, shared.cfg.uploads.as_ref(), held).await?;
     let (tx, reply) = tokio::sync::mpsc::channel(crate::exchange::FRAME_CAP);
     let exchange = Exchange::new(
         request,
@@ -411,7 +426,7 @@ async fn submit(
             .superglobals
             .then_some(shared.cfg.entrypoint.as_str()),
     );
-    shared.intake.submit(Box::new(exchange), bytes).await?;
+    shared.intake.submit(Box::new(exchange), held).await?;
     Ok(reply)
 }
 
@@ -421,15 +436,16 @@ const INLINE_PARSE_MAX: usize = 256 << 10;
 async fn parse_multipart(
     mut req: Request,
     limits: Option<&multipart::Limits>,
-) -> Result<Request, Rejection> {
+    held: OwnedSemaphorePermit,
+) -> Result<(Request, OwnedSemaphorePermit), Rejection> {
     let Some(limits) = limits else {
-        return Ok(req);
+        return Ok((req, held));
     };
     let rapira_sapi::types::Body::Raw(raw) = &mut req.body else {
-        return Ok(req);
+        return Ok((req, held));
     };
     if raw.get_ref().is_empty() {
-        return Ok(req);
+        return Ok((req, held));
     }
     // Content-type is a singleton field per RFC 9110 §8.3: with repeated lines the plugin and a PHP consumer could split the body on different boundaries.
     // https://www.rfc-editor.org/rfc/rfc9110#section-8.3
@@ -442,25 +458,27 @@ async fn parse_multipart(
         });
     }
     let Some(content_type) = req.content_type.as_deref() else {
-        return Ok(req);
+        return Ok((req, held));
     };
     if !multipart::is_multipart(content_type) {
-        return Ok(req);
+        return Ok((req, held));
     }
     let boundary = multipart::boundary(content_type)?;
     if raw.get_ref().len() <= INLINE_PARSE_MAX {
         let parsed = multipart::parse(raw.get_ref(), &boundary, limits)?;
         req.body = rapira_sapi::types::Body::Multipart(parsed);
-        return Ok(req);
+        return Ok((req, held));
     }
     let bytes = std::mem::take(raw.get_mut());
     let limits = limits.clone();
-    let parsed = tokio::task::spawn_blocking(move || multipart::parse(&bytes, &boundary, &limits))
-        .await
-        .map_err(|e| Rejection {
-            status: http::StatusCode::INTERNAL_SERVER_ERROR,
-            reason: format!("multipart parse task failed: {e}"),
-        })?;
+    // A disconnected client cannot release the reservation while this task still owns the body.
+    let (parsed, held) =
+        tokio::task::spawn_blocking(move || (multipart::parse(&bytes, &boundary, &limits), held))
+            .await
+            .map_err(|e| Rejection {
+                status: http::StatusCode::INTERNAL_SERVER_ERROR,
+                reason: format!("multipart parse task failed: {e}"),
+            })?;
     req.body = rapira_sapi::types::Body::Multipart(parsed?);
-    Ok(req)
+    Ok((req, held))
 }

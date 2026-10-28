@@ -44,14 +44,14 @@ fn classic_executor(ctx: &mut Context) -> Executed {
         let failed = crate::context::with_script(|script| {
             !run_script(std::path::Path::new(&script.filename))
         });
-        let exec_err = failed && fatal_error_recorded();
         ctx.tearing_down = true;
-        ctx.errored = exec_err;
+        ctx.errored = failed && fatal_error_recorded();
         rapira_request_shutdown();
 
-        let truncated = finalize_response(ctx, exec_err);
+        let errored = ctx.errored;
+        let truncated = finalize_response(ctx, errored);
 
-        (exec_err, truncated)
+        (errored, truncated)
     };
 
     unbind_server_context();

@@ -54,37 +54,19 @@ pub(super) unsafe fn throw_verb(v: Verb) -> bool {
 
 pub(super) struct Closed;
 
-/// On a full channel, park with the wall timer disarmed: a parked thread never reaches an opcode boundary, and on NTS a second expiry would `_exit(124)`; the re-arm grants the remaining budget (floor 1s).
+/// The Windows timer stays armed during a blocked send. PHP handles a timeout when execution resumes.
+/// https://github.com/php/php-src/blob/php-8.5.12/Zend/zend_execute_API.c#L1462-L1476
 /// # Safety
 /// Engine active on this thread.
 pub(super) unsafe fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<(), Closed> {
-    let (result, parked) = {
-        let Some(tx) = st.sender.as_ref() else {
-            return Err(Closed);
-        };
-        match tx.try_send(frame) {
-            Ok(()) => (Ok(()), false),
-            Err(TrySendError::Closed(_)) => (Err(Closed), false),
-            Err(TrySendError::Full(frame)) => unsafe {
-                let consumed = st.armed_at.elapsed();
-                let saved = (*rapira_eg()).timeout_seconds;
-                if saved > 0 {
-                    rapira_sapi::rapira_thread_disarm();
-                }
-                // Only `Closed` ends the park: a slow consumer is backpressure, not cancellation.
-                let r = tx.blocking_send(frame).map_err(|_| Closed);
-                if saved > 0 {
-                    let remaining = (saved as u64).saturating_sub(consumed.as_secs()).max(1);
-                    rapira_sapi::rapira_timer_rearm(remaining as rapira_sapi::zend_long);
-                }
-                (r, saved > 0)
-            },
-        }
+    let Some(tx) = st.sender.as_ref() else {
+        return Err(Closed);
     };
-    if parked {
-        st.armed_at = Instant::now();
+    match tx.try_send(frame) {
+        Ok(()) => Ok(()),
+        Err(TrySendError::Closed(_)) => Err(Closed),
+        Err(TrySendError::Full(frame)) => tx.blocking_send(frame).map_err(|_| Closed),
     }
-    result
 }
 
 /// `finalizing_len` is the one-shot body length used only when nothing streamed before: a declared content-length wins, and a bodiless response gets none.
