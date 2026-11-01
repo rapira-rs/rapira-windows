@@ -372,8 +372,7 @@ mod tests {
             replace: bool,
             attempt_ms: u64,
             fits: bool,
-            first_present: bool,
-            next_expiry_ms: u64,
+            first_fresh: bool,
         }
         let cases = [
             Case {
@@ -382,8 +381,7 @@ mod tests {
                 replace: false,
                 attempt_ms: 999,
                 fits: false,
-                first_present: true,
-                next_expiry_ms: 1000,
+                first_fresh: true,
             },
             Case {
                 name: "first expiry permits admission and keeps later entries",
@@ -391,8 +389,7 @@ mod tests {
                 replace: false,
                 attempt_ms: 1000,
                 fits: true,
-                first_present: false,
-                next_expiry_ms: 1500,
+                first_fresh: false,
             },
             Case {
                 name: "revalidation extends the first entry freshness",
@@ -400,8 +397,7 @@ mod tests {
                 replace: false,
                 attempt_ms: 1000,
                 fits: false,
-                first_present: true,
-                next_expiry_ms: 1500,
+                first_fresh: true,
             },
             Case {
                 name: "a delayed stat can lower the first expiry",
@@ -409,17 +405,15 @@ mod tests {
                 replace: false,
                 attempt_ms: 800,
                 fits: true,
-                first_present: false,
-                next_expiry_ms: 1500,
+                first_fresh: false,
             },
             Case {
-                name: "same size replacement keeps the capacity accounting",
+                name: "same size replacement fits and stays fresh",
                 revalidate_ms: None,
                 replace: true,
                 attempt_ms: 1000,
                 fits: false,
-                first_present: true,
-                next_expiry_ms: 1500,
+                first_fresh: true,
             },
         ];
         let anchor = Instant::now() + TTL;
@@ -453,7 +447,6 @@ mod tests {
                 "{}",
                 case.name
             );
-            assert_eq!(store.next_expiry, Some(anchor + TTL), "{}", case.name);
             if let Some(offset) = case.revalidate_ms {
                 let checked = if offset < 0 {
                     anchor - Duration::from_millis(offset.unsigned_abs())
@@ -478,38 +471,39 @@ mod tests {
                 case.name
             );
             assert_eq!(
-                store.map.contains_key(first),
-                case.first_present,
+                store.fresh(first, now).map(|entry| &entry.body),
+                case.first_fresh
+                    .then_some(if case.replace { &replacement } else { &body }),
                 "{}",
                 case.name
             );
-            assert_eq!(store.map[other].body, body, "{}", case.name);
             assert_eq!(
-                store.next_expiry,
-                Some(anchor + Duration::from_millis(case.next_expiry_ms)),
+                store.fresh(other, now).map(|entry| &entry.body),
+                Some(&body),
                 "{}",
                 case.name
             );
-            if case.first_present {
+            if case.fits {
+                store.put(incoming.to_path_buf(), body.clone(), meta, now);
                 assert_eq!(
-                    &store.map[first].body,
-                    if case.replace { &replacement } else { &body },
+                    store.fresh(incoming, now).map(|entry| &entry.body),
+                    Some(&body),
                     "{}",
                     case.name
                 );
             }
-            if case.fits {
-                store.put(incoming.to_path_buf(), body.clone(), meta, now);
-                assert_eq!(store.map[incoming].body, body, "{}", case.name);
-            }
-            assert!(store.bytes <= MAX_TOTAL, "{}", case.name);
-            assert_eq!(
-                store.bytes,
-                store
-                    .map
-                    .iter()
-                    .map(|(path, entry)| Store::footprint(path, entry.body.len()))
-                    .sum::<usize>(),
+            assert!(store.make_room(other, MAX_FILE, now), "{}", case.name);
+            assert!(
+                !store.make_room(Path::new("more.bin"), MAX_FILE, now),
+                "{}",
+                case.name
+            );
+            assert!(
+                store.make_room(
+                    Path::new("more.bin"),
+                    MAX_FILE,
+                    anchor + Duration::from_millis(1500)
+                ),
                 "{}",
                 case.name
             );
