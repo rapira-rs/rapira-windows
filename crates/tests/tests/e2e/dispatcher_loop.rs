@@ -665,6 +665,21 @@ fn multipart_parse_outcomes_leave_no_spool_file() -> anyhow::Result<()> {
             lines: &["counts=0/1", "file0=f:big.bin:307200:yyyy"],
         },
         Case {
+            name: "file count over max_files",
+            parts: vec![
+                (
+                    "content-disposition: form-data; name=\"f\"; filename=\"a\"",
+                    "x",
+                ),
+                (
+                    "content-disposition: form-data; name=\"g\"; filename=\"b\"",
+                    "y",
+                ),
+            ],
+            status: 413,
+            lines: &[],
+        },
+        Case {
             name: "field over the limit after a file part",
             parts: vec![
                 (
@@ -738,7 +753,7 @@ fn multipart_parse_outcomes_leave_no_spool_file() -> anyhow::Result<()> {
     ];
 
     let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/multipart-worker.php"))
-        .http_extra("[http.uploads]\ndir = \"uploads\"\nmax_field_size_kb = 1")
+        .http_extra("[http.uploads]\ndir = \"uploads\"\nmax_field_size_kb = 1\nmax_files = 1")
         .spawn();
     for case in cases {
         let (status, body) = drain(submit(srv.addr, multipart("/", &case.parts))?);

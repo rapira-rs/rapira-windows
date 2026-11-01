@@ -565,14 +565,6 @@ mod tests {
                 },
                 body: b"--B\r\ncontent-disposition: form-data; name=a\r\n\r\n1\r\n--B\r\ncontent-disposition: form-data; name=b\r\n\r\n2\r\n--B--",
             },
-            Case {
-                name: "file parts over max_files",
-                limits: Limits {
-                    max_files: 1,
-                    ..limits()
-                },
-                body: b"--B\r\ncontent-disposition: form-data; name=f; filename=a\r\n\r\nx\r\n--B\r\ncontent-disposition: form-data; name=g; filename=b\r\n\r\ny\r\n--B--",
-            },
         ];
         for case in cases {
             assert_eq!(rejected(case.body, &case.limits), 413, "{}", case.name);
