@@ -366,7 +366,7 @@ fn worker_main(
                 classic_worker::classic_worker();
                 WorkerExit::Closed
             }
-            Mode::Worker | Mode::Dispatcher => rapira_worker(entrypoint.clone()),
+            Mode::Worker | Mode::Dispatcher => rapira_worker(&entrypoint),
         }));
         if outcome.is_err() {
             error!(target: "rapira", "pool {name} thread {index} panicked");

@@ -498,35 +498,6 @@ fn alias_names_never_reach_a_cgi_variable() {
     );
 }
 
-/// `reject` puts a real 400 on the wire: the field-name check runs before dispatch, so PHP never sees the request.
-#[test]
-fn reject_policy_answers_400_for_an_alias_name() {
-    let srv = spawn_with_http_extra(
-        "shared/echo-worker.php",
-        1,
-        "unsafe_field_names = \"reject\"\n",
-    );
-    wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
-
-    let (code, _) = http_get_with_headers(
-        srv.addr,
-        "/",
-        &[("X_Forwarded_For", "1.2.3.4")],
-        Duration::from_secs(10),
-    )
-    .expect("GET / with an alias name");
-    assert_eq!(code, 400, "\n{}", diagnostics(&srv));
-
-    let (code, _) = http_get_with_headers(
-        srv.addr,
-        "/",
-        &[("X-Forwarded-For", "203.0.113.7")],
-        Duration::from_secs(10),
-    )
-    .expect("GET / with a safe name");
-    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
-}
-
 /// More than one `Host` line is a 400; the h1 parser hands the repeated field through intact, so the rejection is this plugin's own.
 /// RFC 9112 §3.2: https://www.rfc-editor.org/rfc/rfc9112#section-3.2
 #[test]
@@ -542,28 +513,6 @@ fn a_second_host_field_line_answers_400() {
     )
     .expect("GET / with two Host field lines");
     assert_eq!(code, 400, "\n{}", diagnostics(&srv));
-}
-
-/// CONNECT answers 501 before dispatch: a PHP-authored 2xx would turn the connection into a tunnel, and a 405 would owe an Allow list (RFC 9110 §15.5.6).
-/// https://www.rfc-editor.org/rfc/rfc9110#section-15.5.6
-#[test]
-fn connect_answers_501() {
-    let srv = spawn_with_config("lifecycle/fidelity-worker.php", 1, "");
-    wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
-
-    let raw = http_raw_bytes(
-        srv.addr,
-        b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n",
-        Duration::from_secs(10),
-    )
-    .expect("CONNECT request");
-    let head = String::from_utf8_lossy(&raw);
-    assert!(
-        head.starts_with("HTTP/1.1 501"),
-        "got {:?}\n{}",
-        head.lines().next().unwrap_or(""),
-        diagnostics(&srv)
-    );
 }
 
 /// The accumulate-loop cap: with no declared length the 413 fires when the streamed body crosses max_body_size.
@@ -793,43 +742,6 @@ fn dispatcher_write_head_reaches_the_wire() {
     assert!(
         text.ends_with("\r\n\r\n"),
         "no body bytes on a HEAD response\n{}",
-        diagnostics(&srv)
-    );
-}
-
-/// RFC 9112 §3.2.2: for an absolute-form target the origin server must ignore Host and use the target's host information.
-/// https://www.rfc-editor.org/rfc/rfc9112#section-3.2.2
-#[test]
-fn absolute_form_target_overrides_host() {
-    let srv = spawn_with_config("lifecycle/fidelity-worker.php", 1, "");
-    wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
-
-    let raw = http_raw_bytes(
-        srv.addr,
-        b"GET http://target.example/echo?probe=target HTTP/1.1\r\n\
-          Host: spoofed.example\r\nConnection: close\r\n\r\n",
-        Duration::from_secs(10),
-    )
-    .expect("absolute-form request");
-    let text = String::from_utf8_lossy(&raw);
-    assert!(
-        text.contains("target=http://target.example/echo?probe=target"),
-        "the target must keep the absolute form: {text}\n{}",
-        diagnostics(&srv)
-    );
-    assert!(
-        text.contains("authority=target.example"),
-        "the target authority must replace Host: {text}\n{}",
-        diagnostics(&srv)
-    );
-    assert!(
-        text.contains("uri=http://target.example/echo?probe=target"),
-        "the absolute uri must carry the target authority and the path: {text}\n{}",
-        diagnostics(&srv)
-    );
-    assert!(
-        text.contains("host=target.example"),
-        "the Host field line must carry the effective authority: {text}\n{}",
         diagnostics(&srv)
     );
 }

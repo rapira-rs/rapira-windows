@@ -9,7 +9,7 @@ thread_local! {
 }
 
 pub enum Event {
-    Handled(bool),
+    Handled { errored: bool },
     Shed,
     Recycled,
     Idle,
@@ -26,7 +26,7 @@ pub(crate) fn sb_set(slot: &'static SharedSlot) {
 pub fn sb_update(event: Event) {
     let Some(s) = SB.get() else { return };
     match event {
-        Event::Handled(errored) => {
+        Event::Handled { errored } => {
             if errored {
                 s.errors.fetch_add(1, Relaxed);
             }

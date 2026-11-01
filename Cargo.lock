@@ -75,7 +75,7 @@ checksum = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.6",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -110,7 +110,7 @@ dependencies = [
  "regex",
  "rustc-hash",
  "shlex",
- "syn 3.0.6",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -233,7 +233,7 @@ dependencies = [
  "heck",
  "proc-macro2",
  "quote",
- "syn 3.0.6",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -251,7 +251,7 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 [[package]]
 name = "connectrpc"
 version = "0.9.0"
-source = "git+https://github.com/connectrpc/connect-rust?rev=0bb21af9736dac7b82065a4252405a8eb65f27ee#0bb21af9736dac7b82065a4252405a8eb65f27ee"
+source = "git+https://github.com/connectrpc/connect-rust?rev=bd2ab674786971ca10cc2c23e4808c8d56b6a458#bd2ab674786971ca10cc2c23e4808c8d56b6a458"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -283,7 +283,7 @@ dependencies = [
 [[package]]
 name = "connectrpc-health"
 version = "0.9.0"
-source = "git+https://github.com/connectrpc/connect-rust?rev=0bb21af9736dac7b82065a4252405a8eb65f27ee#0bb21af9736dac7b82065a4252405a8eb65f27ee"
+source = "git+https://github.com/connectrpc/connect-rust?rev=bd2ab674786971ca10cc2c23e4808c8d56b6a458#bd2ab674786971ca10cc2c23e4808c8d56b6a458"
 dependencies = [
  "buffa",
  "connectrpc",
@@ -298,7 +298,7 @@ dependencies = [
 [[package]]
 name = "connectrpc-reflection"
 version = "0.9.0"
-source = "git+https://github.com/connectrpc/connect-rust?rev=0bb21af9736dac7b82065a4252405a8eb65f27ee#0bb21af9736dac7b82065a4252405a8eb65f27ee"
+source = "git+https://github.com/connectrpc/connect-rust?rev=bd2ab674786971ca10cc2c23e4808c8d56b6a458#bd2ab674786971ca10cc2c23e4808c8d56b6a458"
 dependencies = [
  "buffa",
  "buffa-descriptor",
@@ -333,9 +333,9 @@ checksum = "b365fabc795046672053e29c954733ec3b05e4be654ab130fe8f1f94d7051f35"
 
 [[package]]
 name = "equivalent"
-version = "1.0.2"
+version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
+checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
 name = "errno"
@@ -436,7 +436,7 @@ checksum = "9fb9654ba8355388abeb8dcb4fc62f511300867002afc858860463bdd9fe0c44"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.6",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -487,9 +487,9 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
 name = "h2"
-version = "0.4.19"
+version = "0.4.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef8e5e5a340588f4452631496976cf8636d4a7ecf600239fdc27615d2530bc16"
+checksum = "7d29020232d6aa3fb1daca64c1127cf662cf97f254ae16c18c05b8ab635fc118"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -664,9 +664,9 @@ checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
 name = "libc"
-version = "0.2.189"
+version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libloading"
@@ -742,9 +742,9 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
 name = "mio"
-version = "1.2.3"
+version = "1.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b18443e9c262bfe8fa82f51666e2642c53393f7e5c27b3e1aeab922cff5b9d8"
+checksum = "1788edb87fdc09c7e26304471e2f5be8cdefb1b6930d6e3985fc02ff53bf86ee"
 dependencies = [
  "libc",
  "wasi",
@@ -846,7 +846,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rapira_config"
-version = "0.9.0"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "serde",
@@ -855,7 +855,7 @@ dependencies = [
 
 [[package]]
 name = "rapira_grpc"
-version = "0.9.0"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -880,7 +880,7 @@ dependencies = [
 
 [[package]]
 name = "rapira_grpc_auth"
-version = "0.8.1"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "connectrpc",
@@ -890,7 +890,7 @@ dependencies = [
 
 [[package]]
 name = "rapira_http"
-version = "0.9.0"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "http",
@@ -914,7 +914,7 @@ dependencies = [
 
 [[package]]
 name = "rapira_net"
-version = "0.9.0"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "socket2",
@@ -925,7 +925,7 @@ dependencies = [
 
 [[package]]
 name = "rapira_observability"
-version = "0.8.1"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "hyper",
@@ -941,7 +941,7 @@ dependencies = [
 
 [[package]]
 name = "rapira_php_build"
-version = "0.9.0"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "cc",
@@ -949,7 +949,7 @@ dependencies = [
 
 [[package]]
 name = "rapira_sapi"
-version = "0.9.0"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "bindgen",
@@ -967,14 +967,14 @@ dependencies = [
 
 [[package]]
 name = "rapira_scoreboard"
-version = "0.9.0"
+version = "0.9.2"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "rapira_static_files"
-version = "0.9.0"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "bytes",
@@ -990,7 +990,7 @@ dependencies = [
 
 [[package]]
 name = "rapira_windows"
-version = "0.9.0"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -1090,7 +1090,7 @@ checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.6",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -1144,9 +1144,9 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "smallvec"
-version = "1.16.2"
+version = "1.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9395f0f0eee849a9b707b2f06bb92a6a422090e2123bb2ef8e87a0e61892a8e"
+checksum = "d0d5d4b1981b8bbbb7aed204cae5726d683d5d6ac7e74ec54122ea28f315e7c8"
 
 [[package]]
 name = "smoothutf8"
@@ -1186,9 +1186,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "3.0.6"
+version = "3.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8593e8e72159ed2257d083c7a454a85cbf854f37a0966d8d483aff8c8a3ebcee"
+checksum = "d78c8dee4c7bf0e14673097256fed6142ce9d3b85a408189d07482442145823b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1216,7 +1216,7 @@ dependencies = [
 
 [[package]]
 name = "tests"
-version = "0.9.0"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -1249,7 +1249,7 @@ checksum = "fe5197923287db20a58125f0bc85c062f7f2c892de97b18c356f9efb14b28524"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.6",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -1284,7 +1284,7 @@ checksum = "78773a2a397f451582ce068015985c33193cf6dea8b74d2a639fe457b2f07b0e"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.6",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -1301,9 +1301,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-util"
-version = "0.7.19"
+version = "0.7.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "494815d09bf52b5548659851081238f0ca39ff638363907596da739561c62c52"
+checksum = "e464cf451ba96ebfc6f9b6542f17ee8b8956e33f1e40d9690624e59d7a7f8a4b"
 dependencies = [
  "bytes",
  "futures-core",
@@ -1490,15 +1490,15 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "unicase"
-version = "2.9.0"
+version = "2.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbc4bc3a9f746d862c45cb89d705aa10f187bb96c76001afab07a0d35ce60142"
+checksum = "357cc3acc6a036009fd6c973ed009037c732d60d0b4f6c673e9041497482a28f"
 
 [[package]]
 name = "unicode-ident"
-version = "1.0.26"
+version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
+checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
 
 [[package]]
 name = "utf8parse"
@@ -1570,7 +1570,7 @@ dependencies = [
  "bumpalo",
  "proc-macro2",
  "quote",
- "syn 3.0.6",
+ "syn 3.0.9",
  "wasm-bindgen-shared",
 ]
 
@@ -1636,9 +1636,9 @@ dependencies = [
 
 [[package]]
 name = "zstd-sys"
-version = "2.1.0+zstd.1.5.7"
+version = "2.1.2+zstd.1.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ef0a8027ec3ee71300ab3bcbcd0393f434aa72b91ca6d635a39941deae8eea0"
+checksum = "481ada9c543b2323cbb7bbdbb5249177fbf0188ed959ed2c15e4b22421c84ed3"
 dependencies = [
  "cc",
  "pkg-config",

@@ -136,8 +136,8 @@ fn resolve_interceptors(
             bail!("grpc.interceptors lists \"{name}\" twice");
         }
     }
-    let mut interceptors = Vec::new();
-    for name in &list {
+    let mut interceptors = Vec::with_capacity(list.len());
+    for name in list {
         match name.as_str() {
             "auth" => match auth.take() {
                 Some(settings) => interceptors.push(Interceptor::Auth(settings)),
@@ -161,7 +161,8 @@ impl Server {
             &settings.descriptor_set,
             settings.services.as_deref(),
         )?);
-        let mut interceptors: Vec<Arc<dyn connectrpc::Interceptor>> = Vec::new();
+        let mut interceptors: Vec<Arc<dyn connectrpc::Interceptor>> =
+            Vec::with_capacity(settings.interceptors.len());
         for interceptor in &settings.interceptors {
             match interceptor {
                 Interceptor::Auth(s) => {
@@ -169,16 +170,19 @@ impl Server {
                 }
             }
         }
-        Ok(Self::init(Config {
-            listen: settings.listen,
-            schema,
-            reflection: settings.reflection,
-            default_timeout: settings.default_timeout,
-            max_timeout: settings.max_timeout,
-            keepalive_interval: settings.keepalive_interval,
-            keepalive_timeout: settings.keepalive_timeout,
-            interceptors,
-        }))
+        Ok(Self {
+            config: Config {
+                listen: settings.listen,
+                schema,
+                reflection: settings.reflection,
+                default_timeout: settings.default_timeout,
+                max_timeout: settings.max_timeout,
+                keepalive_interval: settings.keepalive_interval,
+                keepalive_timeout: settings.keepalive_timeout,
+                interceptors,
+            },
+            prepared: None,
+        })
     }
 }
 
@@ -186,14 +190,12 @@ impl Server {
 mod tests {
     use std::path::Path;
 
-    use rapira_config::Mode;
-
     use super::*;
 
     struct Want {
         listen: SocketAddr,
         descriptor_set: &'static str,
-        services: Option<&'static [&'static str]>,
+        services: Option<Vec<String>>,
         reflection: bool,
         default_timeout: Option<Duration>,
         max_timeout: Option<Duration>,
@@ -328,7 +330,6 @@ mod tests {
         }
     }
 
-    /// The default pool mode is dispatcher, so a success case does not list the mode.
     #[test]
     fn grpc_table_resolves_and_validates() {
         let cases = [
@@ -341,7 +342,7 @@ mod tests {
                 name: "services narrow the set",
                 toml: toml("services = [\"p.S\"]\n"),
                 expected: Ok(Want {
-                    services: Some(&["p.S"]),
+                    services: Some(vec!["p.S".into()]),
                     ..base()
                 }),
             },
@@ -440,14 +441,7 @@ mod tests {
                         "{}",
                         case.name
                     );
-                    assert_eq!(
-                        g.services
-                            .as_deref()
-                            .map(|s| s.iter().map(String::as_str).collect::<Vec<_>>()),
-                        want.services.map(<[&str]>::to_vec),
-                        "{}",
-                        case.name
-                    );
+                    assert_eq!(g.services, want.services, "{}", case.name);
                     assert_eq!(g.reflection, want.reflection, "{}", case.name);
                     assert_eq!(g.default_timeout, want.default_timeout, "{}", case.name);
                     assert_eq!(g.max_timeout, want.max_timeout, "{}", case.name);
@@ -457,7 +451,6 @@ mod tests {
                         case.name
                     );
                     assert_eq!(g.keepalive_timeout, want.keepalive_timeout, "{}", case.name);
-                    assert_eq!(g.pool.mode, Mode::Dispatcher, "{}", case.name);
                 }
                 (Err(err), Err(want)) => {
                     let err = err.to_string();

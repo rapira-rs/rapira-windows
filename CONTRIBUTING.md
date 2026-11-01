@@ -98,6 +98,10 @@ Pull request titles follow [Conventional Commits](https://www.conventionalcommit
 
 Release Please uses the core Rust workspace configuration. It updates the root package, workspace crates, lockfile, changelog, and release manifest together. The manifest records the last Windows release.
 
+To select a release version, add a `Release-As: <version>` footer to a commit body. The footer applies to the next release. See the [Release Please version instructions](https://github.com/googleapis/release-please#how-do-i-change-the-version-number).
+
+Edit release notes in the release pull request. Use the core changelog style: short linked bullets under the applicable Core, plugin, Observability, and PHP Packages sections. List breaking changes first. Include only changes that apply to Windows.
+
 Release Please updates the release pull request after each merge to `main`. Merging that pull request creates the tag and starts four native Windows builds: PHP 8.4 and 8.5 on x64 and ARM64. Each build creates the matching PHP runtime from official release source before it builds Rapira. The release stays in draft state until all four archives and the two architecture checksum files are ready. Re-run failed jobs when a release pipeline fails.
 
 If Release Please creates a tag but the binary workflow does not start, run `build-binaries.yml` with that tag as `ref` and `upload_to`. Set `version` to the tag without `v`. Publish the draft after all assets upload.

@@ -71,6 +71,7 @@ $cases = [
     ],
     ['name' => 'count() counts keys', 'run' => fn () => (string) count($sample())],
     ['name' => 'getIterator() walks the entries', 'run' => fn () => implode(',', array_keys(iterator_to_array($sample())))],
+    ['name' => 'protocol lists supported transports', 'run' => fn () => implode(',', array_column(Protocol::cases(), 'value'))],
     [
         'name' => 'method kind axes',
         'run' => fn () => implode(' ', array_map(

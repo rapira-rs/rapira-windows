@@ -63,6 +63,10 @@ const CASES: &[(&str, &str)] = &[
     ("count() counts keys", "2"),
     ("getIterator() walks the entries", "x-a,x-b-bin"),
     (
+        "protocol lists supported transports",
+        "grpc,grpc-web,connect",
+    ),
+    (
         "method kind axes",
         "unary:00 server-streaming:01 client-streaming:10 bidi-streaming:11",
     ),

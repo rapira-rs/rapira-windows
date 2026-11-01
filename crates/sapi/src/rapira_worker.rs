@@ -7,12 +7,7 @@ use crate::{
     start::{Pulled, pull_unit, pull_unit_to_shed, run_script},
 };
 use std::{
-    borrow::Cow,
-    cell::Cell,
-    ffi::CString,
-    os::raw::c_int,
-    path::{Path, PathBuf},
-    ptr::null_mut,
+    borrow::Cow, cell::Cell, ffi::CString, os::raw::c_int, path::Path, ptr::null_mut,
     time::Duration,
 };
 
@@ -103,13 +98,13 @@ fn run_cycle(script: &Path) -> Cycle {
     }
 }
 
-pub fn rapira_worker(script: PathBuf) -> WorkerExit {
+pub fn rapira_worker(script: &Path) -> WorkerExit {
     FIRST_CALL.set(true);
     RECYCLE.set(false);
 
     let mut failures: u32 = 0;
     let exit = loop {
-        match run_cycle(&script) {
+        match run_cycle(script) {
             Cycle::Stop => break WorkerExit::Closed,
             Cycle::Restart => break WorkerExit::Restart,
             Cycle::Recycle => {
@@ -188,7 +183,7 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
     let truncated: bool = finalize_response(&mut ctx, errored);
 
     log_and_clear_last_error();
-    sb_update(scoreboard::Event::Handled(errored));
+    sb_update(scoreboard::Event::Handled { errored });
     if recycle {
         RECYCLE.set(true);
     }

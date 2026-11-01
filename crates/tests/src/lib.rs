@@ -115,7 +115,7 @@ impl Resp {
                 self.ended = true;
                 return true;
             }
-            Frame::Interim(_) | Frame::File { .. } => {
+            Frame::File { .. } => {
                 unreachable!("the wire client sends only Head, Chunk and End")
             }
         }

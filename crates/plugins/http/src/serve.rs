@@ -1,3 +1,5 @@
+//! Accepts HTTP connections and drains them during shutdown.
+
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -67,15 +69,7 @@ impl Serving {
         while self.graceful.count() > 0 && tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        if tokio::time::timeout_at(deadline, self.graceful.shutdown())
-            .await
-            .is_err()
-        {
-            tracing::warn!(
-                target: "http",
-                "graceful connection shutdown did not finish within {grace:?}"
-            );
-        }
+        let _ = tokio::time::timeout_at(deadline, self.graceful.shutdown()).await;
         while self.shared.inflight.load(Ordering::Acquire) > 0
             && tokio::time::Instant::now() < deadline
         {
@@ -106,9 +100,8 @@ impl Serve for Serving {
     fn spawn_tcp(&self, stream: tokio::net::TcpStream, peer: std::net::SocketAddr) {
         let server = stream
             .local_addr()
-            .map(Addr::Inet)
-            .unwrap_or_else(|_| Addr::Inet(self.shared.cfg.listen));
-        self.spawn_conn(stream, Addr::Inet(peer), server);
+            .expect("an accepted inet socket has a local address");
+        self.spawn_conn(stream, Addr::Inet(peer), Addr::Inet(server));
     }
 }
 
@@ -124,7 +117,7 @@ pub(crate) fn spawn_connection<I>(
 {
     let service = hyper::service::service_fn(move |req| {
         let handler = Arc::clone(&handler);
-        async move { Ok::<_, Infallible>(respond(handler, req).await) }
+        async move { Ok::<_, Infallible>(respond(&handler, req).await) }
     });
     spawn_watched(
         graceful.watch(builder.serve_connection(io, service)),

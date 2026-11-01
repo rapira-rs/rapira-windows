@@ -99,7 +99,7 @@ impl Php {
 }
 
 /// Compiles a crate's C method shells with the same PHP ABI as the SAPI.
-pub fn compile(name: &str, files: &[&str], php: &Php, extra_includes: &[&str]) {
+pub fn compile(name: &str, files: &[&str], php: &Php) {
     let version = env::var("CARGO_PKG_VERSION").expect("cargo sets CARGO_PKG_VERSION");
     let mut c = cc::Build::new();
     c.define("RAPIRA_VERSION", format!("\"{version}\"").as_str());
@@ -109,10 +109,7 @@ pub fn compile(name: &str, files: &[&str], php: &Php, extra_includes: &[&str]) {
     // Rust uses the release CRT on MSVC. Zend allocations stay inside the PHP DLL.
     // https://doc.rust-lang.org/reference/linkage.html#static-and-dynamic-c-runtimes
     c.static_crt(false).debug(php.debug);
-    c.files(files)
-        .includes(&php.includes)
-        .includes(extra_includes)
-        .compile(name);
+    c.files(files).includes(&php.includes).compile(name);
     for file in files {
         println!("cargo:rerun-if-changed={file}");
     }

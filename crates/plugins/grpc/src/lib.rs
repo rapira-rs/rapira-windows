@@ -19,9 +19,8 @@ mod serve;
 
 use call::{RpcStatus, StatusDetail, UnaryCall, UnaryReply};
 pub use php::rapira_grpc_register_classes;
-use schema::{MethodInfo, Schema, set_services};
+use schema::{MethodInfo, Schema, set_schema};
 
-#[derive(Clone)]
 pub(crate) struct Config {
     pub listen: SocketAddr,
     pub schema: Arc<Schema>,
@@ -49,15 +48,6 @@ pub(crate) struct Prepared {
     pub(crate) health: Arc<StaticChecker>,
 }
 
-impl Server {
-    pub(crate) fn init(config: Config) -> Self {
-        Self {
-            config,
-            prepared: None,
-        }
-    }
-}
-
 impl Plugin for Server {
     fn name(&self) -> &'static str {
         "grpc"
@@ -72,7 +62,7 @@ impl Plugin for Server {
     }
 
     fn prepare(&mut self) -> Result<()> {
-        set_services(self.config.schema.services().to_vec())?;
+        set_schema(Arc::clone(&self.config.schema));
         let listener = rapira_net::bind(&self.config.listen)?;
         tracing::info!(target: "grpc", "prepared listener on {}", listener.addr());
 
