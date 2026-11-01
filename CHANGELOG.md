@@ -2,24 +2,40 @@
 
 ## [0.9.2](https://github.com/rapira-rs/rapira-windows/compare/v0.9.0...v0.9.2) (2026-11-01)
 
+### ⚠️ Breaking Changes
 
-### ⚠ BREAKING CHANGES
+- 🧹 **HTTP Configuration**: Removed `[http].unsafe_field_names`. Classic and worker modes always drop header names that can conflict in CGI variables, [core #253](https://github.com/rapira-rs/rapira/pull/253).
+- 🧹 **gRPC Protocol**: Removed `Rapira\Grpc\Call\Protocol::Rest`. The supported cases are `Grpc`, `GrpcWeb`, and `Connect`, [core #253](https://github.com/rapira-rs/rapira/pull/253).
+- 🧹 **PHP Body Memory**: Raw and URL-encoded request bodies count toward PHP `memory_limit` in classic and worker modes, [#23](https://github.com/rapira-rs/rapira-windows/pull/23).
 
-* sync Rapira core 0.9.2 (rapira-rs/rapira#255)
-* Remove http.unsafe_field_names and Rapira Grpc Protocol::Rest.
+### 🎯 Core
 
-### Features
+- 🐛 **Request Failures**: Worker client disconnects preserve application state. Fatal errors retain their failure state through response completion, [#23](https://github.com/rapira-rs/rapira-windows/pull/23), [#26](https://github.com/rapira-rs/rapira-windows/pull/26).
+- 🐛 **Dispatcher Counts**: Cancelled units no longer count as active. Cancelled queued units do not consume `max_requests`, [#23](https://github.com/rapira-rs/rapira-windows/pull/23).
+- ⚡ **Request Processing**: Request bodies waiting for PHP use a bounded memory budget. Idle interpreter threads release unused allocator memory, [#23](https://github.com/rapira-rs/rapira-windows/pull/23).
+- 🐛 **PHP Logs**: Throwable log messages release computed PHP property values, [core #251](https://github.com/rapira-rs/rapira/pull/251).
 
-* sync compatible core changes through 6aa8bbb ([b73feb2](https://github.com/rapira-rs/rapira-windows/commit/b73feb2b382d03cdeca4dd2e4f9634e21dddb5c6))
-* sync compatible core changes through 6aa8bbb ([#23](https://github.com/rapira-rs/rapira-windows/issues/23)) ([5861f3e](https://github.com/rapira-rs/rapira-windows/commit/5861f3e66114589675f2d74efcf63a77f0c1b998))
-* sync Rapira core 0.9.2 ([f4a3828](https://github.com/rapira-rs/rapira-windows/commit/f4a3828d304c832a4a368851e31705405ec8ce20))
-* sync Rapira core 0.9.2 (rapira-rs/rapira[#255](https://github.com/rapira-rs/rapira-windows/issues/255)) ([0b0c58f](https://github.com/rapira-rs/rapira-windows/commit/0b0c58fe5a8c947f081e2fd91f2f4a641262bb81))
+### 📦 `http` plugin
 
+- ✨ **Server Identity**: Added `serverName()` and `serverPort()` to `HttpDispatcherInfo`. Both are available when the app starts, [#23](https://github.com/rapira-rs/rapira-windows/pull/23).
+- 🐛 **Connection Drain**: Shutdown preserves active responses and closes idle keepalive connections, [#23](https://github.com/rapira-rs/rapira-windows/pull/23).
+- 🐛 **Uploads**: Upload admission enforces the pool body budget. Multipart parsing preserves quoted backslashes and uses a linear scan, [#26](https://github.com/rapira-rs/rapira-windows/pull/26), [core #251](https://github.com/rapira-rs/rapira/pull/251), [core #253](https://github.com/rapira-rs/rapira/pull/253).
+- 🐛 **Responses**: Fixed streamed response completion, `sendFile()` length checks, and HEAD response lengths, [#23](https://github.com/rapira-rs/rapira-windows/pull/23).
 
-### Bug Fixes
+### 📦 `grpc` plugin
 
-* bound HTTP uploads and preserve PHP failure state ([f4637af](https://github.com/rapira-rs/rapira-windows/commit/f4637aff4ae53307c6f21c561cfa4aa2531acd03))
-* bound HTTP uploads and preserve PHP failure state ([#26](https://github.com/rapira-rs/rapira-windows/issues/26)) ([00316e6](https://github.com/rapira-rs/rapira-windows/commit/00316e673f2a7bbd70b4f2b403a284e35c622e85))
+- 🐛 **Connection Drain**: Connect and gRPC-Web calls on existing HTTP/1.1 connections receive a response before closure, within the drain timeout. HTTP/2 connections keep graceful GOAWAY, [#23](https://github.com/rapira-rs/rapira-windows/pull/23).
+- 🐛 **PHP Values**: `Status` and `Metadata` objects created without their constructors raise `ReflectionException`, [#23](https://github.com/rapira-rs/rapira-windows/pull/23).
+- ⚡ **Response Compression**: gRPC and gRPC-Web responses use gzip only when the request used gzip. Connect responses can use gzip when the client accepts it, [#23](https://github.com/rapira-rs/rapira-windows/pull/23).
+
+### 📦 `static_files` middleware
+
+- 🐛 **File Responses**: Fixed `If-Range` handling and serve the complete file for multi-range requests. Files with timestamps outside the HTTP date range remain available, [#23](https://github.com/rapira-rs/rapira-windows/pull/23), [core #251](https://github.com/rapira-rs/rapira/pull/251).
+- ⚡ **File Cache**: Fresh cache entries avoid an expiry scan, [core #253](https://github.com/rapira-rs/rapira/pull/253).
+
+### 📦 PHP Packages
+
+- ✨ **Sodium**: Added the Sodium extension to native x64 and ARM64 release builds, [#23](https://github.com/rapira-rs/rapira-windows/pull/23).
 
 ## [0.9.0](https://github.com/rapira-rs/rapira-windows/compare/v0.8.0...v0.9.0) (2026-10-05)
 
