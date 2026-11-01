@@ -130,7 +130,8 @@ fn double_head_throws_head_already_written() -> anyhow::Result<()> {
     assert_eq!(status, 201, "the first head must stand");
     assert_eq!(
         body,
-        "double-head:Rapira\\Http\\Exception\\HeadAlreadyWrittenError"
+        "double-head:Rapira\\Http\\Exception\\HeadAlreadyWrittenError;\
+         interim-after-final:Rapira\\Http\\Exception\\HeadAlreadyWrittenError"
     );
     Ok(())
 }
@@ -415,11 +416,13 @@ fn head_and_204_drop_the_body() -> anyhow::Result<()> {
 
     let mut head_rq = req("/");
     *head_rq.method_mut() = Method::HEAD;
-    let (status, _) = drain(submit(srv.addr, head_rq)?);
-    assert_eq!(status, 200, "HEAD keeps the GET head");
+    let resp = drain_resp(submit(srv.addr, head_rq)?);
+    assert_eq!(resp.status(), 200, "HEAD keeps the GET head");
+    assert_eq!(resp.content_length, None, "HEAD gets no computed length");
 
-    let (status, _) = drain(submit(srv.addr, req("/?probe=head204"))?);
-    assert_eq!(status, 204);
+    let resp = drain_resp(submit(srv.addr, req("/?probe=head204"))?);
+    assert_eq!(resp.status(), 204);
+    assert_eq!(resp.content_length, None, "a 204 has no content-length");
     Ok(())
 }
 
@@ -614,6 +617,7 @@ fn multipart_parse_outcomes_leave_no_spool_file() -> anyhow::Result<()> {
     }
     // max_field_size_kb = 1, so a field of 1025 bytes is over the limit.
     let long = "x".repeat(1025);
+    let big = "y".repeat(300 << 10);
     let cases = [
         Case {
             name: "file part between two fields",
@@ -621,7 +625,7 @@ fn multipart_parse_outcomes_leave_no_spool_file() -> anyhow::Result<()> {
                 ("content-disposition: form-data; name=\"a\"", "one"),
                 (
                     "content-disposition: form-data; name=\"f\"; filename=\"x.bin\"\r\n\
-                     content-type: application/octet-stream",
+                              content-type: application/octet-stream",
                     "PAYLOAD",
                 ),
                 ("content-disposition: form-data; name=\"b\"", "two"),
@@ -652,6 +656,15 @@ fn multipart_parse_outcomes_leave_no_spool_file() -> anyhow::Result<()> {
             lines: &[],
         },
         Case {
+            name: "file part in a body over 256 KiB",
+            parts: vec![(
+                "content-disposition: form-data; name=\"f\"; filename=\"big.bin\"",
+                &big,
+            )],
+            status: 200,
+            lines: &["counts=0/1", "file0=f:big.bin:307200:yyyy"],
+        },
+        Case {
             name: "field over the limit after a file part",
             parts: vec![
                 (
@@ -662,6 +675,65 @@ fn multipart_parse_outcomes_leave_no_spool_file() -> anyhow::Result<()> {
             ],
             status: 413,
             lines: &[],
+        },
+        Case {
+            name: "two spellings of one part header name stay two keys",
+            parts: vec![(
+                "content-disposition: form-data; name=\"f\"; filename=\"a.txt\"\r\n\
+                          Content-Type: a/b\r\n\
+                          content-type: c/d",
+                "z",
+            )],
+            status: 200,
+            lines: &[r#""Content-Type":["a/b"],"content-type":["c/d"]"#],
+        },
+        Case {
+            name: "three lines of one part header keep their order",
+            parts: vec![(
+                "content-disposition: form-data; name=\"v\"\r\n\
+                          x-a: 3\r\n\
+                          x-b: z\r\n\
+                          x-a: 1\r\n\
+                          x-a: 2",
+                "w",
+            )],
+            status: 200,
+            lines: &[r#""x-a":["3","1","2"],"x-b":["z"]"#],
+        },
+        // A browser sends '\' raw, https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#multipart/form-data-encoding-algorithm
+        // php-src unescapes only \\ and \", https://github.com/php/php-src/blob/php-8.5.8/main/rfc1867.c#L495
+        Case {
+            name: "backslash inside filename",
+            parts: vec![(
+                r#"content-disposition: form-data; name="f"; filename="a\b.txt""#,
+                "x",
+            )],
+            status: 200,
+            lines: &["counts=0/1", r"file0=f:a\b.txt:1:x"],
+        },
+        Case {
+            name: "backslash inside name",
+            parts: vec![(r#"content-disposition: form-data; name="a\b""#, "v")],
+            status: 200,
+            lines: &["counts=1/0", r"field0=a\b=v"],
+        },
+        Case {
+            name: "escaped backslash inside filename",
+            parts: vec![(
+                r#"content-disposition: form-data; name="f"; filename="a\\b.txt""#,
+                "x",
+            )],
+            status: 200,
+            lines: &["counts=0/1", r"file0=f:a\b.txt:1:x"],
+        },
+        Case {
+            name: "escaped quote inside filename",
+            parts: vec![(
+                r#"content-disposition: form-data; name="f"; filename="a\"b.txt""#,
+                "x",
+            )],
+            status: 200,
+            lines: &["counts=0/1", r#"file0=f:a"b.txt:1:x"#],
         },
     ];
 
@@ -786,20 +858,6 @@ fn rejected_bodies_never_reach_php() -> anyhow::Result<()> {
             status: Some(413),
         },
         Case {
-            name: "plain line before a repeated multipart line",
-            method: "POST",
-            content_type: &["text/plain", EVIL],
-            body: smuggled.clone(),
-            status: Some(400),
-        },
-        Case {
-            name: "multipart line before a repeated plain line",
-            method: "POST",
-            content_type: &[EVIL, "text/plain"],
-            body: smuggled,
-            status: Some(400),
-        },
-        Case {
             name: "empty multipart body",
             method: "POST",
             content_type: &[MULTIPART],
@@ -820,6 +878,27 @@ fn rejected_bodies_never_reach_php() -> anyhow::Result<()> {
             body: Vec::new(),
             status: None,
         },
+        Case {
+            name: "empty body with a repeated multipart line",
+            method: "POST",
+            content_type: &["text/plain", EVIL],
+            body: Vec::new(),
+            status: Some(400),
+        },
+        Case {
+            name: "plain line before a repeated multipart line",
+            method: "POST",
+            content_type: &["text/plain", EVIL],
+            body: smuggled.clone(),
+            status: Some(400),
+        },
+        Case {
+            name: "multipart line before a repeated plain line",
+            method: "POST",
+            content_type: &[EVIL, "text/plain"],
+            body: smuggled,
+            status: Some(400),
+        },
     ];
 
     // The file limit is whole MiB, so the over-limit file part is one byte over 1 MiB.
@@ -832,7 +911,7 @@ fn rejected_bodies_never_reach_php() -> anyhow::Result<()> {
         *rq.method_mut() = case.method.parse::<Method>()?;
         for line in case.content_type {
             rq.headers_mut()
-                .append(http::header::CONTENT_TYPE, HeaderValue::from_static(line));
+                .append(CONTENT_TYPE, HeaderValue::from_static(line));
         }
         *rq.body_mut() = case.body.clone();
         let (status, body) = drain(submit(srv.addr, rq)?);
@@ -1009,25 +1088,57 @@ fn streamed_chunks_arrive_in_order() -> anyhow::Result<()> {
 /// The prefix rule on an exceeded content-length: the fitting bytes are sent, the response completes per its declaration, the write throws.
 #[test]
 fn content_length_exceeded_sends_the_fitting_prefix() -> anyhow::Result<()> {
-    let (srv, rx) = stream_probe("/?probe=cl-exceeded")?;
-    let resp = drain_resp(rx);
+    struct Case {
+        name: &'static str,
+        method: Method,
+        body: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "get",
+            method: Method::GET,
+            body: "01234",
+        },
+        Case {
+            name: "head",
+            method: Method::HEAD,
+            body: "",
+        },
+    ];
 
-    assert_eq!(resp.status(), 200);
-    assert_eq!(
-        resp.content_length,
-        Some(5),
-        "the declared length is honoured"
-    );
-    assert_eq!(resp.body_string(), "01234", "the surplus is not sent");
-    assert!(
-        resp.ended && !resp.truncated,
-        "complete per its declaration; keepalive survives"
-    );
-    let ctx = server_log::wait_app_record(&srv.log_file(), "cl-exceeded");
-    assert!(
-        ctx.contains(r#"ContentLengthExceededError"#),
-        "wrong class in {ctx}"
-    );
+    for case in cases {
+        let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/stream-worker.php"))
+            .json_log()
+            .spawn();
+        let mut rq = req("/?probe=cl-exceeded");
+        *rq.method_mut() = case.method;
+        let resp = drain_resp(submit(srv.addr, rq)?);
+
+        assert_eq!(resp.status(), 200, "{}", case.name);
+        assert_eq!(
+            resp.content_length,
+            Some(5),
+            "{}: the declared length is honoured",
+            case.name
+        );
+        assert_eq!(
+            resp.body_string(),
+            case.body,
+            "{}: the surplus is not sent",
+            case.name
+        );
+        assert!(
+            resp.ended && !resp.truncated,
+            "{}: complete per its declaration; keepalive survives",
+            case.name
+        );
+        let ctx = server_log::wait_app_record(&srv.log_file(), "cl-exceeded");
+        assert!(
+            ctx.contains(r#"ContentLengthExceededError"#),
+            "{}: wrong class in {ctx}",
+            case.name
+        );
+    }
     Ok(())
 }
 
@@ -1420,4 +1531,47 @@ fn dechunk(mut raw: &[u8]) -> anyhow::Result<(Vec<u8>, bool)> {
         raw = &raw[size + 2..];
     }
     Ok((data, false))
+}
+
+#[test]
+fn request_header_iterator_keeps_values() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        headers: &'static str,
+        expected: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "empty values and interleaved mixed case names",
+            headers: "x-probe:\r\nx-other: unused\r\nX-Probe: middle\r\nx-probe:\r\n",
+            expected: "x-probe=|middle|",
+        },
+        Case {
+            name: "nine values in one list",
+            headers: "x-probe: one\r\nx-probe: two\r\nx-probe: three\r\nx-probe: four\r\nx-probe: five\r\nx-probe: six\r\nx-probe: seven\r\nx-probe: eight\r\nx-probe: nine\r\n",
+            expected: "x-probe=one|two|three|four|five|six|seven|eight|nine",
+        },
+    ];
+    let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/request-worker.php")).spawn();
+    for case in cases {
+        let stream = TcpStream::connect(srv.addr)?;
+        stream.set_read_timeout(Some(READ))?;
+        let request = format!(
+            "GET / HTTP/1.1\r\nHost: e2e\r\n{}Connection: close\r\n\r\n",
+            case.headers
+        );
+        let (status, body) = raw_exchange(stream, request.as_bytes())?;
+        assert_eq!(status, 200, "{}: {body:?}", case.name);
+        assert!(
+            body.lines().any(|line| line == case.expected),
+            "{}: {body:?}",
+            case.name
+        );
+        assert!(
+            body.lines().any(|line| line == "memo-same=true"),
+            "{}: {body:?}",
+            case.name
+        );
+    }
+    Ok(())
 }

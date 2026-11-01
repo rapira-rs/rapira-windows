@@ -897,3 +897,34 @@ fn dispatcher_multipart_over_the_wire() {
     .expect("over-limit POST");
     assert_eq!(code, 413, "over-limit file part must answer 413");
 }
+
+#[test]
+fn malformed_chunked_body_answers_400_before_dispatch() {
+    struct Case {
+        name: &'static str,
+        body: &'static [u8],
+    }
+    let cases = [
+        Case {
+            name: "a chunk size that is not hex, after a valid chunk",
+            body: b"5\r\nhello\r\nzz\r\n",
+        },
+        Case {
+            name: "chunk data longer than its size",
+            body: b"5\r\nhelloXX\r\n0\r\n\r\n",
+        },
+    ];
+    let srv = spawn_with_config("lifecycle/fidelity-worker.php", 1, "");
+    wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
+
+    for case in cases {
+        let mut c = Conn::open(srv.addr, Duration::from_secs(10)).expect("connect");
+        c.send(b"POST / HTTP/1.1\r\nHost: e2e\r\nTransfer-Encoding: chunked\r\n\r\n")
+            .expect("head");
+        c.send(case.body).expect("body");
+        let (status, _) = c
+            .read_head(Duration::from_secs(10))
+            .unwrap_or_else(|e| panic!("{}: {e}\n{}", case.name, diagnostics(&srv)));
+        assert_eq!(status, 400, "{}\n{}", case.name, diagnostics(&srv));
+    }
+}

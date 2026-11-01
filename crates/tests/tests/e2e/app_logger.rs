@@ -109,6 +109,37 @@ fn log_context_carries_a_throwable() {
     );
 }
 
+/// Repeated log calls release computed Throwable properties.
+#[test]
+fn log_context_releases_a_computed_throwable_property() {
+    struct Case {
+        name: &'static str,
+        path: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "message from __get after unset",
+            path: "/?case=get",
+        },
+        Case {
+            name: "message from a get hook",
+            path: "/?case=hook",
+        },
+    ];
+
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture("app_logger/app-logger-computed-throwable-worker.php"),
+    )
+    .spawn();
+    for case in cases {
+        let StatusBody { status, body } =
+            drain(submit(srv.addr, req(case.path)).expect("dispatch"));
+        // The body is the memory_get_usage() growth in bytes.
+        assert_eq!((status, body.as_str()), (200, "0"), "{}", case.name);
+    }
+}
+
 /// A context value json_encode cannot represent must not throw, drop the record, or lose siblings.
 #[test]
 fn log_context_tolerates_unencodable_values() {

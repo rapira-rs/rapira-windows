@@ -260,6 +260,23 @@ mod tests {
                 ),
             },
             Case {
+                name: "unknown name after auth",
+                toml: toml("interceptors = [\"auth\", \"authz\"]\n[auth]\ntokens_file = \"t\"\n"),
+                expected: Err(
+                    "grpc.interceptors entry \"authz\" is unknown; known interceptors: \"auth\"",
+                ),
+            },
+            Case {
+                name: "duplicate before unknown name",
+                toml: toml("interceptors = [\"authz\", \"auth\", \"auth\"]\n"),
+                expected: Err("grpc.interceptors lists \"auth\" twice"),
+            },
+            Case {
+                name: "missing auth table before unknown name",
+                toml: toml("interceptors = [\"auth\", \"authz\"]\n"),
+                expected: Err("grpc.interceptors lists \"auth\" but [grpc.auth] is missing"),
+            },
+            Case {
                 name: "auth listed without its table",
                 toml: toml("interceptors = [\"auth\"]\n"),
                 expected: Err("grpc.interceptors lists \"auth\" but [grpc.auth] is missing"),
