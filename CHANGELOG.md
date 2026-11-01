@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.9.2](https://github.com/rapira-rs/rapira-windows/compare/v0.9.0...v0.9.2) (2026-11-01)
+
+
+### ⚠ BREAKING CHANGES
+
+* sync Rapira core 0.9.2 (rapira-rs/rapira#255)
+* Remove http.unsafe_field_names and Rapira Grpc Protocol::Rest.
+
+### Features
+
+* sync compatible core changes through 6aa8bbb ([b73feb2](https://github.com/rapira-rs/rapira-windows/commit/b73feb2b382d03cdeca4dd2e4f9634e21dddb5c6))
+* sync compatible core changes through 6aa8bbb ([#23](https://github.com/rapira-rs/rapira-windows/issues/23)) ([5861f3e](https://github.com/rapira-rs/rapira-windows/commit/5861f3e66114589675f2d74efcf63a77f0c1b998))
+* sync Rapira core 0.9.2 ([f4a3828](https://github.com/rapira-rs/rapira-windows/commit/f4a3828d304c832a4a368851e31705405ec8ce20))
+* sync Rapira core 0.9.2 (rapira-rs/rapira[#255](https://github.com/rapira-rs/rapira-windows/issues/255)) ([0b0c58f](https://github.com/rapira-rs/rapira-windows/commit/0b0c58fe5a8c947f081e2fd91f2f4a641262bb81))
+
+
+### Bug Fixes
+
+* bound HTTP uploads and preserve PHP failure state ([f4637af](https://github.com/rapira-rs/rapira-windows/commit/f4637aff4ae53307c6f21c561cfa4aa2531acd03))
+* bound HTTP uploads and preserve PHP failure state ([#26](https://github.com/rapira-rs/rapira-windows/issues/26)) ([00316e6](https://github.com/rapira-rs/rapira-windows/commit/00316e673f2a7bbd70b4f2b403a284e35c622e85))
+
 ## [0.9.0](https://github.com/rapira-rs/rapira-windows/compare/v0.8.0...v0.9.0) (2026-10-05)
 
 ### Core
