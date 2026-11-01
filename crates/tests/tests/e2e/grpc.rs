@@ -43,11 +43,18 @@ fn php_outcomes_reach_the_client() -> anyhow::Result<()> {
         Case {
             name: "metadata crosses the edge",
             text: "meta",
-            metadata: &[("x-echo", "a"), ("x-echo-bin", "AP8")],
+            metadata: &[
+                ("x-echo", "a"),
+                ("x-echo-bin", "AP8"),
+                ("123", "n"),
+                ("-1", "n"),
+                ("0", "n"),
+                ("01", "n"),
+            ],
             grpc_status: "0",
             headers: &[("x-echo", "a")],
             trailers: &[("x-echo-bin", "AP8")],
-            log: ("meta", r#"{"keys":["x-echo","x-echo-bin"]}"#),
+            log: ("meta", r#"{"keys":["x-echo","x-echo-bin",123,-1,0,"01"]}"#),
         },
         Case {
             name: "the deadline cancels the php call",

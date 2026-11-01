@@ -51,7 +51,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "rapira_dispatcher.c",
         ],
         &php,
-        &[],
     );
 
     let mut bindings = bindgen::Builder::default()
@@ -77,7 +76,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     bindings
         .generate()?
         .write_to_file(PathBuf::from(env::var("OUT_DIR")?).join("bindings.rs"))?;
-    println!("cargo:include={}", env::var("CARGO_MANIFEST_DIR")?);
     rapira_php_build::rerun_if_changed(&[
         "rapira_sapi.h",
         "allowed_bindings.rs",

@@ -1,3 +1,5 @@
+//! Streams PHP response frames and file slices. Tracks response delivery and write timeouts.
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -12,7 +14,7 @@ use tokio::sync::watch;
 use crate::handler::InflightReqCount;
 use crate::response::BoxError;
 
-#[derive(Clone, Copy, Default)]
+#[derive(Default)]
 pub(crate) struct ConnectionState {
     pub(crate) closed: bool,
     pub(crate) flushes: u64,
@@ -177,8 +179,8 @@ impl hyper::body::Body for ReplyBody {
                         done: 0,
                     });
                 }
-                // The producer latches the head, so neither event can follow it.
-                Some(Frame::Interim(_) | Frame::Head { .. }) => {}
+                // The producer latches the head, so a second one cannot follow it.
+                Some(Frame::Head { .. }) => {}
                 Some(Frame::End { truncated, .. }) => {
                     if truncated {
                         tracing::debug!(target: "http", "php ended the reply as truncated");
@@ -204,7 +206,6 @@ impl Drop for ReplyBody {
     fn drop(&mut self) {
         // A length-delimited HTTP body can finish before PHP sends End: https://www.rfc-editor.org/rfc/rfc9112#section-6.3
         if self.declared_cl == Some(self.sent)
-            && !matches!(self.staged, Some(Frame::End { .. }))
             && self.guard.end_flush.get().is_some()
             && let Some(reply) = self.reply.take()
         {
@@ -215,21 +216,23 @@ impl Drop for ReplyBody {
 
 /// Consumes the reply to End. A connection close cancels the reply unless a flush past the guard's watermark has written the last response byte to the socket.
 /// After that flush the drain holds the reply until PHP sends End, so a delivered response never reports cancellation to PHP.
+/// A flush counts only after hyper wrote its whole buffer (hyper proto/h1/io.rs, Buffered::poll_flush), so an idle flush cannot stand for a delivery.
 pub(crate) fn spawn_drain(
     mut reply: Receiver<Frame>,
     mut closed: watch::Receiver<ConnectionState>,
     guard: Arc<InflightReqCount>,
 ) {
-    // A buffered reply queues End behind the head or the last chunk, so consume it here.
+    // A buffered reply usually queues End next, so consume it here. A classic or worker HEAD reply with output queues a Chunk first and takes the task.
     let mut cx = Context::from_waker(std::task::Waker::noop());
     if let Poll::Ready(Some(Frame::End { .. }) | None) = reply.poll_recv(&mut cx) {
         return;
     }
     tokio::spawn(async move {
+        // The flush count changes without a notification, so only the close wakes this wait.
         let flushed = |s: &ConnectionState| guard.end_flush.get().is_some_and(|&f| s.flushes > f);
         tokio::select! {
             biased;
-            state = closed.wait_for(|s| s.closed || flushed(s)) => {
+            state = closed.wait_for(|s| s.closed) => {
                 if !state.is_ok_and(|s| flushed(&s)) {
                     return;
                 }
@@ -707,17 +710,11 @@ mod tests {
             watch::channel(ConnectionState::default()).1,
         );
         assert_eq!(data(&mut b).await.unwrap().unwrap(), "hello");
-        let metrics = tokio::runtime::Handle::current().metrics();
-        let tasks = metrics.num_alive_tasks();
         drop(b);
+        // On the current_thread runtime a spawned drain task would still hold the reply here.
         assert!(
             events.is_closed(),
             "drop must consume the queued End in place"
-        );
-        assert_eq!(
-            metrics.num_alive_tasks(),
-            tasks,
-            "a queued End must not cost a drain task"
         );
     }
 
@@ -725,15 +722,9 @@ mod tests {
     #[tokio::test]
     async fn queued_end_is_consumed_without_a_drain_task() {
         let (reply, events) = open_reply(vec![end(false)]);
-        let metrics = tokio::runtime::Handle::current().metrics();
-        let tasks = metrics.num_alive_tasks();
         spawn_drain(reply, watch::channel(ConnectionState::default()).1, guard());
+        // On the current_thread runtime a spawned drain task would still hold the reply here.
         assert!(events.is_closed(), "the reply must drop at once");
-        assert_eq!(
-            metrics.num_alive_tasks(),
-            tasks,
-            "a queued End must not cost a drain task"
-        );
     }
 
     /// A reply that has not sent End yet is still pending at drop, so the drain task takes it.

@@ -22,7 +22,6 @@ static void rapira_exchange_free(zend_object *std) {
     rapira_exchange_obj *obj = rapira_exchange_from(std);
     if (obj->unit != NULL) {
         rapira_rs_exchange_drop(obj->unit);
-        obj->unit = NULL;
     }
     // no-op on IS_UNDEF (getRequest never called)
     zval_ptr_dtor(&obj->request);

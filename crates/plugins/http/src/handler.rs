@@ -135,14 +135,12 @@ impl Body for RespBody {
 
 /// Serves one request of the connection.
 pub(crate) async fn respond(
-    handler: Arc<Conn>,
+    handler: &Conn,
     req: http::Request<Incoming>,
 ) -> http::Response<RespBody> {
-    let closed = handler.closed.clone();
     let method = req.method().clone();
-    let shared = Arc::clone(&handler.shared);
     let mut response = handle(handler, req).await;
-    if shared.closing.load(Ordering::Acquire) {
+    if handler.shared.closing.load(Ordering::Acquire) {
         response.headers_mut().insert(
             http::header::CONNECTION,
             http::HeaderValue::from_static("close"),
@@ -151,11 +149,14 @@ pub(crate) async fn respond(
     if let Some(length) = framed_length(&method, &response) {
         let body = response.body_mut();
         if length == 0 {
-            body.guard.end_flush.get_or_init(|| closed.borrow().flushes);
+            // hyper writes the head in the poll that takes the response, so the flush count read here is the one before the head.
+            body.guard
+                .end_flush
+                .get_or_init(|| handler.closed.borrow().flushes);
         } else {
             body.transport = Some(Declared {
                 remaining: length,
-                closed,
+                closed: handler.closed.clone(),
             });
         }
     }
@@ -168,7 +169,7 @@ pub(crate) async fn respond(
 /// The ended-stream check also survives body combinators that drop the size hint.
 fn framed_length(method: &http::Method, response: &http::Response<RespBody>) -> Option<u64> {
     let status = response.status();
-    // hyper never polls the body here, whatever the headers say (`Server::can_have_body`).
+    // hyper never polls the body here, whatever the headers say (Server::can_have_body).
     if *method == http::Method::HEAD
         || status.is_informational()
         || matches!(
@@ -186,7 +187,7 @@ fn framed_length(method: &http::Method, response: &http::Response<RespBody>) -> 
         .or_else(|| response.body().size_hint().exact())
 }
 
-async fn handle(handler: Arc<Conn>, req: http::Request<Incoming>) -> http::Response<RespBody> {
+async fn handle(handler: &Conn, req: http::Request<Incoming>) -> http::Response<RespBody> {
     let reqs_counter: Arc<InflightReqCount> =
         Arc::new(InflightReqCount::init(&handler.shared.inflight));
     let received_at: f64 = rapira_sapi::work::now_unix_f64();
@@ -194,7 +195,6 @@ async fn handle(handler: Arc<Conn>, req: http::Request<Incoming>) -> http::Respo
 
     let authority = match check::check_request(
         &mut parts,
-        handler.shared.cfg.unsafe_field_names,
         handler.shared.cfg.superglobals,
         handler.shared.cfg.max_body_size,
     ) {
@@ -227,7 +227,7 @@ async fn handle(handler: Arc<Conn>, req: http::Request<Incoming>) -> http::Respo
         &handler.closed,
         authority,
         reqs_counter,
-        &mut parts,
+        parts,
         incoming,
         peer,
     )
@@ -269,7 +269,7 @@ async fn serve_php(
     closed: &tokio::sync::watch::Receiver<bridge::ConnectionState>,
     authority: Option<Vec<u8>>,
     guard: Arc<InflightReqCount>,
-    parts: &mut http::request::Parts,
+    parts: http::request::Parts,
     body: Incoming,
     peer: Peer,
 ) -> http::Response<RespBody> {
@@ -333,33 +333,24 @@ async fn serve_php(
         head: ResponseHead { status, headers },
         content_length,
         bodiless,
-    } = loop {
-        match reply.recv().await {
-            None => {
-                tracing::error!(target: "http", "php worker died before a response head");
-                return refused(http::StatusCode::BAD_GATEWAY, guard);
-            }
-            Some(Frame::Interim(head)) => {
-                tracing::debug!(target: "http", "dropped interim {}", head.status);
-            }
-            Some(Frame::Head {
-                head,
-                content_length,
-                bodiless,
-            }) => {
-                break ReplyHead {
-                    head,
-                    content_length,
-                    bodiless,
-                };
-            }
-            Some(Frame::End { .. }) => {
-                tracing::error!(target: "http", "php produced no response head");
-                return refused(http::StatusCode::BAD_GATEWAY, guard);
-            }
-            Some(Frame::Chunk(_) | Frame::File { .. }) => {
-                tracing::warn!(target: "http", "dropped body bytes preceding the response head");
-            }
+    } = match reply.recv().await {
+        None => {
+            tracing::error!(target: "http", "php worker died before a response head");
+            return refused(http::StatusCode::BAD_GATEWAY, guard);
+        }
+        Some(Frame::Head {
+            head,
+            content_length,
+            bodiless,
+        }) => ReplyHead {
+            head,
+            content_length,
+            bodiless,
+        },
+        // Every producer sends the head first, so a body frame here means the head is gone.
+        Some(Frame::End { .. } | Frame::Chunk(_) | Frame::File { .. }) => {
+            tracing::error!(target: "http", "php produced no response head");
+            return refused(http::StatusCode::BAD_GATEWAY, guard);
         }
     };
 
@@ -376,13 +367,11 @@ async fn serve_php(
         }
     };
 
-    let declared_cl = content_length.filter(|_| !bodiless);
-
     let kind = if bodiless {
-        bridge::spawn_drain(reply, closed.clone(), guard.clone());
+        bridge::spawn_drain(reply, closed.clone(), Arc::clone(&guard));
         BodyKind::Empty
     } else {
-        let staged = if declared_cl.is_some() {
+        let staged = if content_length.is_some() {
             timeout(Duration::from_millis(10), reply.recv())
                 .await
                 .ok()
@@ -392,7 +381,7 @@ async fn serve_php(
         };
         BodyKind::Reply(bridge::ReplyBody::new(
             reply,
-            declared_cl,
+            content_length,
             Arc::clone(&guard),
             staged,
             closed.clone(),
@@ -441,12 +430,6 @@ async fn parse_multipart(
     let Some(limits) = limits else {
         return Ok((req, held));
     };
-    let rapira_sapi::types::Body::Raw(raw) = &mut req.body else {
-        return Ok((req, held));
-    };
-    if raw.get_ref().is_empty() {
-        return Ok((req, held));
-    }
     // Content-type is a singleton field per RFC 9110 §8.3: with repeated lines the plugin and a PHP consumer could split the body on different boundaries.
     // https://www.rfc-editor.org/rfc/rfc9110#section-8.3
     let lines = req.headers.get_all(CONTENT_TYPE);
@@ -456,6 +439,12 @@ async fn parse_multipart(
             status: http::StatusCode::BAD_REQUEST,
             reason: "repeated content-type field lines with a multipart body".into(),
         });
+    }
+    let rapira_sapi::types::Body::Raw(raw) = &mut req.body else {
+        return Ok((req, held));
+    };
+    if raw.get_ref().is_empty() {
+        return Ok((req, held));
     }
     let Some(content_type) = req.content_type.as_deref() else {
         return Ok((req, held));

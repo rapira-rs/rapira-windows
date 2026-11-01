@@ -27,7 +27,7 @@ pub(crate) struct Config {
     pub server_name: &'static str,
     pub server_port: u16,
     pub max_body_size: usize,
-    pub unsafe_field_names: UnsafeFieldNames,
+    /// The classic and worker modes build the CGI view, so they drop the field names that alias a CGI variable.
     pub superglobals: bool,
     pub entrypoint: String,
     pub write_timeout: Duration,
@@ -37,15 +37,6 @@ pub(crate) struct Config {
     pub uploads: Option<multipart::Limits>,
     /// sendFile() containment root.
     pub sendfile_root: PathBuf,
-}
-
-/// The `HTTP_*` mapping rewrites `-` to `_` and PHP rewrites `.` to `_`, so `X_Forwarded_For` and `X.Forwarded.For` both land on `HTTP_X_FORWARDED_FOR`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum UnsafeFieldNames {
-    #[default]
-    Drop,
-    Reject,
 }
 
 pub struct Server {

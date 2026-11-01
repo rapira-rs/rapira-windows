@@ -9,7 +9,7 @@ The http plugin of the `rapira` binary. It terminates HTTP/1.1 on the configured
 - `name()` returns `http`: the TOML table and the dispatcher name that PHP sees.
 - `modes()` accepts the classic, worker and dispatcher modes.
 - `dispatcher()` returns the dispatcher classes. MINIT calls `rapira_http_register_classes` after registering the base classes.
-- `prepare()` runs on the boot thread before PHP starts. It sets the server identity, removes spool directories of dead processes, and binds the listener with `rapira_net::bind`.
+- `prepare()` runs on the boot thread before PHP starts. It sets the server identity and `sendFile()` root, removes spool directories of dead processes, and binds the listener with `rapira_net::bind`.
 - `serve()` runs on the `rapira-http` plugin thread. Its `Worker` holds a two-thread tokio runtime handle, the PHP pool intake, the stop flag, and `drain_grace`. The plugin drains within this limit after a stop.
 
 `serve()` takes the pool `Intake` and the prepared listener through `rapira_net::Acceptor`. The plugin checks each request and tries the configured static-file handler. If no file matches, it reads the body, builds an `Exchange`, and submits it to the interpreter queue. PHP produces response frames. The plugin writes these frames to the socket.
@@ -26,7 +26,7 @@ The intake has 1024 slots and a 64 MiB body budget per pool. A declared body res
 ## Crate layout
 
 - `Cargo.toml`: depends on `rapira_sapi`, `rapira_net`, `rapira_config` and `rapira_static_files`. `rapira_php_build` is a build dependency.
-- `build.rs`: compiles the C files with `rapira_php_build::compile`, against the PHP headers and the `rapira_sapi.h` directory from `DEP_RAPIRA_SAPI_INCLUDE`.
+- `build.rs`: compiles the C files against the PHP headers. `rapira_http.h` includes `rapira_sapi.h` by its path in `crates/sapi`.
 - `rapira_http.stub.php`: the PHP stub of the `Rapira\Http` and `Rapira\Internal\Http` classes.
 - `rapira_http_arginfo.h`: generated from the stub by `dev.ps1 -Task stubs`. Do not edit it.
 - `rapira_http.h`: the C layout of the exchange object and the class entries.
@@ -37,7 +37,7 @@ The intake has 1024 slots and a 64 MiB body budget per pool. A declared body res
 - `src/config.rs`: `Section` (the `[http]` table), `Settings`, `resolve` with the boot checks, and `Server::from_settings`.
 - `src/serve.rs`: the accept loop, one hyper connection per accepted socket, and the drain.
 - `src/handler.rs`: the admission checks, the static-file handler, the body read, the submit to the intake and the response head.
-- `src/check.rs`: the admission checks: `Host`, `CONNECT`, field names, declared length.
+- `src/check.rs`: the admission checks: `Host`, field names, and declared length.
 - `src/request.rs`: builds the SAPI `Request` from the HTTP request and the `Peer`.
 - `src/response.rs`: the response body types, fields, and error responses.
 - `src/bridge.rs`: the reply body that streams the PHP frames and the `sendFile` slices, and the write timeout.
@@ -55,17 +55,17 @@ A permission error or a bad file name is also a miss. Any other read failure ans
 
 Multiple byte ranges return the whole file. An `If-Range` value that differs from the current strong ETag also returns the whole file.
 
-`StaticFiles` holds served files in memory. An entry stays fresh for one second. The HTTP plugin shares one cache of up to 16 MiB across its pool. It stores no file above 256 KiB. A permission change does not stop a cached file from being served. Delete or replace the file to stop serving it. A restart empties the cache.
+`StaticFiles` holds served files in memory. An entry stays fresh for one second. The HTTP plugin shares one cache of up to 16 MiB across its pool. It stores no file above 256 KiB. A permission change does not stop a cached file from being served. Delete or replace the file to stop serving it. A restart empties the cache. Files with modification times outside 1970 through 9999 have no `ETag` or `Last-Modified` field.
 
 ## Request handling
 
 - The request body is buffered before dispatch and capped by `max_body_size_mb`: a declared `Content-Length` over the cap answers 413 before the body is read, an over-long streamed body answers 413 when the cap is crossed.
 - `Expect: 100-continue` is honored by hyper: the interim 100 goes out when the body is first read and is skipped entirely when the request is refused first.
-- `Host` rules per RFC 9112 §3.2: a repeated, missing or empty `Host` on HTTP/1.1 answers 400. https://www.rfc-editor.org/rfc/rfc9112#section-3.2
-- Absolute-form request-targets are accepted. The authority of the target replaces `Host`, without the userinfo part. PHP sees the origin-form path and query; the request target keeps the full form. https://www.rfc-editor.org/rfc/rfc9112#section-3.2.2
-- `CONNECT` answers 501. The plugin implements no tunnels.
+- A missing or empty `Host` on HTTP/1.1 returns 400. More than one `Host` line returns 400 in every HTTP version. https://www.rfc-editor.org/rfc/rfc9112#section-3.2
+- An absolute-form request-target keeps the authority from `Host`. PHP receives the origin-form path and query in `uri` and the full form in `target`.
+- In dispatcher mode, repeated `Content-Type` lines return 400 when a line names `multipart/form-data`. This check also applies to an empty body. https://www.rfc-editor.org/rfc/rfc9110#section-8.3
 - A request body that makes no read progress for `keepalive_timeout_secs` answers 408 and closes the connection.
-- `unsafe_field_names` guards the CGI variable mapping of the classic and worker modes: a field name with `_` or `.` lands on the `$_SERVER` entry a `-` name owns, so such names are dropped (default) or the request answers 400 (`"reject"`).
+- Classic and worker modes drop field names with bytes outside `A-Z`, `a-z`, `0-9`, and `-`. This prevents two names from mapping to the same CGI variable. Dispatcher mode keeps these names.
 - Header field names reach PHP lowercased, one entry per field line, values in wire order per name.
 
 ## Response handling
@@ -92,7 +92,6 @@ The `[http]` table. Unknown keys fail the boot.
 - `max_body_size_mb`: the request body limit. Default 8. A larger body answers 413.
 - `write_timeout_secs`: the limit for one stalled write to the client, not for the whole response. Default 30.
 - `keepalive_timeout_secs`: closes an idle keepalive connection, and limits each head read and body-frame read. Default 60.
-- `unsafe_field_names`: `"drop"` (default) or `"reject"` for header names that alias a CGI variable. In dispatcher mode no `$_SERVER` mapping exists, so `"drop"` keeps the names and `"reject"` still answers 400.
 - `middleware`: `[]` or `["static"]`. Default: none.
 - `[http.uploads]`: the multipart limits of dispatcher mode: `dir` (default: the system temp dir), `max_file_size_mb` (2), `max_field_size_kb` (256), `max_files` (20), `max_parts` (1024), `max_part_headers` (32). This table under another mode fails the boot.
 - `[http.sendfile]`: `root`, the directory that must contain each `sendFile()` path. Default: the entrypoint directory.

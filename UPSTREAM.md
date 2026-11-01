@@ -1,8 +1,8 @@
 # Core source
 
-Core: [`6aa8bbb7cefbbbd1e5eb76410fc5c480b726def2`](https://github.com/rapira-rs/rapira/tree/6aa8bbb7cefbbbd1e5eb76410fc5c480b726def2).
+Core 0.9.2: [`9f9268be8ddb402aeb7c1c17cd2c79acfbf12d7b`](https://github.com/rapira-rs/rapira/tree/9f9268be8ddb402aeb7c1c17cd2c79acfbf12d7b).
 
-PHP contract: [`27324e79be73fce03ac778dfeec5f00dda716999`](https://github.com/rapira-rs/contract/tree/27324e79be73fce03ac778dfeec5f00dda716999).
+PHP contract: [`9f379a3f2f7cd3b268ed9e9fa0b7418b6ef39b0d`](https://github.com/rapira-rs/contract/tree/9f379a3f2f7cd3b268ed9e9fa0b7418b6ef39b0d).
 
 The source follows the core plugin architecture and binary-driven test design.
 
@@ -13,6 +13,8 @@ The source follows the core plugin architecture and binary-driven test design.
 - `crates/net` owns prepared listeners. Each plugin owns its configuration and PHP API.
 - HTTP supports classic, worker, and dispatcher modes. gRPC supports dispatcher mode and unary gRPC, gRPC-Web, and Connect.
 - HTTP dispatcher info exposes the configured server name and port at boot. Shared dispatcher handlers serve both plugins.
+- Classic and worker modes drop HTTP header names that can conflict in CGI variables. Multipart parsing uses a linear scan and preserves quoted backslashes.
+- Static files with timestamps outside the HTTP date range remain available. Fresh cache entries avoid an expiry scan.
 - Raw CGI bodies use PHP temporary streams. Worker client aborts end the request and preserve application state.
 - Intake entries own byte and slot permits until dequeue. A cancelled queued unit counts as shed and does not use the request quota.
 - gRPC supports ordered interceptors and bearer-token authentication. The token file loads before PHP starts.
@@ -40,7 +42,8 @@ The source follows the core plugin architecture and binary-driven test design.
 - Unix process supervision, fork cleanup, reload, dynamic scaling, process watchdogs, shared-memory mappings, and transparent huge-page controls.
 - Direct NTS Zend globals and PHP 8.7 header changes. The Windows build uses thread-local ZTS accessors with PHP 8.4 and 8.5.
 - Unix socket listeners, Unix file permissions, Linux packages, and container builds.
-- Per-worker process-exit and RSS/PSS metrics. Windows interpreter threads share one process.
+- Per-worker process-exit and RSS/PSS metrics, and RSS limits through `max_memory_mb`. Windows interpreter threads share one process.
+- Linux `io_uring` file reads. Windows file reads use native APIs.
 - The cargo-fuzz workflow and fuzz-only public APIs. The native suite covers the supported parser behavior.
 
 The Windows HTTP path calls static-file handling directly. It needs no Tower middleware chain. Windows file reads, path checks, spool cleanup, and socket ownership rules use native APIs.

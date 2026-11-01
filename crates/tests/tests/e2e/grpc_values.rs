@@ -54,8 +54,18 @@ const CASES: &[(&str, &str)] = &[
     ("values() is case-insensitive and ordered", r#"["1","2"]"#),
     ("values() of an absent key", "[]"),
     ("values() finds a numeric key", r#"["a"]"#),
+    ("values() finds a negative numeric key", r#"["a"]"#),
+    ("values() keeps a leading-zero key", r#"["a"]"#),
+    ("values() accepts an empty lookup", "[]"),
+    ("values() finds a dash key", r#"["a"]"#),
+    ("values() keeps an embedded NUL in a key", r#"["a"]"#),
+    ("values() returns a list by value", r#"[["a","b"],["a"]]"#),
     ("count() counts keys", "2"),
     ("getIterator() walks the entries", "x-a,x-b-bin"),
+    (
+        "protocol lists supported transports",
+        "grpc,grpc-web,connect",
+    ),
     (
         "method kind axes",
         "unary:00 server-streaming:01 client-streaming:10 bidi-streaming:11",

@@ -33,7 +33,7 @@
     "add_assoc_stringl_ex", "zend_hash_index_update", "rapira_smart_str_free",
     "object_init_ex", "zend_update_property", "zend_update_property_stringl",
     "zend_update_property_long", "zend_update_property_double", "zend_update_property_null",
-    "rapira_array_init", "rapira_symtable_str_find", "rapira_array_is_list", "rapira_zval_enum_case",
+    "rapira_array_init", "rapira_array_is_list", "rapira_zval_enum_case",
     "zend_hash_str_find",
     "rapira_register_known_stringl", "zend_hash_extend", "php_import_environment_variables",
     "zend_is_auto_global_str",

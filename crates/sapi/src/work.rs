@@ -34,7 +34,7 @@ pub unsafe fn release<T: Held + ?Sized>(ptr: *mut T) -> Box<T> {
     crate::exchange::forget_held(ptr.cast::<()>());
     let st = unsafe { Box::from_raw(ptr) };
     if !st.settled() {
-        sb_update(Event::Handled(true));
+        sb_update(Event::Handled { errored: true });
     }
     st
 }

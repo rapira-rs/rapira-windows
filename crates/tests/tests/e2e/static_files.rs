@@ -777,3 +777,85 @@ fn write_at(path: &Path, contents: &str, mtime_secs: u64) {
         .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(mtime_secs))
         .expect("set mtime");
 }
+
+#[test]
+fn a_static_file_with_a_pre_epoch_mtime_is_served_without_validators() {
+    let big = "x".repeat(300_000);
+    let root = static_root(&[("old.txt", "old"), ("big.bin", &big)]);
+    struct Case<'a> {
+        name: &'static str,
+        method: &'static str,
+        path: &'static str,
+        body: &'a [u8],
+        length: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "GET of a file under the cache cap",
+            method: "GET",
+            path: "/old.txt",
+            body: b"old",
+            length: "3",
+        },
+        Case {
+            name: "HEAD of a file under the cache cap",
+            method: "HEAD",
+            path: "/old.txt",
+            body: b"",
+            length: "3",
+        },
+        Case {
+            name: "GET of a file streamed from disk",
+            method: "GET",
+            path: "/big.bin",
+            body: big.as_bytes(),
+            length: "300000",
+        },
+        Case {
+            name: "HEAD of a file above the cache cap",
+            method: "HEAD",
+            path: "/big.bin",
+            body: b"",
+            length: "300000",
+        },
+    ];
+    for case in &cases {
+        std::fs::File::options()
+            .write(true)
+            .open(root.join(case.path.trim_start_matches('/')))
+            .expect(case.name)
+            .set_modified(SystemTime::UNIX_EPOCH - Duration::from_secs(3600))
+            .expect(case.name);
+    }
+    let srv = spawn_echo_loop(&root, None);
+    for case in &cases {
+        let req = format!(
+            "{} {} HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n",
+            case.method, case.path
+        );
+        let raw = http_raw_bytes(srv.addr, req.as_bytes(), T).expect(case.name);
+        assert!(
+            !raw.is_empty(),
+            "{}: empty reply\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
+        assert_eq!(
+            parse_status_and_body(&raw).expect("HTTP response"),
+            (200, case.body),
+            "{}",
+            case.name
+        );
+        assert_eq!(
+            head_field(&raw, "content-length"),
+            case.length,
+            "{}",
+            case.name
+        );
+        assert_eq!(head_field(&raw, "last-modified"), "", "{}", case.name);
+        assert_eq!(head_field(&raw, "etag"), "", "{}", case.name);
+        assert_eq!(head_field(&raw, "x-rapira-target"), "", "{}", case.name);
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+}

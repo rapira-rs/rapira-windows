@@ -1,3 +1,5 @@
+//! One HTTP exchange in the interpreter queue.
+
 use tokio::sync::mpsc::Sender;
 
 use rapira_sapi::callbacks::send_error_head;
