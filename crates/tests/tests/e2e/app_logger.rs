@@ -133,8 +133,7 @@ fn log_context_releases_a_computed_throwable_property() {
     )
     .spawn();
     for case in cases {
-        let StatusBody { status, body } =
-            drain(submit(srv.addr, req(case.path)).expect("dispatch"));
+        let (status, body) = drain(submit(srv.addr, req(case.path)).expect("dispatch"));
         // The body is the memory_get_usage() growth in bytes.
         assert_eq!((status, body.as_str()), (200, "0"), "{}", case.name);
     }

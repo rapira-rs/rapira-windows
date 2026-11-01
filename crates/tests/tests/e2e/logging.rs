@@ -257,16 +257,10 @@ fn filtered_log_context_does_not_call_the_serializer() {
         srv.stop();
         assert_eq!(status, 200, "{}\n{}", case.name, diagnostics(&srv));
         assert_eq!(body, case.body.as_bytes(), "{}", case.name);
-        let records = server_log::app_records(&srv.log_file()).records;
+        let (records, _) = server_log::app_records(&srv.log_file());
         let got: Vec<(Level, &str, &str)> = records
             .iter()
-            .map(|record| {
-                (
-                    record.level,
-                    record.message.as_str(),
-                    record.context.as_str(),
-                )
-            })
+            .map(|(level, message, context)| (*level, message.as_str(), context.as_str()))
             .collect();
         assert_eq!(got, case.records, "{}", case.name);
     }
