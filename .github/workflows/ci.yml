@@ -116,6 +116,15 @@ jobs:
           ./dev.ps1 -Task build -Release -Devel $env:PHP_DEVEL_DIR -Runtime $env:PHP_RUNTIME
           $target = if ('${{ matrix.arch }}' -eq 'arm64') { 'aarch64-pc-windows-msvc' } else { 'x86_64-pc-windows-msvc' }
           ./ci/package.ps1 -Binary "target\$target\release\rapira.exe" -PhpInstall $env:PHP_INSTALL_DIR -Destination "$env:RUNNER_TEMP\bundle"
+          $profile = if ('${{ matrix.arch }}' -eq 'arm64') { 'debug' } else { 'release' }
+          $e2e = @(Get-ChildItem "target\$target\$profile\deps\e2e-*.exe")
+          if ($e2e.Count -ne 1) { throw 'Expected one end-to-end test executable.' }
+          "INSTALL_E2E=$($e2e[0].FullName)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Installer with Windows PowerShell
+        shell: powershell
+        run: ./ci/test-install.ps1 -Bundle "$env:RUNNER_TEMP\bundle" -E2e $env:INSTALL_E2E
+      - name: Installer with PowerShell 7
+        run: ./ci/test-install.ps1 -Bundle "$env:RUNNER_TEMP\bundle" -E2e $env:INSTALL_E2E
 
   coverage:
     needs: prepare

@@ -21,6 +21,7 @@ mod harness;
 mod http_values;
 mod imap_tests;
 mod ini;
+mod installation;
 mod lifecycle;
 mod listeners;
 mod logging;

@@ -15,7 +15,29 @@ This repository provides the Windows build of [Rapira](https://github.com/rapira
 - Each server process has its own OPcache cache by default. Its interpreter threads share that cache.
 - Extension DLLs must match the bundled PHP minor, ZTS setting, architecture, and toolchain. See the [PHP Windows extension requirements](https://www.php.net/manual/en/install.pecl.windows.php).
 
-Download the archive for your PHP minor and architecture from [GitHub Releases](https://github.com/rapira-rs/rapira-windows/releases). Extract the archive. Run `rapira.exe` from that directory.
+## Installation
+
+Install the [Microsoft Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist) for your architecture. Then run this command in Windows PowerShell 5.1 or PowerShell 7:
+
+```powershell
+irm https://rapira.rs/install.ps1 | iex
+```
+
+The installer selects x64 or ARM64 and downloads the latest stable release with PHP 8.5. It verifies the SHA256 checksum. It installs the bundle in `%LOCALAPPDATA%\Programs\Rapira` and adds that directory to your user and current PowerShell `PATH`. Rapira installation does not require administrator access.
+
+The installer refuses an existing destination. Keep application files outside the install directory. To use PHP 8.4 or another directory, download [install.ps1](install.ps1) and run it:
+
+```powershell
+& ([scriptblock]::Create((Get-Content -LiteralPath .\install.ps1 -Raw))) -PhpVersion 8.4 -InstallDirectory C:\tools\rapira
+```
+
+Run Rapira from any directory:
+
+```powershell
+rapira serve C:\app\rapira.toml
+```
+
+You can also download an archive from [GitHub Releases](https://github.com/rapira-rs/rapira-windows/releases). Extract the archive. Run `rapira.exe` from that directory:
 
 ```powershell
 .\rapira.exe serve C:\app\rapira.toml
