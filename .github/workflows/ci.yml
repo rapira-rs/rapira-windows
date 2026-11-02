@@ -116,6 +116,13 @@ jobs:
           ./dev.ps1 -Task build -Release -Devel $env:PHP_DEVEL_DIR -Runtime $env:PHP_RUNTIME
           $target = if ('${{ matrix.arch }}' -eq 'arm64') { 'aarch64-pc-windows-msvc' } else { 'x86_64-pc-windows-msvc' }
           ./ci/package.ps1 -Binary "target\$target\release\rapira.exe" -PhpInstall $env:PHP_INSTALL_DIR -Destination "$env:RUNNER_TEMP\bundle"
+      - name: Installer with Windows PowerShell
+        if: matrix.php == '8.5'
+        shell: powershell
+        run: ./ci/test-install.ps1 -Bundle "$env:RUNNER_TEMP\bundle"
+      - name: Installer with PowerShell 7
+        if: matrix.php == '8.5'
+        run: ./ci/test-install.ps1 -Bundle "$env:RUNNER_TEMP\bundle"
 
   coverage:
     needs: prepare
