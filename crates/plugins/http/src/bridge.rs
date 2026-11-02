@@ -404,10 +404,7 @@ mod tests {
     }
 
     fn end(truncated: bool) -> Frame {
-        Frame::End {
-            trailers: http::HeaderMap::new(),
-            truncated,
-        }
+        Frame::End { truncated }
     }
 
     fn chunk(s: &str) -> Frame {

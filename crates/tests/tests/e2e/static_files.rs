@@ -85,15 +85,75 @@ fn static_files_serve_over_the_wire() {
         );
     }
 
-    let raw = http_get_raw(srv.addr, "/big.bin", &[("Range", "bytes=0-3")], T).expect("range GET");
-    let text = String::from_utf8_lossy(&raw);
-    assert!(text.starts_with("HTTP/1.1 206"), "{text}");
-    assert!(
-        text.to_lowercase().contains("content-range: bytes 0-3/10"),
-        "{text}"
-    );
-    assert_eq!(head_field(&raw, "content-length"), "4");
-    assert!(text.ends_with("0123"), "{text}");
+    // Range applies only to GET: https://www.rfc-editor.org/rfc/rfc9110#section-14.2.
+    struct RangeCase {
+        name: &'static str,
+        method: &'static str,
+        range: &'static str,
+        status: u16,
+        length: Option<&'static str>,
+        content_range: &'static str,
+        body: Option<&'static [u8]>,
+    }
+    let ranges = [
+        RangeCase {
+            name: "GET serves a satisfiable range",
+            method: "GET",
+            range: "bytes=0-3",
+            status: 206,
+            length: Some("4"),
+            content_range: "bytes 0-3/10",
+            body: Some(b"0123"),
+        },
+        RangeCase {
+            name: "GET rejects an unsatisfiable range",
+            method: "GET",
+            range: "bytes=100-200",
+            status: 416,
+            length: None,
+            content_range: "bytes */10",
+            body: None,
+        },
+        RangeCase {
+            name: "HEAD ignores a satisfiable range",
+            method: "HEAD",
+            range: "bytes=0-3",
+            status: 200,
+            length: Some("10"),
+            content_range: "",
+            body: Some(b""),
+        },
+        RangeCase {
+            name: "HEAD ignores an unsatisfiable range",
+            method: "HEAD",
+            range: "bytes=100-200",
+            status: 200,
+            length: Some("10"),
+            content_range: "",
+            body: Some(b""),
+        },
+    ];
+    for case in ranges {
+        let req = format!(
+            "{} /big.bin HTTP/1.1\r\nHost: e2e\r\nRange: {}\r\nConnection: close\r\n\r\n",
+            case.method, case.range
+        );
+        let raw = http_raw_bytes(srv.addr, req.as_bytes(), T).expect(case.name);
+        let (status, body) = split_response(&raw);
+        assert_eq!(status, case.status, "{}", case.name);
+        assert_eq!(
+            head_field(&raw, "content-range"),
+            case.content_range,
+            "{}",
+            case.name
+        );
+        if let Some(length) = case.length {
+            assert_eq!(head_field(&raw, "content-length"), length, "{}", case.name);
+        }
+        if let Some(expected) = case.body {
+            assert_eq!(body, expected, "{}", case.name);
+        }
+    }
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -251,6 +311,10 @@ fn static_files_route_each_request_over_the_wire() {
         ("sub/index.php", "<?php sub();"),
         ("sub/index.html", "<h1>s</h1>"),
         ("assets/a.css", "a{}"),
+        ("secret~1.css", "blocked file"),
+        ("assets~1/a.css", "blocked directory"),
+        ("secret~x.css", "allowed file"),
+        ("assets~x/a.css", "allowed directory"),
         (".env", "SECRET=1"),
         (".git/config", "[core]"),
     ]);
@@ -287,6 +351,22 @@ fn static_files_route_each_request_over_the_wire() {
         ToPhp {
             name: "forbidden extension in a directory with an encoded trailing slash",
             path: "/sub/index.php%2F".into(),
+        },
+        ToPhp {
+            name: "existing file with a short-name pattern",
+            path: "/secret~1.css".into(),
+        },
+        ToPhp {
+            name: "existing file with an encoded short-name pattern",
+            path: "/secret%7E1.css".into(),
+        },
+        ToPhp {
+            name: "existing file below a short-name directory",
+            path: "/assets~1/a.css".into(),
+        },
+        ToPhp {
+            name: "existing file below an encoded short-name directory",
+            path: "/assets%7E1/a.css".into(),
         },
         ToPhp {
             name: "root directory",
@@ -365,6 +445,16 @@ fn static_files_route_each_request_over_the_wire() {
             name: "file in a directory",
             path: "/assets/a.css",
             body: b"a{}",
+        },
+        Served {
+            name: "tilde followed by a letter in a file name",
+            path: "/secret~x.css",
+            body: b"allowed file",
+        },
+        Served {
+            name: "tilde followed by a letter in a directory name",
+            path: "/assets~x/a.css",
+            body: b"allowed directory",
         },
         Served {
             name: "query string",

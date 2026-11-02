@@ -21,7 +21,7 @@ The http plugin of the `rapira` binary. It terminates HTTP/1.1 on the configured
 - `into_cgi()` gives the CGI request that the classic and worker modes run.
 - `shed()` answers 503 when the PHP boot of the worker failed.
 
-The intake has 1024 slots and a 64 MiB body budget per pool. A declared body reserves the smaller of its size and 64 MiB before the plugin reads it. A chunked body reserves more bytes as data arrives, up to 64 MiB. The reservation stays until the request reaches PHP, including during multipart parsing and while spool files wait in the queue. The client gets 503 when the free byte budget is too small or all slots stay full for 30 seconds. A stopped intake returns 500. PHP does not see these requests.
+The intake has 1024 slots and a 64 MiB body budget per pool. Each body reserves bytes as data arrives, before the plugin stores the data, up to 64 MiB. A declared body size does not reserve capacity. The reservation stays until the request reaches PHP, including during multipart parsing and while spool files wait in the queue. The client gets 503 when the free byte budget is too small or all slots stay full for 30 seconds. A stopped intake returns 500. PHP does not see these requests.
 
 ## Crate layout
 

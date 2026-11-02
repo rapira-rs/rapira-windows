@@ -119,7 +119,7 @@ pub(super) fn discard_unit(st: &mut ExchangeState) {
 
 /// # Safety
 /// As `send_frame`.
-pub(super) unsafe fn write_trailers_core(st: &mut ExchangeState, trailers: HeaderMap) -> Verb {
+pub(super) unsafe fn write_trailers_core(st: &mut ExchangeState) -> Verb {
     if st.cancelled() {
         discard_unit(st);
         return Verb::Discarded;
@@ -134,13 +134,8 @@ pub(super) unsafe fn write_trailers_core(st: &mut ExchangeState, trailers: Heade
         discard_unit(st);
         return Verb::Discarded;
     }
-    let trailers = if st.bodiless {
-        HeaderMap::new()
-    } else {
-        trailers
-    };
     unsafe {
-        seal(st, /*truncated=*/ false, trailers)
+        seal(st, /*truncated=*/ false)
     };
     Verb::Ok
 }
@@ -167,8 +162,9 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_trailers(
             );
             return false;
         }
+        drop(map);
         let st = &mut *job.cast::<ExchangeState>();
-        throw_verb(write_trailers_core(st, map))
+        throw_verb(write_trailers_core(st))
     })
 }
 
@@ -281,7 +277,7 @@ pub(super) unsafe fn send_body(
         }
         st.sent_body = cl;
         unsafe {
-            seal(st, /*truncated=*/ false, HeaderMap::new())
+            seal(st, /*truncated=*/ false)
         };
         return Verb::ContentLengthExceeded;
     }
@@ -297,7 +293,7 @@ pub(super) unsafe fn send_body(
     }
     if eos {
         unsafe {
-            seal(st, /*truncated=*/ false, HeaderMap::new())
+            seal(st, /*truncated=*/ false)
         };
     }
     Verb::Ok
@@ -320,19 +316,11 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_body(
 
 /// # Safety
 /// As `send_frame`.
-pub(super) unsafe fn seal(st: &mut ExchangeState, truncated: bool, trailers: HeaderMap) {
+pub(super) unsafe fn seal(st: &mut ExchangeState, truncated: bool) {
     st.body.unlink_spools();
     st.stage = Stage::Finalized;
     sb_update(Event::Handled { errored: truncated });
-    let _ = unsafe {
-        send_frame(
-            st,
-            Frame::End {
-                trailers,
-                truncated,
-            },
-        )
-    };
+    let _ = unsafe { send_frame(st, Frame::End { truncated }) };
     st.sender = None;
 }
 
@@ -391,10 +379,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_drop(job: *mut c_void) {
             st.body.unlink_spools();
             if let Some(tx) = st.sender.take() {
                 if st.head_sent {
-                    let _ = tx.try_send(Frame::End {
-                        trailers: HeaderMap::new(),
-                        truncated: true,
-                    });
+                    let _ = tx.try_send(Frame::End { truncated: true });
                 } else if tx
                     .try_send(Frame::Head {
                         head: ResponseHead {
@@ -406,10 +391,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_drop(job: *mut c_void) {
                     })
                     .is_ok()
                 {
-                    let _ = tx.try_send(Frame::End {
-                        trailers: HeaderMap::new(),
-                        truncated: false,
-                    });
+                    let _ = tx.try_send(Frame::End { truncated: false });
                 }
             }
         }

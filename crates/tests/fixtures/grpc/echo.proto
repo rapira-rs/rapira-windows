@@ -9,6 +9,7 @@ import "google/protobuf/timestamp.proto";
 message EchoRequest {
   string text = 1;
   google.protobuf.Timestamp at = 2;
+  repeated int32 ids = 3;
 }
 
 message EchoResponse {

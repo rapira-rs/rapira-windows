@@ -73,7 +73,6 @@ pub struct Resp {
     pub head: Option<rapira_sapi::ResponseHead>,
     pub content_length: Option<u64>,
     pub body: Vec<u8>,
-    pub trailers: HeaderMap,
     pub truncated: bool,
     /// An `End` frame arrived; false = the producer died first.
     pub ended: bool,
@@ -106,11 +105,7 @@ impl Resp {
                 self.content_length = content_length;
             }
             Frame::Chunk(b) => self.body.extend_from_slice(&b),
-            Frame::End {
-                trailers,
-                truncated,
-            } => {
-                self.trailers = trailers;
+            Frame::End { truncated } => {
                 self.truncated = truncated;
                 self.ended = true;
                 return true;
@@ -123,43 +118,33 @@ impl Resp {
     }
 }
 
-/// Poll for a first frame until `deadline`: None = nothing arrived in time, a producer that died with no frames yields `Resp::default()`.
+/// Collect a response until `deadline`. Return None if the response does not finish in time.
 pub fn drain_resp_deadline(
     rx: &mut mpsc::Receiver<Frame>,
     deadline: std::time::Instant,
 ) -> Option<Resp> {
+    let mut resp = Resp::default();
     loop {
+        if Instant::now() >= deadline {
+            return None;
+        }
         match rx.try_recv() {
             Ok(frame) => {
-                let mut resp = Resp::default();
-                if !resp.fold(frame) {
-                    while let Some(f) = rx.blocking_recv() {
-                        if resp.fold(f) {
-                            break;
-                        }
-                    }
+                if resp.fold(frame) {
+                    return Some(resp);
                 }
-                return Some(resp);
             }
-            Err(mpsc::error::TryRecvError::Disconnected) => return Some(Resp::default()),
+            Err(mpsc::error::TryRecvError::Disconnected) => return Some(resp),
             Err(mpsc::error::TryRecvError::Empty) => {
-                if std::time::Instant::now() >= deadline {
-                    return None;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                std::thread::sleep(Duration::from_millis(50));
             }
         }
     }
 }
 
 pub fn drain_resp(mut rx: mpsc::Receiver<Frame>) -> Resp {
-    let mut resp = Resp::default();
-    while let Some(frame) = rx.blocking_recv() {
-        if resp.fold(frame) {
-            break;
-        }
-    }
-    resp
+    drain_resp_deadline(&mut rx, Instant::now() + Duration::from_secs(60))
+        .expect("response did not finish within 60 seconds")
 }
 
 /// Drain to `(status, body)`; status is 0 when no head was produced.
@@ -169,16 +154,113 @@ pub fn drain(rx: mpsc::Receiver<Frame>) -> (u16, String) {
 }
 
 pub async fn drain_resp_async(mut rx: mpsc::Receiver<Frame>) -> Resp {
-    let mut resp = Resp::default();
-    while let Some(frame) = rx.recv().await {
-        if resp.fold(frame) {
-            break;
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let mut resp = Resp::default();
+        while let Some(frame) = rx.recv().await {
+            if resp.fold(frame) {
+                break;
+            }
         }
-    }
-    resp
+        resp
+    })
+    .await
+    .expect("response did not finish within 60 seconds")
 }
 
 pub async fn drain_async(rx: mpsc::Receiver<Frame>) -> (u16, String) {
     let r = drain_resp_async(rx).await;
     (r.status(), r.body_string())
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+
+    #[test]
+    fn a_response_deadline_applies_before_and_after_the_head() {
+        struct Case {
+            name: &'static str,
+            head: bool,
+        }
+        let cases = [
+            Case {
+                name: "no response head",
+                head: false,
+            },
+            Case {
+                name: "head without completion",
+                head: true,
+            },
+        ];
+        for case in cases {
+            let (sender, mut reply) = mpsc::channel(1);
+            if case.head {
+                sender
+                    .try_send(Frame::Head {
+                        head: rapira_sapi::ResponseHead {
+                            status: 200,
+                            headers: HeaderMap::new(),
+                        },
+                        content_length: Some(1),
+                        bodiless: false,
+                    })
+                    .unwrap_or_else(|_| panic!("{}: send head", case.name));
+            }
+            let (completed, result) = std::sync::mpsc::channel();
+            let reader = std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_millis(20);
+                completed
+                    .send(drain_resp_deadline(&mut reply, deadline))
+                    .unwrap();
+            });
+            let response = result.recv_timeout(Duration::from_secs(2));
+            drop(sender);
+            reader.join().expect("join response reader");
+            assert!(matches!(response, Ok(None)), "{}", case.name);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn async_response_reads_fail_when_the_response_does_not_finish() {
+        struct Case {
+            name: &'static str,
+            head: bool,
+        }
+        let cases = [
+            Case {
+                name: "no response head",
+                head: false,
+            },
+            Case {
+                name: "head without completion",
+                head: true,
+            },
+        ];
+        for case in cases {
+            let (sender, reply) = mpsc::channel(1);
+            if case.head {
+                sender
+                    .try_send(Frame::Head {
+                        head: rapira_sapi::ResponseHead {
+                            status: 200,
+                            headers: HeaderMap::new(),
+                        },
+                        content_length: Some(1),
+                        bodiless: false,
+                    })
+                    .unwrap_or_else(|_| panic!("{}: send head", case.name));
+            }
+            let response = tokio::time::timeout(
+                Duration::from_secs(61),
+                tokio::spawn(drain_resp_async(reply)),
+            )
+            .await;
+            drop(sender);
+            assert!(
+                matches!(response, Ok(Err(error)) if error.is_panic()),
+                "{}",
+                case.name
+            );
+        }
+    }
 }

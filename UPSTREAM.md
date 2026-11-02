@@ -17,7 +17,7 @@ The source follows the core plugin architecture and binary-driven test design.
 - Static files with timestamps outside the HTTP date range remain available. Fresh cache entries avoid an expiry scan.
 - Raw CGI bodies use PHP temporary streams. Worker client aborts end the request and preserve application state.
 - Intake entries own byte and slot permits until dequeue. A cancelled queued unit counts as shed and does not use the request quota.
-- gRPC supports ordered interceptors and bearer-token authentication. The token file loads before PHP starts.
+- The `[grpc.auth]` table enables bearer-token authentication. The token file loads before PHP starts.
 - Worker and dispatcher boot retries without client traffic. Application work pulls determine readiness. PHP 8.4 and 8.5 expose boot `argv` and `argc` with `register_argc_argv` disabled.
 - `rapira serve CONFIG` starts the configured plugin pools. Each plugin has a `<plugin>.pool` table.
 - Tests use the server binary for PHP, network, file, and lifecycle behavior. Pure unit tests stay in their crates.
@@ -50,4 +50,4 @@ The Windows HTTP path calls static-file handling directly. It needs no Tower mid
 
 ## Dependencies
 
-`crossbeam-channel` supplies the interpreter queues. Tokio semaphores limit their slots and body bytes. `windows-sys` supplies console control, process liveness, forced exit, and pidfile APIs. `libmimalloc-sys` releases unused allocator pages after an idle interval. The gRPC protocol and protobuf dependencies follow the pinned core source. Both native PHP builds include sodium.
+`crossbeam-channel` supplies the interpreter queues. Tokio semaphores limit their slots and body bytes. `windows-sys` supplies console control, process liveness, forced exit, and pidfile APIs. `libmimalloc-sys` releases unused allocator pages after an idle interval. The protobuf dependencies use [Buffa revision 1047169](https://github.com/anthropics/buffa/tree/104716922c66e21cf26895a2a5a2a42e6292f9d4) for its dynamic JSON allocation limit. [ConnectRPC revision cf24afd](https://github.com/rapira-rs/connect-rust/tree/cf24afda1ef20f69eb9e5edfd23ff42b7ee33a45) supplies the matching view bounds and generated types. Both native PHP builds include sodium.

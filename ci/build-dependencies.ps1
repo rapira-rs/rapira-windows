@@ -163,7 +163,7 @@ function Build-Arm64Dependencies {
     Replace-RequiredText $solution 'USE_SLICING_BY_8_CRC32C => undef' 'USE_SLICING_BY_8_CRC32C => 1' 'PostgreSQL portable CRC'
     Replace-RequiredText (Join-Path $pq 'src\tools\msvc\MSBuildProject.pm') "'MachineX64'" "'MachineARM64'" 'PostgreSQL linker machine'
     Replace-RequiredText (Join-Path $pq 'src\tools\msvc\Mkvcbuild.pm') "if (`$vsVersion >= '9.00')" "if (`$solution->{platform} ne 'ARM64')" 'PostgreSQL CRC source selection'
-    "`$config->{openssl} = '$($Root.Replace('\', '/'))';" | Set-Content (Join-Path $pq 'src\tools\msvc\config.pl')
+    "`$config->{openssl} = '$($Root.Replace('\', '/').Replace("'", "\'"))';" | Set-Content (Join-Path $pq 'src\tools\msvc\config.pl')
     Push-Location $pq
     try {
         Run perl @('src\tools\msvc\mkvcbuild.pl')

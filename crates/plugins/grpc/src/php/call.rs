@@ -678,8 +678,6 @@ pub unsafe extern "C" fn rapira_rs_grpc_drop(state: *mut c_void) {
 
 #[cfg(test)]
 mod tests {
-    use rapira_sapi::types::Addr;
-
     use super::*;
 
     fn state(reply: oneshot::Sender<UnaryReply>) -> GrpcState {
@@ -688,7 +686,7 @@ mod tests {
             protocol: Protocol::Grpc,
             metadata: HeaderMap::new(),
             deadline: None,
-            remote: Addr::Inet(([127, 0, 0, 1], 50051).into()),
+            remote: ([127, 0, 0, 1], 50051).into(),
             message: Bytes::new(),
         };
         GrpcState::new(req, reply)

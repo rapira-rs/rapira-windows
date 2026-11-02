@@ -42,7 +42,6 @@ processes = 16               # fixed interpreter threads; defaults to the CPU co
 # descriptor_set = "api.binpb" # relative to this file's directory; build it with its imports: buf build --as-file-descriptor-set -o api.binpb
 # services = ["billing.v1.InvoiceService"] # serve only these (fully qualified, each in descriptor_set); unset = the services of the files that no other file imports
 # reflection = false           # serve grpc.reflection.v1 and v1alpha
-# interceptors = ["auth"]
 # default_timeout_secs = 30    # deadline of a call without a client timeout; unset (the default) = no deadline
 # max_timeout_secs = 60        # upper limit for a client timeout; unset (the default) = no limit
 # keepalive_interval_secs = 10 # sends an HTTP/2 PING after this long without a request, request data or a PING answer

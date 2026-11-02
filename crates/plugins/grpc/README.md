@@ -31,7 +31,7 @@ The grpc plugin of the `rapira` binary. It serves unary RPCs from PHP over gRPC,
 - `rapira_grpc_classes.c`: `rapira_grpc_register_classes` and the object handlers of the call and response metadata. Constructors and dispatcher methods use the shared shells in `crates/sapi/rapira_dispatcher.c`. MINIT calls `rapira_grpc_register_classes` after the base classes.
 - `rapira_grpc.c`: the other method shells: the value classes, `name()` and `getServices()` of the dispatcher, the call and the response metadata.
 - `src/lib.rs`: `Config`, `Server` and its `Plugin` impl.
-- `src/config.rs`: `Section` (the `[grpc]` table), `Settings`, `resolve` with the boot checks, `Interceptor`, and `resolve_interceptors`. `Server::from_settings` loads the descriptor set and builds the interceptors.
+- `src/config.rs`: `Section` (the `[grpc]` table), `Settings`, and `resolve` with the boot checks. `Server::from_settings` loads the descriptor set and the optional authentication tokens.
 - `src/serve.rs`: the accept loop, one connect-rust connection per accepted socket, and the drain.
 - `src/dispatch.rs`: `PhpDispatcher`: the route to PHP, the JSON transcoding, and the map from the PHP outcome to a status.
 - `src/schema.rs`: the descriptor set, the method routes, the JSON transcoding, and the service list of `getServices()`.
@@ -56,25 +56,7 @@ connect-rust handles the framing, the compression, the timeout headers and the e
 
 ## Remote address
 
-The remote address is in the request extensions as `rapira_sapi::Addr`. PHP gets it as `Context::$remote`.
-
-## Interceptors
-
-`[grpc].interceptors` lists the interceptor names in execution order. The supported name is `"auth"`. The boot thread builds each interceptor before PHP starts. The plugin registers each interceptor with `with_interceptor_arc`. The first listed interceptor runs first.
-
-Interceptors cover GET and POST requests to PHP methods, health, reflection, and unknown paths. connect-rust calls `intercept_head` before it reads the request body. A rejection returns an error in the request protocol. PHP does not receive the call. An interceptor that changes request metadata uses `intercept_unary`.
-
-To add an interceptor:
-
-- Add its crate to the workspace and to the gRPC plugin dependencies.
-- Add its settings table to `Section` in `src/config.rs`.
-- Resolve the table in `settings` and pass its settings to `resolve_interceptors`.
-- Add its variant to `config::Interceptor`.
-- Add its name to `resolve_interceptors` and to the unknown-name error. Reject a configured table if the list does not name it.
-- Build it in `Server::from_settings`.
-- Add configuration cases for its name and its position in the list.
-- Add an e2e test that starts Rapira with its table through `Spawn::grpc_extra`.
-- Add a commented example next to `[grpc.auth]` in `examples/rapira.toml`.
+The remote address is in the request extensions as `std::net::SocketAddr`. PHP gets it as `Context::$remote`.
 
 ## Schemas
 
@@ -126,7 +108,7 @@ The pool runs in dispatcher mode only. `\Rapira\get_dispatcher()` returns a `Rap
 - `fail()` takes the `google.rpc.Status` triple: a code, a message and a list of `ErrorDetail`. For gRPC and gRPC-Web, the plugin sends `grpc-status`, `grpc-message` and `grpc-status-details-bin`. For Connect, the plugin sends the HTTP status of the code and a JSON error body. A Connect detail has the bare type name, for example `google.rpc.ErrorInfo`, and an unpadded base64 value.
 - `fail()` is the only way to send an error status. The plugin does not catch `Rapira\Grpc\Exception\GrpcException`. Catch it and call `$call->fail($e->status)`.
 - A call that PHP does not finalize is lost. The client gets INTERNAL with the message `internal error`, and the plugin logs a warning under the `grpc` target. An uncaught throwable also loses the call. The client does not see the message of the throwable.
-- The client gets UNAVAILABLE when the plugin refuses the call before PHP sees it: the pool byte budget is full, all intake slots stay full for 30 seconds, the pool stops, or PHP boot failed. The pool has 1024 slots and a 64 MiB budget for queued message bytes.
+- The client gets UNAVAILABLE when the plugin refuses the call before PHP sees it: the pool byte budget is full, all intake slots stay full for 30 seconds, the pool stops, or PHP boot failed. The pool has 1024 slots and a 64 MiB budget for received bodies and queued message bytes. The listener reserves bytes as they arrive. A cancelled or rejected request releases its reservation.
 
 ## Deadlines
 
@@ -141,9 +123,6 @@ The plugin cannot stop PHP code, so PHP continues to run the call. A later `resp
 Enable bearer-token authentication in `rapira.toml`:
 
 ```toml
-[grpc]
-interceptors = ["auth"]
-
 [grpc.auth]
 tokens_file = "grpc-tokens.txt"
 ```
@@ -173,9 +152,9 @@ The listener sends an HTTP/2 keepalive PING to a connection that sends no reques
 ## Limits
 
 - One interpreter serves one call at a time. Concurrent calls share the pool queue, including calls on one HTTP/2 connection.
-- The message size limit is 4 MiB, and no key changes it. A larger request answers RESOURCE_EXHAUSTED.
+- The message size limit is 4 MiB, and no key changes it. A gRPC request can use five additional envelope bytes. A larger request message answers RESOURCE_EXHAUSTED.
 - The listener does not terminate TLS. `Context::$tls` is always null. Put a TLS proxy between the clients and the listener when clients need TLS.
-- The JSON decoder has no element memory limit. A 4 MiB JSON request with many small elements can use several hundred MiB of memory for repeated or map fields. `Struct` or `ListValue` fields can use more than 1 GiB of memory and more than 1 s of CPU in the server process. The 4 MiB limit applies after decompression. A proxy must limit the decompressed request size.
+- The JSON request decoder applies a 32 MiB element-memory limit before it appends repeated values or map entries. Nested messages share the limit. A request above the limit answers RESOURCE_EXHAUSTED. This limit measures dynamic elements and does not bound total process memory.
 - A JSON reply decodes the payload of each `google.protobuf.Any` again, under the default element memory limit of buffa (32 MiB). This limit holds about 524,000 repeated elements or 381,000 map entries in one payload. A larger payload answers INTERNAL to a JSON client, and the log names the limit. A proto client is not affected.
 
 ## Config
@@ -190,8 +169,7 @@ The `[grpc]` table. Unknown keys fail the boot.
 - `max_timeout_secs`: the upper limit for a client timeout. Default: unset, no limit. `default_timeout_secs` must not be larger.
 - `keepalive_interval_secs`: the time without a new request, request data or a PING answer after which the listener sends an HTTP/2 keepalive PING. Default `10`. It must be at least 1.
 - `keepalive_timeout_secs`: the time the listener waits for the PING answer before it closes the connection. Default `10`. It must be at least 1.
-- `interceptors`: names in execution order. Default `[]`. The supported name is `"auth"`. Each listed interceptor requires its table. Repeated or unknown names fail startup.
-- `[grpc.auth].tokens_file`: required when `"auth"` is listed. The path must name a readable token file.
+- `[grpc.auth].tokens_file`: required when the `[grpc.auth]` table is present. The table enables authentication. The path must name a readable token file.
 - `[grpc.pool]`: the worker pool. It takes the keys of `[http.pool]`, and its `mode` must be `"dispatcher"`.
 
 The drain window is `[supervisor].process_control_timeout_secs` minus the smaller of 5 seconds and half the timeout. The remaining time allows PHP teardown. The host forces exit if the full shutdown exceeds this budget.

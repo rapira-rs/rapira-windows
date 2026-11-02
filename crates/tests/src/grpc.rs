@@ -8,7 +8,6 @@ use http::{HeaderMap, HeaderName, HeaderValue, Method};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use rapira_sapi::Addr;
 
 pub const ECHO_SERVICE: &str = "rapira.test.v1.EchoService";
 pub const ECHO_PATH: &str = "/rapira.test.v1.EchoService/Echo";
@@ -60,7 +59,7 @@ enum Sender {
 pub struct Conn {
     sender: Sender,
     /// The remote address that the server sees for this client.
-    pub peer: Addr,
+    pub peer: SocketAddr,
 }
 
 /// A collected response.
@@ -94,7 +93,7 @@ impl Response {
 impl Conn {
     pub async fn open(listen: &SocketAddr, wire: Wire) -> anyhow::Result<Conn> {
         let stream = tokio::net::TcpStream::connect(listen).await?;
-        let peer = Addr::Inet(stream.local_addr()?);
+        let peer = stream.local_addr()?;
         let io = TokioIo::new(stream);
         let sender = match wire {
             Wire::H2 => {

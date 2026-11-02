@@ -1,15 +1,9 @@
 use bytes::Bytes;
 use http::header::{AUTHORIZATION, CONTENT_LENGTH, COOKIE, HeaderMap, HeaderName};
 use std::ffi::CString;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Addr {
-    Inet(std::net::SocketAddr),
-    /// None is an unnamed endpoint, the usual case for a unix peer.
-    Unix(Option<PathBuf>),
-}
 
 /// A response stream is `Head? (Chunk|File)* End?`. A channel that closes without `End` means the producer stopped.
 pub enum Frame {
@@ -28,7 +22,6 @@ pub enum Frame {
         len: u64,
     },
     End {
-        trailers: HeaderMap,
         truncated: bool,
     },
 }
@@ -96,9 +89,9 @@ pub struct Request {
     pub https: bool,
     /// Wire/CGI spelling ("HTTP/2.0"); mapped to the contract spelling at the exchange view.
     pub protocol: &'static str,
-    pub remote: Addr,
-    pub server: Addr,
-    /// Configured CGI SERVER_NAME/SERVER_PORT, also the $uri synthesis fallback.
+    pub remote: SocketAddr,
+    pub server: SocketAddr,
+    /// Configured CGI SERVER_NAME and SERVER_PORT.
     pub server_name: &'static str,
     pub server_port: u16,
     pub headers: HeaderMap,
@@ -148,18 +141,10 @@ struct CgiAddr {
     port: String,
 }
 
-fn cgi_addr_strings(addr: &Addr) -> CgiAddr {
-    match addr {
-        Addr::Inet(sa) => CgiAddr {
-            addr: sa.ip().to_string(),
-            port: sa.port().to_string(),
-        },
-        // REMOTE_ADDR must hold a hostnumber (RFC 3875 §4.1.8); loopback stands in for a unix peer.
-        // https://www.rfc-editor.org/rfc/rfc3875#section-4.1.8
-        Addr::Unix(_) => CgiAddr {
-            addr: "127.0.0.1".to_owned(),
-            port: "0".to_owned(),
-        },
+fn cgi_addr_strings(addr: &SocketAddr) -> CgiAddr {
+    CgiAddr {
+        addr: addr.ip().to_string(),
+        port: addr.port().to_string(),
     }
 }
 
@@ -289,13 +274,7 @@ impl Context {
                 send(&tx, Frame::Chunk(body.into()));
             }
         }
-        send(
-            &tx,
-            Frame::End {
-                trailers: HeaderMap::new(),
-                truncated,
-            },
-        );
+        send(&tx, Frame::End { truncated });
     }
 }
 
@@ -336,8 +315,8 @@ mod tests {
                 authority: None,
                 https: false,
                 protocol: "HTTP/1.1",
-                remote: Addr::Inet(([127, 0, 0, 1], 8080).into()),
-                server: Addr::Inet(([127, 0, 0, 1], 8080).into()),
+                remote: ([127, 0, 0, 1], 8080).into(),
+                server: ([127, 0, 0, 1], 8080).into(),
                 server_name: "",
                 server_port: 8080,
                 headers: HeaderMap::new(),

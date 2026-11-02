@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -9,7 +10,7 @@ use http_body_util::BodyExt;
 use hyper::body::{Body, Bytes, Frame as BodyFrame, Incoming, SizeHint};
 use rapira_sapi::types::ResponseHead;
 use rapira_sapi::work::{Intake, Refused};
-use rapira_sapi::{Addr, Frame, Request};
+use rapira_sapi::{Frame, Request};
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::time::timeout;
 
@@ -216,8 +217,8 @@ async fn handle(handler: &Conn, req: http::Request<Incoming>) -> http::Response<
     }
 
     let peer: Peer = Peer {
-        remote: handler.remote.clone(),
-        server: handler.server.clone(),
+        remote: handler.remote,
+        server: handler.server,
         https: false,
         received_at,
     };
@@ -238,15 +239,15 @@ async fn handle(handler: &Conn, req: http::Request<Incoming>) -> http::Response<
 pub(crate) struct Conn {
     shared: Arc<Shared>,
     closed: tokio::sync::watch::Receiver<bridge::ConnectionState>,
-    remote: Addr,
-    server: Addr,
+    remote: SocketAddr,
+    server: SocketAddr,
 }
 
 impl Conn {
     pub(crate) fn new(
         shared: Arc<Shared>,
-        remote: Addr,
-        server: Addr,
+        remote: SocketAddr,
+        server: SocketAddr,
         closed: tokio::sync::watch::Receiver<bridge::ConnectionState>,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -275,15 +276,14 @@ async fn serve_php(
 ) -> http::Response<RespBody> {
     let cfg = &shared.cfg;
     let mut body = body;
-    let reserve = body.size_hint().lower().min(cfg.max_body_size as u64) as usize;
-    let mut held = match shared.intake.reserve_body(reserve) {
+    let mut held = match shared.intake.reserve_body(0) {
         Ok(held) => held,
         Err(e) => {
             tracing::warn!(target: "http", "rejected before body read: {e}");
             return refused(Rejection::from(e).status, guard);
         }
     };
-    let mut collected: Vec<u8> = Vec::with_capacity(reserve);
+    let mut collected = Vec::new();
     loop {
         // hyper only times the head read, so each body frame gets its own progress bound here.
         let frame = match timeout(cfg.keepalive_timeout, body.frame()).await {

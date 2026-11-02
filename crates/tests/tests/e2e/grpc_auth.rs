@@ -12,7 +12,7 @@ use crate::harness::{Spawn, calls, listen, scratch_dir, stop};
 /// The `[grpc]` lines that enable `auth` with the tokens file `tokens`.
 fn auth(tokens: &Path) -> String {
     format!(
-        "interceptors = [\"auth\"]\n[grpc.auth]\ntokens_file = \"{}\"",
+        "[grpc.auth]\ntokens_file = \"{}\"",
         tokens.display().to_string().replace('\\', "/")
     )
 }
