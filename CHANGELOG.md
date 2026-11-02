@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.10.0](https://github.com/rapira-rs/rapira-windows/compare/v0.9.2...v0.10.0) (2026-11-02)
+
+
+### Features
+
+* add Windows PowerShell installer ([08163df](https://github.com/rapira-rs/rapira-windows/commit/08163df7aee65fb34ed81f8f571f4679c577118f))
+* add Windows PowerShell installer ([c4ff41c](https://github.com/rapira-rs/rapira-windows/commit/c4ff41c6bbbf2108e7c69d34d05d679210a7e094))
+
+
+### Bug Fixes
+
+* bound idle RPC body reads ([997dbeb](https://github.com/rapira-rs/rapira-windows/commit/997dbeb953130723a85b91d150b37df23877734c))
+* enforce request limits and simplify host paths ([8fbd09f](https://github.com/rapira-rs/rapira-windows/commit/8fbd09f6e0f93713291d3fd8b845e82a67debf6d))
+* enforce request limits and simplify host paths ([#31](https://github.com/rapira-rs/rapira-windows/issues/31)) ([fd6daec](https://github.com/rapira-rs/rapira-windows/commit/fd6daec09b1898d08e051cbd7b014f87015503df))
+* preserve the core interceptor design ([da40e85](https://github.com/rapira-rs/rapira-windows/commit/da40e8514ffd793984e20efb015504ffcea72753))
+* preserve Windows installer PATH values ([c9324fe](https://github.com/rapira-rs/rapira-windows/commit/c9324fe59309a4d1ecec7f6dcc8eb45065ac1a32))
+* update Zstandard security dependencies ([70ce50b](https://github.com/rapira-rs/rapira-windows/commit/70ce50bd69f90ffd4f12b070bcb6da0f7860d2ef))
+
 ## [0.9.2](https://github.com/rapira-rs/rapira-windows/compare/v0.9.0...v0.9.2) (2026-11-01)
 
 ### ⚠️ Breaking Changes
