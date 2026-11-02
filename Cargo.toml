@@ -59,9 +59,9 @@ windows-sys = "0.61"
 crossbeam-channel = "0.5"
 buffa = { git = "https://github.com/anthropics/buffa", rev = "104716922c66e21cf26895a2a5a2a42e6292f9d4", default-features = false, features = ["std"] }
 buffa-descriptor = { git = "https://github.com/anthropics/buffa", rev = "104716922c66e21cf26895a2a5a2a42e6292f9d4", features = ["reflect", "json"] }
-connectrpc = { git = "https://github.com/rapira-rs/connect-rust", rev = "cf24afda1ef20f69eb9e5edfd23ff42b7ee33a45", default-features = false, features = ["server", "json", "gzip"] }
-connectrpc-health = { git = "https://github.com/rapira-rs/connect-rust", rev = "cf24afda1ef20f69eb9e5edfd23ff42b7ee33a45", default-features = false }
-connectrpc-reflection = { git = "https://github.com/rapira-rs/connect-rust", rev = "cf24afda1ef20f69eb9e5edfd23ff42b7ee33a45", default-features = false }
+connectrpc = { git = "https://github.com/rapira-rs/connect-rust", rev = "2250d3c63071760da97c5a6b43aa57ab584e3915", default-features = false, features = ["server", "json", "gzip"] }
+connectrpc-health = { git = "https://github.com/rapira-rs/connect-rust", rev = "2250d3c63071760da97c5a6b43aa57ab584e3915", default-features = false }
+connectrpc-reflection = { git = "https://github.com/rapira-rs/connect-rust", rev = "2250d3c63071760da97c5a6b43aa57ab584e3915", default-features = false }
 
 [workspace.lints.clippy]
 all = "warn"

@@ -249,7 +249,7 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 [[package]]
 name = "connectrpc"
 version = "0.9.0"
-source = "git+https://github.com/rapira-rs/connect-rust?rev=cf24afda1ef20f69eb9e5edfd23ff42b7ee33a45#cf24afda1ef20f69eb9e5edfd23ff42b7ee33a45"
+source = "git+https://github.com/rapira-rs/connect-rust?rev=2250d3c63071760da97c5a6b43aa57ab584e3915#2250d3c63071760da97c5a6b43aa57ab584e3915"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -281,7 +281,7 @@ dependencies = [
 [[package]]
 name = "connectrpc-health"
 version = "0.9.0"
-source = "git+https://github.com/rapira-rs/connect-rust?rev=cf24afda1ef20f69eb9e5edfd23ff42b7ee33a45#cf24afda1ef20f69eb9e5edfd23ff42b7ee33a45"
+source = "git+https://github.com/rapira-rs/connect-rust?rev=2250d3c63071760da97c5a6b43aa57ab584e3915#2250d3c63071760da97c5a6b43aa57ab584e3915"
 dependencies = [
  "buffa",
  "connectrpc",
@@ -296,7 +296,7 @@ dependencies = [
 [[package]]
 name = "connectrpc-reflection"
 version = "0.9.0"
-source = "git+https://github.com/rapira-rs/connect-rust?rev=cf24afda1ef20f69eb9e5edfd23ff42b7ee33a45#cf24afda1ef20f69eb9e5edfd23ff42b7ee33a45"
+source = "git+https://github.com/rapira-rs/connect-rust?rev=2250d3c63071760da97c5a6b43aa57ab584e3915#2250d3c63071760da97c5a6b43aa57ab584e3915"
 dependencies = [
  "buffa",
  "buffa-descriptor",
@@ -1617,18 +1617,18 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zstd"
-version = "0.13.3"
+version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+checksum = "cdb02c3132d251ab1606e9fc913a7da6c6ed08cc263df15edf082e1dc497d157"
 dependencies = [
  "zstd-safe",
 ]
 
 [[package]]
 name = "zstd-safe"
-version = "7.3.0"
+version = "7.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64d80649ab6db9d9f6f9c80a40becd948eda4714a0a5ac8c4d157a32231c7882"
+checksum = "1c8ea04668f5de8d8d51051714ba560c9536519cadcdb8829bba4fe2ad159b03"
 dependencies = [
  "zstd-sys",
 ]
