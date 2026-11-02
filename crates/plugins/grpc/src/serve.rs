@@ -146,8 +146,8 @@ impl Serving {
             .with_deadline_policy(deadlines)
             // The default registry offers every codec that the build compiles, zstd included.
             .with_compression(CompressionRegistry::new().register(GzipProvider::default()));
-        if let Some(auth) = &config.auth {
-            service = service.with_interceptor_arc(auth.clone());
+        for interceptor in &config.interceptors {
+            service = service.with_interceptor_arc(Arc::clone(interceptor));
         }
         Self {
             service,

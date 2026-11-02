@@ -17,7 +17,7 @@ The source follows the core plugin architecture and binary-driven test design.
 - Static files with timestamps outside the HTTP date range remain available. Fresh cache entries avoid an expiry scan.
 - Raw CGI bodies use PHP temporary streams. Worker client aborts end the request and preserve application state.
 - Intake entries own byte and slot permits until dequeue. A cancelled queued unit counts as shed and does not use the request quota.
-- The `[grpc.auth]` table enables bearer-token authentication. The token file loads before PHP starts.
+- gRPC supports ordered interceptors and bearer-token authentication. The token file loads before PHP starts.
 - Worker and dispatcher boot retries without client traffic. Application work pulls determine readiness. PHP 8.4 and 8.5 expose boot `argv` and `argc` with `register_argc_argv` disabled.
 - `rapira serve CONFIG` starts the configured plugin pools. Each plugin has a `<plugin>.pool` table.
 - Tests use the server binary for PHP, network, file, and lifecycle behavior. Pure unit tests stay in their crates.

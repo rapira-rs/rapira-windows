@@ -31,7 +31,7 @@ The grpc plugin of the `rapira` binary. It serves unary RPCs from PHP over gRPC,
 - `rapira_grpc_classes.c`: `rapira_grpc_register_classes` and the object handlers of the call and response metadata. Constructors and dispatcher methods use the shared shells in `crates/sapi/rapira_dispatcher.c`. MINIT calls `rapira_grpc_register_classes` after the base classes.
 - `rapira_grpc.c`: the other method shells: the value classes, `name()` and `getServices()` of the dispatcher, the call and the response metadata.
 - `src/lib.rs`: `Config`, `Server` and its `Plugin` impl.
-- `src/config.rs`: `Section` (the `[grpc]` table), `Settings`, and `resolve` with the boot checks. `Server::from_settings` loads the descriptor set and the optional authentication tokens.
+- `src/config.rs`: `Section` (the `[grpc]` table), `Settings`, `resolve` with the boot checks, `Interceptor`, and `resolve_interceptors`. `Server::from_settings` loads the descriptor set and builds the interceptors.
 - `src/serve.rs`: the accept loop, one connect-rust connection per accepted socket, and the drain.
 - `src/dispatch.rs`: `PhpDispatcher`: the route to PHP, the JSON transcoding, and the map from the PHP outcome to a status.
 - `src/schema.rs`: the descriptor set, the method routes, the JSON transcoding, and the service list of `getServices()`.
@@ -57,6 +57,24 @@ connect-rust handles the framing, the compression, the timeout headers and the e
 ## Remote address
 
 The remote address is in the request extensions as `std::net::SocketAddr`. PHP gets it as `Context::$remote`.
+
+## Interceptors
+
+`[grpc].interceptors` lists the interceptor names in execution order. The supported name is `"auth"`. The boot thread builds each interceptor before PHP starts. The plugin registers each interceptor with `with_interceptor_arc`. The first listed interceptor runs first.
+
+Interceptors cover GET and POST requests to PHP methods, health, reflection, and unknown paths. connect-rust calls `intercept_head` before it reads the request body. A rejection returns an error in the request protocol. PHP does not receive the call. An interceptor that changes request metadata uses `intercept_unary`.
+
+To add an interceptor:
+
+- Add its crate to the workspace and to the gRPC plugin dependencies.
+- Add its settings table to `Section` in `src/config.rs`.
+- Resolve the table in `settings` and pass its settings to `resolve_interceptors`.
+- Add its variant to `config::Interceptor`.
+- Add its name to `resolve_interceptors` and to the unknown-name error. Reject a configured table if the list does not name it.
+- Build it in `Server::from_settings`.
+- Add configuration cases for its name and its position in the list.
+- Add an e2e test that starts Rapira with its table through `Spawn::grpc_extra`.
+- Add a commented example next to `[grpc.auth]` in `examples/rapira.toml`.
 
 ## Schemas
 
@@ -125,6 +143,9 @@ The plugin cannot stop PHP code, so PHP continues to run the call. A later `resp
 Enable bearer-token authentication in `rapira.toml`:
 
 ```toml
+[grpc]
+interceptors = ["auth"]
+
 [grpc.auth]
 tokens_file = "grpc-tokens.txt"
 ```
@@ -171,7 +192,8 @@ The `[grpc]` table. Unknown keys fail the boot.
 - `max_timeout_secs`: the upper limit for a client timeout. Default: unset, no limit. `default_timeout_secs` must not be larger.
 - `keepalive_interval_secs`: the time without a new request, request data or a PING answer after which the listener sends an HTTP/2 keepalive PING. Default `10`. It must be at least 1.
 - `keepalive_timeout_secs`: the limit for idle request body reads and the wait for an HTTP/2 PING answer. Default `10`. It must be at least 1.
-- `[grpc.auth].tokens_file`: required when the `[grpc.auth]` table is present. The table enables authentication. The path must name a readable token file.
+- `interceptors`: names in execution order. Default `[]`. The supported name is `"auth"`. Each listed interceptor requires its table. Repeated or unknown names fail startup.
+- `[grpc.auth].tokens_file`: required when `"auth"` is listed. The path must name a readable token file.
 - `[grpc.pool]`: the worker pool. It takes the keys of `[http.pool]`, and its `mode` must be `"dispatcher"`.
 
 The drain window is `[supervisor].process_control_timeout_secs` minus the smaller of 5 seconds and half the timeout. The remaining time allows PHP teardown. The host forces exit if the full shutdown exceeds this budget.
