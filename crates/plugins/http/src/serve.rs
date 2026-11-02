@@ -1,6 +1,7 @@
 //! Accepts HTTP connections and drains them during shutdown.
 
 use std::convert::Infallible;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -10,7 +11,6 @@ use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
 use rapira_net::{Acceptor, PreparedListener, Serve};
-use rapira_sapi::Addr;
 use rapira_sapi::plugin::Worker;
 use rapira_sapi::work::Intake;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -47,7 +47,7 @@ impl Serving {
         }
     }
 
-    fn spawn_conn<S>(&self, stream: S, remote: Addr, server: Addr)
+    fn spawn_conn<S>(&self, stream: S, remote: SocketAddr, server: SocketAddr)
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
@@ -101,7 +101,7 @@ impl Serve for Serving {
         let server = stream
             .local_addr()
             .expect("an accepted inet socket has a local address");
-        self.spawn_conn(stream, Addr::Inet(peer), Addr::Inet(server));
+        self.spawn_conn(stream, peer, server);
     }
 }
 

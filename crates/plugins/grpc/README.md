@@ -56,7 +56,7 @@ connect-rust handles the framing, the compression, the timeout headers and the e
 
 ## Remote address
 
-The remote address is in the request extensions as `rapira_sapi::Addr`. PHP gets it as `Context::$remote`.
+The request extensions store the remote address as `std::net::SocketAddr`. PHP receives a `Rapira\InetAddress` in `Context::$remote`.
 
 ## Interceptors
 
@@ -126,11 +126,13 @@ The pool runs in dispatcher mode only. `\Rapira\get_dispatcher()` returns a `Rap
 - `fail()` takes the `google.rpc.Status` triple: a code, a message and a list of `ErrorDetail`. For gRPC and gRPC-Web, the plugin sends `grpc-status`, `grpc-message` and `grpc-status-details-bin`. For Connect, the plugin sends the HTTP status of the code and a JSON error body. A Connect detail has the bare type name, for example `google.rpc.ErrorInfo`, and an unpadded base64 value.
 - `fail()` is the only way to send an error status. The plugin does not catch `Rapira\Grpc\Exception\GrpcException`. Catch it and call `$call->fail($e->status)`.
 - A call that PHP does not finalize is lost. The client gets INTERNAL with the message `internal error`, and the plugin logs a warning under the `grpc` target. An uncaught throwable also loses the call. The client does not see the message of the throwable.
-- The client gets UNAVAILABLE when the plugin refuses the call before PHP sees it: the pool byte budget is full, all intake slots stay full for 30 seconds, the pool stops, or PHP boot failed. The pool has 1024 slots and a 64 MiB budget for queued message bytes.
+- The client gets UNAVAILABLE when the plugin refuses the call before PHP sees it: the pool byte budget is full, all intake slots stay full for 30 seconds, the pool stops, or PHP boot failed. The pool has 1024 slots and a 64 MiB budget for received bodies and queued message bytes. The listener reserves bytes as they arrive. A cancelled or rejected request releases its reservation.
 
 ## Deadlines
 
 A client sets a timeout with `grpc-timeout` (gRPC and gRPC-Web) or `connect-timeout-ms` (Connect). `default_timeout_secs` sets the timeout of a call that has none. `max_timeout_secs` reduces a longer client timeout to this value. Both keys are unset by default, so a call without a client timeout has no deadline.
+
+While the listener collects a request body, `keepalive_timeout_secs` limits each pause between data reads on HTTP/1.1 and HTTP/2. This limit also applies when the call deadline is absent or longer. On expiry, the client gets DEADLINE_EXCEEDED with `request body idle timeout`, and the body reservation is released. PHP execution and established health and reflection streams use their call deadlines.
 
 `Context::$deadline` is the deadline as a Unix timestamp, or null when the call has no deadline. When the deadline passes, the client gets DEADLINE_EXCEEDED and `isCancelled()` returns true. A client that cancels the call or closes the connection has the same effect on PHP.
 
@@ -168,14 +170,14 @@ grpcurl -plaintext 127.0.0.1:50051 list
 
 On the stop signal the accept loop ends, health reports NOT_SERVING, and open `Watch` streams end. Calls in flight drain within the drain window (see Config). Connections that are open after the drain window are cut. Shutdown reports an error if a call or an HTTP/2 connection remains. An idle HTTP/1.1 connection does not cause an error. An open reflection stream, for example an Evans REPL session (https://github.com/ktr0731/evans), holds its connection until the drain window ends.
 
-The listener sends an HTTP/2 keepalive PING to a connection that sends no request, no request data and no PING answer for `keepalive_interval_secs`, and closes the connection when the peer does not answer within `keepalive_timeout_secs`. Both keys are 10 seconds by default. An HTTP/2 peer that is gone without a FIN keeps its connection open for at most the sum of both keys after its last frame. HTTP/1.1 has no PING, so these keys do not apply to a gRPC-Web or Connect client on HTTP/1.1.
+The listener sends an HTTP/2 keepalive PING to a connection that sends no request, no request data and no PING answer for `keepalive_interval_secs`, and closes the connection when the peer does not answer within `keepalive_timeout_secs`. Both keys are 10 seconds by default. An HTTP/2 peer that is gone without a FIN keeps its connection open for at most the sum of both keys after its last frame. HTTP/1.1 has no PING.
 
 ## Limits
 
 - One interpreter serves one call at a time. Concurrent calls share the pool queue, including calls on one HTTP/2 connection.
-- The message size limit is 4 MiB, and no key changes it. A larger request answers RESOURCE_EXHAUSTED.
+- The message size limit is 4 MiB, and no key changes it. A gRPC request can use five additional envelope bytes. A larger request message answers RESOURCE_EXHAUSTED.
 - The listener does not terminate TLS. `Context::$tls` is always null. Put a TLS proxy between the clients and the listener when clients need TLS.
-- The JSON decoder has no element memory limit. A 4 MiB JSON request with many small elements can use several hundred MiB of memory for repeated or map fields. `Struct` or `ListValue` fields can use more than 1 GiB of memory and more than 1 s of CPU in the server process. The 4 MiB limit applies after decompression. A proxy must limit the decompressed request size.
+- The JSON request decoder applies a 32 MiB element-memory limit before it appends repeated values or map entries. Nested messages share the limit. A request above the limit answers RESOURCE_EXHAUSTED. This limit measures dynamic elements and does not bound total process memory.
 - A JSON reply decodes the payload of each `google.protobuf.Any` again, under the default element memory limit of buffa (32 MiB). This limit holds about 524,000 repeated elements or 381,000 map entries in one payload. A larger payload answers INTERNAL to a JSON client, and the log names the limit. A proto client is not affected.
 
 ## Config
@@ -189,7 +191,7 @@ The `[grpc]` table. Unknown keys fail the boot.
 - `default_timeout_secs`: the timeout of a call that has none. Default: unset, no deadline.
 - `max_timeout_secs`: the upper limit for a client timeout. Default: unset, no limit. `default_timeout_secs` must not be larger.
 - `keepalive_interval_secs`: the time without a new request, request data or a PING answer after which the listener sends an HTTP/2 keepalive PING. Default `10`. It must be at least 1.
-- `keepalive_timeout_secs`: the time the listener waits for the PING answer before it closes the connection. Default `10`. It must be at least 1.
+- `keepalive_timeout_secs`: the limit for idle request body reads and the wait for an HTTP/2 PING answer. Default `10`. It must be at least 1.
 - `interceptors`: names in execution order. Default `[]`. The supported name is `"auth"`. Each listed interceptor requires its table. Repeated or unknown names fail startup.
 - `[grpc.auth].tokens_file`: required when `"auth"` is listed. The path must name a readable token file.
 - `[grpc.pool]`: the worker pool. It takes the keys of `[http.pool]`, and its `mode` must be `"dispatcher"`.

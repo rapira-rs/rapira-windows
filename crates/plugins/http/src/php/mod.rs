@@ -10,7 +10,7 @@ use hyper::body::Bytes;
 use rapira_sapi::callbacks::guard;
 use rapira_sapi::exchange::{AddrOwned, add_list, build_address, header_key, path_bytes};
 use rapira_sapi::scoreboard::{Event, sb_update};
-use rapira_sapi::types::{Addr, Body, FormField, Frame, Request, ResponseHead, UploadedFile};
+use rapira_sapi::types::{Body, FormField, Frame, Request, ResponseHead, UploadedFile};
 use rapira_sapi::work::{DispatcherClasses, Held, release};
 use rapira_sapi::{
     HashTable, IS_ARRAY, IS_STRING, add_next_index_object, object_init_ex, rapira_array_init,
@@ -150,11 +150,9 @@ impl RequestView {
         uri_abs.push_str(scheme);
         match &req.authority {
             Some(a) => uri_abs.push_str(&String::from_utf8_lossy(a)),
-            None => match &req.server {
-                Addr::Inet(sa) => write!(uri_abs, "{sa}"),
-                Addr::Unix(_) => write!(uri_abs, "{}:{}", req.server_name, req.server_port),
+            None => {
+                write!(uri_abs, "{}", req.server).expect("writing to String");
             }
-            .expect("writing to String"),
         }
         uri_abs.push_str(path);
         Self {

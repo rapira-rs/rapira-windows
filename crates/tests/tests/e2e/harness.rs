@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 pub use super::console::send_ctrl_break;
-use rapira_sapi::{Addr, Mode};
+use rapira_sapi::Mode;
 use serde_json::Value;
 use tests::{poll, server_log};
 use windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
@@ -1089,11 +1089,8 @@ pub fn calls(srv: &Server) -> Vec<Value> {
 }
 
 /// The remote TCP address that PHP reports for a client at `peer`.
-pub fn logged_remote(peer: &Addr) -> String {
-    match peer {
-        Addr::Inet(addr) => addr.to_string(),
-        Addr::Unix(_) => "unix:NULL".to_owned(),
-    }
+pub fn logged_remote(peer: &SocketAddr) -> String {
+    peer.to_string()
 }
 
 /// Waits off the test runtime for the master to exit 0, so the clients on the runtime keep running through the drain.

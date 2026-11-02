@@ -41,6 +41,341 @@ enum On {
     Tcp,
 }
 
+/// Received bodies share the 64 MiB pool budget. A temporary refusal is UNAVAILABLE: https://connectrpc.com/docs/protocol/#error-codes.
+#[tokio::test]
+async fn incomplete_rpc_bodies_share_the_pool_budget() {
+    struct Incomplete(Option<Bytes>);
+    impl Body for Incomplete {
+        type Data = Bytes;
+        type Error = Infallible;
+
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
+            match self.0.take() {
+                Some(bytes) => Poll::Ready(Some(Ok(Frame::data(bytes)))),
+                None => Poll::Pending,
+            }
+        }
+    }
+    struct Case {
+        name: &'static str,
+        content_type: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "supported content type",
+            content_type: "application/proto",
+        },
+        Case {
+            name: "unsupported content type",
+            content_type: "application/unknown",
+        },
+    ];
+    let srv = Spawn::grpc(wire_worker())
+        .grpc_extra("default_timeout_secs = 10\nmax_timeout_secs = 10")
+        .json_log()
+        .spawn();
+    let addr = listen(&srv);
+    let data = Bytes::from(vec![b'x'; 4 * 1024 * 1024]);
+    for case in cases {
+        let before = calls(&srv).len();
+        let mut requests = tokio::task::JoinSet::new();
+        let mut connections = Vec::new();
+        for _ in 0..17 {
+            let tcp = tokio::net::TcpStream::connect(addr).await.expect("connect");
+            let (mut send, connection) =
+                hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(tcp))
+                    .await
+                    .expect("h2 handshake");
+            connections.push(tokio::spawn(connection));
+            let request = http::Request::post(format!("http://localhost{ECHO_PATH}"))
+                .header("content-type", case.content_type)
+                .body(Incomplete(Some(data.clone())))
+                .expect("request");
+            requests.spawn(async move {
+                let (parts, body) = send.send_request(request).await?.into_parts();
+                anyhow::Ok((parts.status, body.collect().await?.to_bytes()))
+            });
+        }
+        let (status, body) = tokio::time::timeout(Duration::from_secs(5), requests.join_next())
+            .await
+            .unwrap_or_else(|_| panic!("{}: the body budget did not refuse a request", case.name))
+            .expect("a pending request")
+            .expect("request task")
+            .expect("response");
+        assert_eq!(
+            status,
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            "{}",
+            case.name
+        );
+        let error: Value = serde_json::from_slice(&body).expect("Connect error");
+        assert_eq!(error["code"], "unavailable", "{}", case.name);
+        assert_eq!(
+            calls(&srv).len(),
+            before,
+            "{}: no incomplete call reaches PHP",
+            case.name
+        );
+
+        requests.shutdown().await;
+        for connection in connections {
+            connection.abort();
+            let _ = connection.await;
+        }
+        let mut conn = Conn::open(&addr, Wire::H2).await.expect("connect");
+        let got = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let got = conn
+                    .send(
+                        Method::POST,
+                        ECHO_PATH,
+                        &[("content-type", "application/proto")],
+                        HI,
+                    )
+                    .await
+                    .expect("response");
+                if got.status != 503 {
+                    break got;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{}: cancelled requests retained the budget", case.name));
+        assert_eq!(got.status, 200, "{}", case.name);
+        assert_eq!(got.body.as_ref(), HI, "{}", case.name);
+    }
+    stop(srv).await;
+}
+
+#[tokio::test]
+async fn declared_rpc_body_lengths_do_not_consume_the_pool_budget() {
+    let srv = Spawn::grpc(wire_worker())
+        .grpc_extra("default_timeout_secs = 10\nmax_timeout_secs = 10")
+        .json_log()
+        .spawn();
+    let addr = listen(&srv);
+    let mut uploads = Vec::new();
+    for _ in 0..17 {
+        let mut stream = TcpStream::connect(addr).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        write!(stream, "POST {ECHO_PATH} HTTP/1.1\r\nHost: e2e\r\nContent-Type: application/proto\r\nContent-Length: 4194304\r\nExpect: 100-continue\r\n\r\n").expect("request head");
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            stream.read_exact(&mut byte).expect("interim response");
+            head.push(byte[0]);
+        }
+        assert!(
+            head.starts_with(b"HTTP/1.1 100 "),
+            "{}",
+            String::from_utf8_lossy(&head)
+        );
+        uploads.push(stream);
+    }
+    let mut conn = Conn::open(&addr, Wire::Http1).await.expect("connect");
+    let got = conn
+        .send(
+            Method::POST,
+            ECHO_PATH,
+            &[("content-type", "application/proto")],
+            HI,
+        )
+        .await
+        .expect("response");
+    assert_eq!(got.status, 200);
+    assert_eq!(got.body.as_ref(), HI);
+    assert_eq!(
+        calls(&srv).len(),
+        1,
+        "only the complete request reaches PHP"
+    );
+    drop(uploads);
+    stop(srv).await;
+}
+
+/// JSON elements use the existing 32 MiB decode budget. At 64 bytes per dynamic element, 600,000 int32 values exceed it: https://github.com/anthropics/buffa/blob/104716922c66e21cf26895a2a5a2a42e6292f9d4/buffa-descriptor/src/reflect/json.rs.
+#[tokio::test]
+async fn json_request_elements_have_a_memory_limit() {
+    struct Case {
+        name: &'static str,
+        body: String,
+        status: u16,
+        expected: Value,
+    }
+    let cases = [
+        Case {
+            name: "small repeated field with an unknown field",
+            body: r#"{"ids":[0,1],"unknown":[2,3]}"#.to_owned(),
+            status: 200,
+            expected: json!({"ids": [0, 1]}),
+        },
+        Case {
+            name: "repeated field above the element budget",
+            body: format!(r#"{{"ids":[{}0]}}"#, "0,".repeat(599_999)),
+            status: 429,
+            expected: json!("resource_exhausted"),
+        },
+        Case {
+            name: "invalid repeated field value",
+            body: r#"{"ids":["invalid"]}"#.to_owned(),
+            status: 400,
+            expected: json!("invalid_argument"),
+        },
+    ];
+    let srv = Spawn::grpc(wire_worker()).json_log().spawn();
+    for case in cases {
+        let before = calls(&srv).len();
+        let mut conn = Conn::open(&listen(&srv), Wire::Http1)
+            .await
+            .expect("connect");
+        let got = conn
+            .send(
+                Method::POST,
+                ECHO_PATH,
+                &[("content-type", "application/json")],
+                case.body.as_bytes(),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{}: {e:#}", case.name));
+        assert_eq!(got.status, case.status, "{}", case.name);
+        let reply: Value = serde_json::from_slice(&got.body).expect("JSON response");
+        let actual = if case.status == 200 {
+            &reply
+        } else {
+            &reply["code"]
+        };
+        assert_eq!(actual, &case.expected, "{}", case.name);
+        assert_eq!(
+            calls(&srv).len() - before,
+            usize::from(case.status == 200),
+            "{}",
+            case.name
+        );
+    }
+    stop(srv).await;
+}
+
+/// The message limit is 4 MiB. The gRPC envelope adds five bytes: https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md#requests. RESOURCE_EXHAUSTED is HTTP 429 for Connect: https://connectrpc.com/docs/protocol/#error-codes.
+#[tokio::test]
+async fn request_message_limit_excludes_the_envelope() {
+    struct Case {
+        name: &'static str,
+        wire: Wire,
+        content_type: &'static str,
+        bytes: usize,
+        status: u16,
+        grpc_status: Option<&'static str>,
+    }
+    const LIMIT: usize = 4 * 1024 * 1024;
+    let cases = [
+        Case {
+            name: "connect at the message limit",
+            wire: Wire::Http1,
+            content_type: "application/proto",
+            bytes: LIMIT,
+            status: 200,
+            grpc_status: None,
+        },
+        Case {
+            name: "connect above the message limit",
+            wire: Wire::Http1,
+            content_type: "application/proto",
+            bytes: LIMIT + 1,
+            status: 429,
+            grpc_status: None,
+        },
+        Case {
+            name: "grpc at the message limit",
+            wire: Wire::H2,
+            content_type: "application/grpc",
+            bytes: LIMIT,
+            status: 200,
+            grpc_status: Some("0"),
+        },
+        Case {
+            name: "grpc above the message limit",
+            wire: Wire::H2,
+            content_type: "application/grpc",
+            bytes: LIMIT + 1,
+            status: 200,
+            grpc_status: Some("8"),
+        },
+        Case {
+            name: "grpc-web at the message limit",
+            wire: Wire::Http1,
+            content_type: "application/grpc-web+proto",
+            bytes: LIMIT,
+            status: 200,
+            grpc_status: Some("0"),
+        },
+        Case {
+            name: "grpc-web above the message limit",
+            wire: Wire::Http1,
+            content_type: "application/grpc-web+proto",
+            bytes: LIMIT + 1,
+            status: 200,
+            grpc_status: Some("8"),
+        },
+    ];
+    let srv = Spawn::grpc(wire_worker()).json_log().spawn();
+    for case in cases {
+        let mut message = vec![0x0a];
+        let mut length = case.bytes - 5;
+        while length >= 128 {
+            message.push((length as u8 & 0x7f) | 0x80);
+            length >>= 7;
+        }
+        message.push(length as u8);
+        message.resize(case.bytes, b'x');
+        let body = if case.grpc_status.is_some() {
+            envelope(&message)
+        } else {
+            message
+        };
+        let mut conn = Conn::open(&listen(&srv), case.wire).await.expect("connect");
+        let got = conn
+            .send(
+                Method::POST,
+                ECHO_PATH,
+                &[
+                    ("content-type", case.content_type),
+                    ("te", "trailers"),
+                    ("x-reply", "ff"),
+                ],
+                &body,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{}: {e:#}", case.name));
+        assert_eq!(got.status, case.status, "{}", case.name);
+        if let Some(status) = case.grpc_status {
+            let trailers = web_trailers(&got.body);
+            let actual = if case.content_type == "application/grpc-web+proto" {
+                trailers.get("grpc-status").and_then(|v| v.to_str().ok())
+            } else {
+                got.grpc_status()
+            };
+            assert_eq!(actual, Some(status), "{}", case.name);
+        } else if case.bytes > LIMIT {
+            let error: Value = serde_json::from_slice(&got.body).expect("Connect error");
+            assert_eq!(error["code"], "resource_exhausted", "{}", case.name);
+        } else {
+            assert_eq!(got.body.as_ref(), b"\xff", "{}", case.name);
+        }
+    }
+    assert_eq!(
+        calls(&srv).len(),
+        3,
+        "only messages within the limit reach PHP"
+    );
+    stop(srv).await;
+}
+
 /// Sources: PROTOCOL-HTTP2 (envelope, `grpc-status`, 12 for an unknown method or encoding), PROTOCOL-WEB (the 0x80 trailer frame), the Connect protocol (unary request, GET for no-side-effects methods, 404 for an unknown procedure), and proto3 JSON.
 #[tokio::test]
 async fn each_protocol_reaches_php_over_the_wire() {
@@ -975,6 +1310,118 @@ async fn configured_timeouts_bound_a_stalled_request() {
     }
     assert_eq!(calls(&srv), Vec::<Value>::new(), "no call reaches PHP");
     stop(srv).await;
+}
+
+/// Idle body reads use keepalive_timeout_secs. DEADLINE_EXCEEDED maps to HTTP 504: https://connectrpc.com/docs/protocol/#error-codes.
+#[tokio::test]
+async fn idle_rpc_bodies_timeout_without_a_short_call_deadline() {
+    struct Case {
+        name: &'static str,
+        timeout: Option<&'static str>,
+    }
+    let cases = [
+        Case {
+            name: "no call deadline",
+            timeout: None,
+        },
+        Case {
+            name: "long client deadline",
+            timeout: Some("connect-timeout-ms: 60000\r\n"),
+        },
+    ];
+    let srv = Spawn::grpc(wire_worker())
+        .grpc_extra("keepalive_timeout_secs = 1")
+        .json_log()
+        .spawn();
+    let addr = listen(&srv);
+    for case in cases {
+        let timeout = case.timeout.unwrap_or_default();
+        let request = format!(
+            "POST {ECHO_PATH} HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\nContent-Type: application/proto\r\nContent-Length: 10\r\n{timeout}\r\nx"
+        );
+        let started = Instant::now();
+        let (status, body) = http_raw(addr, request.as_bytes(), Duration::from_secs(5))
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{}: idle body did not return a response: {error}",
+                    case.name
+                )
+            });
+        assert_eq!(status, 504, "{}", case.name);
+        let body = String::from_utf8(body).expect("Connect error");
+        assert!(
+            body.contains(r#""code":"deadline_exceeded""#),
+            "{}: {body}",
+            case.name
+        );
+        assert!(
+            body.contains(r#""message":"request body idle timeout""#),
+            "{}: {body}",
+            case.name
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            (Duration::from_millis(900)..Duration::from_secs(5)).contains(&elapsed),
+            "{}: took {elapsed:?}",
+            case.name
+        );
+    }
+    assert_eq!(
+        calls(&srv),
+        Vec::<Value>::new(),
+        "no incomplete call reaches PHP"
+    );
+    stop(srv).await;
+}
+
+#[tokio::test]
+async fn completed_rpc_bodies_do_not_limit_php_execution() {
+    struct Case {
+        name: &'static str,
+        wire: Wire,
+    }
+    let cases = [
+        Case {
+            name: "Connect over HTTP/1.1",
+            wire: Wire::Http1,
+        },
+        Case {
+            name: "Connect over HTTP/2",
+            wire: Wire::H2,
+        },
+    ];
+    for case in cases {
+        let srv = Spawn::grpc(fixture("grpc/unary-worker.php"))
+            .grpc_extra("keepalive_timeout_secs = 1")
+            .json_log()
+            .spawn();
+        let marker = srv.dir.join("marker");
+        let message = format!("hold:{}", marker.display());
+        let mut conn = Conn::open(&listen(&srv), case.wire).await.expect("connect");
+        let client = tokio::spawn(async move {
+            conn.send(
+                Method::POST,
+                ECHO_PATH,
+                &[("content-type", "application/proto")],
+                message.as_bytes(),
+            )
+            .await
+        });
+        let log = srv.log_file();
+        tokio::task::spawn_blocking(move || server_log::wait_app_record(&log, "held"))
+            .await
+            .expect("the complete body reached PHP");
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        std::fs::write(&marker, b"go").expect("release PHP");
+        let got = tokio::time::timeout(Duration::from_secs(5), client)
+            .await
+            .expect("PHP reply within 5 seconds")
+            .expect("client task")
+            .expect("response");
+        assert_eq!(got.status, 200, "{}: {got:?}", case.name);
+        assert_eq!(got.body.as_ref(), b"held", "{}", case.name);
+        stop(srv).await;
+    }
 }
 
 /// Sources: `grpc/health/v1/health.proto` (`HealthCheckRequest.service` and `HealthCheckResponse.status` are field 1, SERVING is 1), `grpc/reflection/v1/reflection.proto` (`list_services` is field 7), and PROTOCOL-HTTP2 (12 for an unknown method).

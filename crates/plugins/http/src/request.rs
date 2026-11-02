@@ -1,12 +1,14 @@
+use std::net::SocketAddr;
+
+use rapira_sapi::Request;
 use rapira_sapi::types::Body;
-use rapira_sapi::{Addr, Request};
 
 use crate::Config;
 
 /// The connection addresses and the time when the request arrived.
 pub(crate) struct Peer {
-    pub remote: Addr,
-    pub server: Addr,
+    pub remote: SocketAddr,
+    pub server: SocketAddr,
     pub https: bool,
     pub received_at: f64,
 }
@@ -62,7 +64,6 @@ pub(crate) fn build(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rapira_sapi::Addr;
 
     /// build() reads only the server name and port.
     fn config() -> Config {
@@ -83,8 +84,8 @@ mod tests {
 
     fn peer() -> Peer {
         Peer {
-            remote: Addr::Inet(([127, 0, 0, 1], 40000).into()),
-            server: Addr::Inet(([127, 0, 0, 1], 8000).into()),
+            remote: ([127, 0, 0, 1], 40000).into(),
+            server: ([127, 0, 0, 1], 8000).into(),
             https: false,
             received_at: 1.5,
         }

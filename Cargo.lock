@@ -122,8 +122,7 @@ checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 [[package]]
 name = "buffa"
 version = "0.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a92f2f5df67a9d5ccfc65237bfc954c56328aee40a04a9b92381ecba370be246"
+source = "git+https://github.com/anthropics/buffa?rev=104716922c66e21cf26895a2a5a2a42e6292f9d4#104716922c66e21cf26895a2a5a2a42e6292f9d4"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -140,8 +139,7 @@ dependencies = [
 [[package]]
 name = "buffa-descriptor"
 version = "0.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b7dd79a6898e70dac8adae959c8ad2cae51ed96397935c91c996280cedcb55e"
+source = "git+https://github.com/anthropics/buffa?rev=104716922c66e21cf26895a2a5a2a42e6292f9d4#104716922c66e21cf26895a2a5a2a42e6292f9d4"
 dependencies = [
  "buffa",
  "rustversion",
@@ -251,7 +249,7 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 [[package]]
 name = "connectrpc"
 version = "0.9.0"
-source = "git+https://github.com/connectrpc/connect-rust?rev=bd2ab674786971ca10cc2c23e4808c8d56b6a458#bd2ab674786971ca10cc2c23e4808c8d56b6a458"
+source = "git+https://github.com/rapira-rs/connect-rust?rev=2250d3c63071760da97c5a6b43aa57ab584e3915#2250d3c63071760da97c5a6b43aa57ab584e3915"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -283,7 +281,7 @@ dependencies = [
 [[package]]
 name = "connectrpc-health"
 version = "0.9.0"
-source = "git+https://github.com/connectrpc/connect-rust?rev=bd2ab674786971ca10cc2c23e4808c8d56b6a458#bd2ab674786971ca10cc2c23e4808c8d56b6a458"
+source = "git+https://github.com/rapira-rs/connect-rust?rev=2250d3c63071760da97c5a6b43aa57ab584e3915#2250d3c63071760da97c5a6b43aa57ab584e3915"
 dependencies = [
  "buffa",
  "connectrpc",
@@ -298,7 +296,7 @@ dependencies = [
 [[package]]
 name = "connectrpc-reflection"
 version = "0.9.0"
-source = "git+https://github.com/connectrpc/connect-rust?rev=bd2ab674786971ca10cc2c23e4808c8d56b6a458#bd2ab674786971ca10cc2c23e4808c8d56b6a458"
+source = "git+https://github.com/rapira-rs/connect-rust?rev=2250d3c63071760da97c5a6b43aa57ab584e3915#2250d3c63071760da97c5a6b43aa57ab584e3915"
 dependencies = [
  "buffa",
  "buffa-descriptor",
@@ -866,6 +864,7 @@ dependencies = [
  "connectrpc-health",
  "connectrpc-reflection",
  "http-body-util",
+ "hyper",
  "rapira_config",
  "rapira_grpc_auth",
  "rapira_net",
@@ -1618,18 +1617,18 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zstd"
-version = "0.13.3"
+version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+checksum = "cdb02c3132d251ab1606e9fc913a7da6c6ed08cc263df15edf082e1dc497d157"
 dependencies = [
  "zstd-safe",
 ]
 
 [[package]]
 name = "zstd-safe"
-version = "7.3.0"
+version = "7.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64d80649ab6db9d9f6f9c80a40becd948eda4714a0a5ac8c4d157a32231c7882"
+checksum = "1c8ea04668f5de8d8d51051714ba560c9536519cadcdb8829bba4fe2ad159b03"
 dependencies = [
  "zstd-sys",
 ]

@@ -6,7 +6,10 @@ use std::sync::{Arc, OnceLock};
 
 use anyhow::anyhow;
 use buffa_descriptor::generated::descriptor::method_options::IdempotencyLevel;
-use buffa_descriptor::{DescriptorPool, DynamicMessage, MessageIndex, ServiceDescriptor};
+use buffa_descriptor::{
+    DescriptorPool, DynamicMessage, DynamicMessageSeed, MessageIndex, ServiceDescriptor,
+};
+use connectrpc::ConnectError;
 
 /// The services of a FileDescriptorSet that rapira serves.
 pub(crate) struct Schema {
@@ -175,10 +178,25 @@ impl Schema {
     }
 
     /// Unknown fields are dropped. An unknown enum value name fails the decode.
-    pub(crate) fn json_to_proto(&self, m: &Method, json: &[u8]) -> anyhow::Result<Vec<u8>> {
-        let json = std::str::from_utf8(json)?;
-        let msg =
-            DynamicMessage::from_json_ignoring_unknown(Arc::clone(&self.pool), m.input, json)?;
+    pub(crate) fn json_to_proto(
+        &self,
+        m: &Method,
+        json: &[u8],
+        element_memory_limit: usize,
+    ) -> Result<Vec<u8>, ConnectError> {
+        let json = std::str::from_utf8(json)
+            .map_err(|error| ConnectError::invalid_argument(error.to_string()))?;
+        let msg = DynamicMessageSeed::new(Arc::clone(&self.pool), m.input)
+            .ignore_unknown_fields(true)
+            .with_element_memory_limit(element_memory_limit)
+            .parse_json(json)
+            .map_err(|error| {
+                if DynamicMessageSeed::is_element_memory_limit_error(&error) {
+                    ConnectError::resource_exhausted(error.to_string())
+                } else {
+                    ConnectError::invalid_argument(error.to_string())
+                }
+            })?;
         Ok(msg.encode_to_vec())
     }
 

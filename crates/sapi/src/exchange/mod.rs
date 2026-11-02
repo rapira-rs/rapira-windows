@@ -1,21 +1,20 @@
-use std::sync::OnceLock;
 pub(crate) use std::{
     cell::Cell,
     ffi::{c_char, c_int},
     path::Path,
     time::Duration,
 };
+use std::{net::SocketAddr, sync::OnceLock};
 
 pub(crate) use crate::work::{DispatcherClasses, Held, release};
 pub(crate) use crate::{
     IS_NULL, RAPIRA_MODE_DISPATCHER, add_assoc_zval_ex,
     callbacks::guard,
     object_init_ex, rapira_array_init, rapira_ce_closed_exception, rapira_ce_inet_address,
-    rapira_ce_no_dispatcher_error, rapira_ce_timeout_exception, rapira_ce_unix_address,
-    rapira_dispatcher_info_obj, rapira_receive_timed, rapira_receive_untimed,
+    rapira_ce_no_dispatcher_error, rapira_ce_timeout_exception, rapira_dispatcher_info_obj,
+    rapira_receive_timed, rapira_receive_untimed,
     scoreboard::{Event, sb_update},
     start::{Pulled, pending_depth, pull_unit_try, pull_unit_wait},
-    types::Addr,
     zend, zval, zval_add_ref, zval_ptr_dtor,
 };
 
@@ -68,13 +67,9 @@ pub(crate) fn reclaim_current() {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum AddrOwned {
-    Inet {
-        ip: String,
-        port: u16,
-    },
-    /// None = unnamed endpoint.
-    Unix(Option<Vec<u8>>),
+pub struct AddrOwned {
+    pub ip: String,
+    pub port: u16,
 }
 
 pub fn path_bytes(p: &Path) -> Vec<u8> {
@@ -82,13 +77,10 @@ pub fn path_bytes(p: &Path) -> Vec<u8> {
 }
 
 impl AddrOwned {
-    pub fn new(a: &Addr) -> Self {
-        match a {
-            Addr::Inet(sa) => Self::Inet {
-                ip: sa.ip().to_string(),
-                port: sa.port(),
-            },
-            Addr::Unix(p) => Self::Unix(p.as_deref().map(path_bytes).filter(|b| !b.is_empty())),
+    pub fn new(a: &SocketAddr) -> Self {
+        Self {
+            ip: a.ip().to_string(),
+            port: a.port(),
         }
     }
 }
@@ -122,31 +114,21 @@ pub fn header_key(name: &str) -> *const c_char {
     }
 }
 
-/// Slot offsets of `InetAddress` (ip, port) and `UnixAddress` (path); the classes are fixed after MINIT.
+/// Slot offsets of `InetAddress` (ip, port); the class is fixed after MINIT.
 static INET_SLOTS: OnceLock<[u32; 2]> = OnceLock::new();
-static UNIX_SLOT: OnceLock<u32> = OnceLock::new();
 
 /// # Safety
 /// `dst` writable; engine active on this thread.
 pub unsafe fn build_address(dst: *mut zval, addr: &AddrOwned) {
+    let AddrOwned { ip, port } = addr;
     unsafe {
-        match addr {
-            AddrOwned::Inet { ip, port } => {
-                let ce = rapira_ce_inet_address;
-                let [ip_slot, port_slot] =
-                    *INET_SLOTS.get_or_init(|| [c"ip", c"port"].map(|n| zend::prop_offset(ce, n)));
-                let _ = object_init_ex(dst, ce);
-                let o = (*dst).value.obj;
-                zend::slot_stringl(o, ip_slot, ip.as_bytes());
-                zend::slot_long(o, port_slot, i64::from(*port));
-            }
-            AddrOwned::Unix(path) => {
-                let ce = rapira_ce_unix_address;
-                let path_slot = *UNIX_SLOT.get_or_init(|| zend::prop_offset(ce, c"path"));
-                let _ = object_init_ex(dst, ce);
-                zend::slot_str_or_null((*dst).value.obj, path_slot, path.as_deref());
-            }
-        }
+        let ce = rapira_ce_inet_address;
+        let [ip_slot, port_slot] =
+            *INET_SLOTS.get_or_init(|| [c"ip", c"port"].map(|n| zend::prop_offset(ce, n)));
+        let _ = object_init_ex(dst, ce);
+        let o = (*dst).value.obj;
+        zend::slot_stringl(o, ip_slot, ip.as_bytes());
+        zend::slot_long(o, port_slot, i64::from(*port));
     }
 }
 

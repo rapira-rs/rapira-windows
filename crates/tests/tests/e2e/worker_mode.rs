@@ -8,7 +8,7 @@ use serde_json::Value;
 use tests::wire::submit;
 use tests::{drain, drain_resp, drain_resp_deadline, fixture, poll, req, server_log};
 
-use crate::harness::{Conn, Spawn, free_port, http_get, slot_line};
+use crate::harness::{Conn, Spawn, free_port, http_get, http_post, slot_line};
 
 /// Superglobals are rebuilt per job over the resident loop: query state must not leak.
 #[test]
@@ -276,6 +276,40 @@ fn waiting_bodies_share_a_byte_budget() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn declared_upload_lengths_do_not_reserve_body_capacity() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        body: &'static [u8],
+    }
+    let cases = [
+        Case {
+            name: "declared uploads without body data",
+            body: b"",
+        },
+        Case {
+            name: "declared uploads with one byte each",
+            body: b"x",
+        },
+    ];
+    let timeout = Duration::from_secs(10);
+    for case in cases {
+        let srv = Spawn::http(Mode::Worker, fixture("worker/hello-worker.php")).spawn();
+        let mut held = Vec::new();
+        for _ in 0..8 {
+            let mut upload = Conn::open(srv.addr, timeout)?;
+            upload.send(b"POST / HTTP/1.1\r\nHost: e2e\r\nContent-Length: 8388608\r\nExpect: 100-continue\r\n\r\n")?;
+            assert_eq!(upload.read_head(timeout)?.0, 100, "{}", case.name);
+            upload.send(case.body)?;
+            held.push(upload);
+        }
+        let (status, body) = http_post(srv.addr, "/", b"text/plain", b"x", timeout)?;
+        assert_eq!(status, 200, "{}", case.name);
+        assert_eq!(body, b"hello:POST:-", "{}", case.name);
+    }
+    Ok(())
+}
+
 /// The 64 MiB pool budget includes incomplete uploads. A larger allowed body uses the whole budget.
 #[test]
 fn incomplete_uploads_share_the_body_budget() -> anyhow::Result<()> {
@@ -287,7 +321,7 @@ fn incomplete_uploads_share_the_body_budget() -> anyhow::Result<()> {
     }
     let cases = [
         Case {
-            name: "declared body is refused before continue; completed upload releases capacity",
+            name: "declared body is refused during read; completed upload releases capacity",
             framing: "Content-Length: 1",
             chunked: false,
             finish_upload: true,
@@ -313,38 +347,45 @@ fn incomplete_uploads_share_the_body_budget() -> anyhow::Result<()> {
             .as_bytes(),
         )?;
         assert_eq!(held.read_head(timeout)?.0, 100, "{}", case.name);
-
-        let mut refused = Conn::open(srv.addr, timeout)?;
-        refused.send(
-            format!(
-                "POST / HTTP/1.1\r\nHost: e2e\r\n{}\r\nExpect: 100-continue\r\n\r\n",
-                case.framing
-            )
-            .as_bytes(),
-        )?;
-        if case.chunked {
-            assert_eq!(refused.read_head(timeout)?.0, 100, "{}", case.name);
-            refused.send(b"1\r\nx\r\n")?;
+        let chunk = vec![b'x'; 1 << 20];
+        for _ in 0..64 {
+            held.send(&chunk)?;
         }
-        assert_eq!(refused.read_head(timeout)?.0, 503, "{}", case.name);
+
+        let status = poll(timeout, || {
+            let mut refused = Conn::open(srv.addr, timeout).ok()?;
+            refused
+                .send(
+                    format!(
+                        "POST / HTTP/1.1\r\nHost: e2e\r\n{}\r\nExpect: 100-continue\r\n\r\n",
+                        case.framing
+                    )
+                    .as_bytes(),
+                )
+                .ok()?;
+            assert_eq!(refused.read_head(timeout).ok()?.0, 100, "{}", case.name);
+            refused
+                .send(if case.chunked {
+                    b"1\r\nx\r\n0\r\n\r\n"
+                } else {
+                    b"x"
+                })
+                .ok()?;
+            let status = refused.read_head(timeout).ok()?.0;
+            (status != 200).then_some(status)
+        });
+        assert_eq!(status, Some(503), "{}", case.name);
 
         if case.finish_upload {
-            let chunk = vec![b'x'; 1 << 20];
-            for _ in 0..65 {
-                held.send(&chunk)?;
-            }
+            held.send(&chunk)?;
             assert_eq!(held.read_head(timeout)?.0, 200, "{}", case.name);
         }
         held.abandon();
-        let mut recovered = poll(timeout, || {
-            let mut conn = Conn::open(srv.addr, timeout).ok()?;
-            conn.send(b"POST / HTTP/1.1\r\nHost: e2e\r\nContent-Length: 1\r\nExpect: 100-continue\r\n\r\n")
-                .ok()?;
-            (conn.read_head(timeout).ok()?.0 == 100).then_some(conn)
+        poll(timeout, || {
+            let (status, _) = http_post(srv.addr, "/", b"text/plain", b"x", timeout).ok()?;
+            (status == 200).then_some(())
         })
         .unwrap_or_else(|| panic!("{}: upload capacity was not released", case.name));
-        recovered.send(b"x")?;
-        assert_eq!(recovered.read_head(timeout)?.0, 200, "{}", case.name);
     }
     Ok(())
 }

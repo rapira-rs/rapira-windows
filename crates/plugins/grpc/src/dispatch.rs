@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
@@ -10,12 +11,12 @@ use connectrpc::{
     CodecFormat, ConnectError, Dispatcher, EncodedBody, EncodedResponse, ErrorCode, ErrorDetail,
     MethodDescriptor, Payload, Protocol, RequestContext,
 };
-use rapira_sapi::Addr;
 use rapira_sapi::work::Intake;
 use tokio::sync::oneshot;
 
 use crate::php::GrpcState;
 use crate::schema::Schema;
+use crate::serve::RequestBudget;
 use crate::{RpcStatus, UnaryCall};
 
 /// Routes the unary methods of the configured services to PHP.
@@ -92,10 +93,12 @@ async fn unary(
     let body = request.encoded()?;
     let message = match format {
         CodecFormat::Proto => body,
-        CodecFormat::Json => schema
-            .json_to_proto(method, &body)
-            .map_err(|e| ConnectError::invalid_argument(format!("{e:#}")))?
-            .into(),
+        CodecFormat::Json => {
+            let message =
+                schema.json_to_proto(method, &body, ctx.decode_options().element_memory_limit())?;
+            drop(body);
+            message.into()
+        }
         _ => {
             return Err(ConnectError::unimplemented(format!(
                 "codec {format:?} is not supported"
@@ -108,8 +111,18 @@ async fn unary(
             .header("grpc-encoding")
             .is_none_or(|value| value == "identity");
     let bytes = message.len();
-    let held = intake
-        .reserve_body(bytes)
+    let budget = ctx
+        .extensions_mut()
+        .remove::<Arc<Mutex<RequestBudget>>>()
+        .expect("serve puts a budget on every request");
+    let mut held = budget
+        .lock()
+        .expect("request budget lock")
+        .held
+        .take()
+        .expect("the request body owns its reservation");
+    intake
+        .grow_body(&mut held, bytes)
         .map_err(|e| ConnectError::unavailable(e.to_string()))?;
     let call = UnaryCall {
         method: path.clone(),
@@ -120,8 +133,8 @@ async fn unary(
             .map(|d| unix_deadline(d, Instant::now(), SystemTime::now())),
         remote: ctx
             .extensions_mut()
-            .remove::<Addr>()
-            .expect("serve puts an Addr on every connection"),
+            .remove::<SocketAddr>()
+            .expect("serve puts a peer address on every connection"),
         message,
     };
     let (tx, reply) = oneshot::channel();

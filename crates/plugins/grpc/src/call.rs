@@ -1,6 +1,7 @@
+use std::net::SocketAddr;
+
 use connectrpc::Protocol;
 use connectrpc::http::HeaderMap;
-use rapira_sapi::types::Addr;
 
 /// One unary RPC. `message` is the binary protobuf encoding of the method's input message.
 pub(crate) struct UnaryCall {
@@ -11,7 +12,7 @@ pub(crate) struct UnaryCall {
     pub metadata: HeaderMap,
     /// Unix seconds.
     pub deadline: Option<f64>,
-    pub remote: Addr,
+    pub remote: SocketAddr,
     pub message: bytes::Bytes,
 }
 

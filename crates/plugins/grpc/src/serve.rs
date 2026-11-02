@@ -1,23 +1,28 @@
+use std::convert::Infallible;
+use std::io;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use connectrpc::http;
+use connectrpc::http_body::{Body, Frame, SizeHint};
 use connectrpc::server::serve_connection;
 use connectrpc::{
-    Chain, CompressionRegistry, ConnectRpcBody, ConnectRpcService, ConnectionConfig,
-    ConnectionInfo, DeadlinePolicy, GzipProvider, Router,
+    Chain, CompressionRegistry, ConnectError, ConnectRpcBody, ConnectRpcService, ConnectionConfig,
+    ConnectionInfo, DeadlinePolicy, GzipProvider, Limits, Router,
 };
 use connectrpc_health::StaticChecker;
 use http_body_util::BodyExt as _;
+use hyper::body::Incoming;
 use rapira_net::{Acceptor, Serve};
-use rapira_sapi::Addr;
 use rapira_sapi::plugin::Worker;
 use rapira_sapi::work::Intake;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::watch;
+use tokio::sync::{OwnedSemaphorePermit, watch};
 use tower::ServiceExt as _;
 
 use crate::dispatch::PhpDispatcher;
@@ -32,6 +37,63 @@ struct Serving {
     shutdown: watch::Sender<bool>,
     inflight: Arc<AtomicUsize>,
     http2: Arc<AtomicUsize>,
+}
+
+pub(crate) struct RequestBudget {
+    pub(crate) held: Option<OwnedSemaphorePermit>,
+    error: Option<ConnectError>,
+}
+
+struct RequestBody {
+    body: Incoming,
+    intake: Intake,
+    budget: Arc<Mutex<RequestBudget>>,
+    idle_timeout: Duration,
+    idle: Pin<Box<tokio::time::Sleep>>,
+}
+
+impl Body for RequestBody {
+    type Data = Bytes;
+    type Error = io::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, io::Error>>> {
+        let this = self.get_mut();
+        let mut budget = this.budget.lock().expect("request budget lock");
+        if budget.held.is_some() && this.idle.as_mut().poll(cx).is_ready() {
+            budget.error = Some(ConnectError::deadline_exceeded("request body idle timeout"));
+            return Poll::Ready(Some(Err(io::ErrorKind::TimedOut.into())));
+        }
+        let frame = match ready!(Pin::new(&mut this.body).poll_frame(cx)) {
+            Some(Ok(frame)) => frame,
+            Some(Err(error)) => return Poll::Ready(Some(Err(io::Error::other(error)))),
+            None => return Poll::Ready(None),
+        };
+        if let Some(data) = frame.data_ref()
+            && !data.is_empty()
+            && let Some(held) = budget.held.as_mut()
+        {
+            let bytes = held.num_permits() + data.len();
+            if let Err(error) = this.intake.grow_body(held, bytes) {
+                budget.error = Some(ConnectError::unavailable(error.to_string()));
+                return Poll::Ready(Some(Err(io::Error::other(error))));
+            }
+            this.idle
+                .as_mut()
+                .reset(tokio::time::Instant::now() + this.idle_timeout);
+        }
+        Poll::Ready(Some(Ok(frame)))
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.body.size_hint()
+    }
 }
 
 struct InFlight(Arc<AtomicUsize>);
@@ -76,6 +138,11 @@ impl Serving {
         };
         // The plugin routes come first, so a configured service cannot hide health or reflection.
         let mut service = ConnectRpcService::new(Chain(router, dispatcher))
+            .with_limits(
+                Limits::default()
+                    .with_max_message_size(4 * 1024 * 1024)
+                    .with_max_request_body_size(4 * 1024 * 1024 + 5),
+            )
             .with_deadline_policy(deadlines)
             // The default registry offers every codec that the build compiles, zstd included.
             .with_compression(CompressionRegistry::new().register(GzipProvider::default()));
@@ -107,44 +174,81 @@ impl Serving {
         let http2 = Arc::new(OnceLock::new());
         let counted_http2 = Arc::clone(&http2);
         let http2_connections = Arc::clone(&self.http2);
-        let service = self
-            .service
-            .clone()
-            .map_request(move |req: http::Request<_>| {
-                mark.store(req.version() < http::Version::HTTP_2, Relaxed);
-                if req.version() == http::Version::HTTP_2 {
-                    counted_http2.get_or_init(|| InFlight::start(&http2_connections));
-                }
-                req
-            })
-            .map_response(move |response| {
-                let mut response = status_in_trailers(response);
-                if close.load(Relaxed) && *draining.borrow() {
-                    response.headers_mut().insert(
-                        http::header::CONNECTION,
-                        http::HeaderValue::from_static("close"),
-                    );
-                }
-                response
-            })
-            .map_future(move |call| {
-                let counted = Arc::new(InFlight::start(&inflight));
-                async move {
-                    call.await.map(|response| {
-                        response.map(|body| {
-                            body.map_frame(move |frame| {
-                                // Transport buffers can retain data after the body is dropped.
-                                frame.map_data(|data| {
-                                    Bytes::from_owner(CountedBytes {
-                                        data,
-                                        _counted: Arc::clone(&counted),
-                                    })
+        let rpc = self.service.clone();
+        let intake = rpc.dispatcher().1.intake.clone();
+        let idle_timeout = self.connection.http2_keepalive_timeout();
+        let service = tower::service_fn(move |mut request: http::Request<Incoming>| {
+            let rpc = rpc.clone();
+            let intake = intake.clone();
+            async move {
+                let headers = request.headers().clone();
+                let held = match intake.reserve_body(0) {
+                    Ok(held) => held,
+                    Err(error) => {
+                        return Ok(ConnectError::unavailable(error.to_string())
+                            .into_http_response(&headers));
+                    }
+                };
+                let budget = Arc::new(Mutex::new(RequestBudget {
+                    held: Some(held),
+                    error: None,
+                }));
+                request.extensions_mut().insert(Arc::clone(&budget));
+                let request = request.map(|body| RequestBody {
+                    body,
+                    intake,
+                    budget: Arc::clone(&budget),
+                    idle_timeout,
+                    idle: Box::pin(tokio::time::sleep(idle_timeout)),
+                });
+                let response = rpc.oneshot(request).await?;
+                let error = {
+                    let mut budget = budget.lock().expect("request budget lock");
+                    // Reflection streams keep their per-message limit after service setup.
+                    drop(budget.held.take());
+                    budget.error.take()
+                };
+                Ok::<_, Infallible>(match error {
+                    Some(error) => error.into_http_response(&headers),
+                    None => response,
+                })
+            }
+        })
+        .map_request(move |req: http::Request<_>| {
+            mark.store(req.version() < http::Version::HTTP_2, Relaxed);
+            if req.version() == http::Version::HTTP_2 {
+                counted_http2.get_or_init(|| InFlight::start(&http2_connections));
+            }
+            req
+        })
+        .map_response(move |response| {
+            let mut response = status_in_trailers(response);
+            if close.load(Relaxed) && *draining.borrow() {
+                response.headers_mut().insert(
+                    http::header::CONNECTION,
+                    http::HeaderValue::from_static("close"),
+                );
+            }
+            response
+        })
+        .map_future(move |call| {
+            let counted = Arc::new(InFlight::start(&inflight));
+            async move {
+                call.await.map(|response| {
+                    response.map(|body| {
+                        body.map_frame(move |frame| {
+                            // Transport buffers can retain data after the body is dropped.
+                            frame.map_data(|data| {
+                                Bytes::from_owner(CountedBytes {
+                                    data,
+                                    _counted: Arc::clone(&counted),
                                 })
                             })
                         })
                     })
-                }
-            });
+                })
+            }
+        });
         let connection = serve_connection(io, info, service, self.connection.clone(), async move {
             let _ = stop.wait_for(|stop| *stop).await;
             if http1.load(Relaxed) {
@@ -190,7 +294,7 @@ impl Serving {
 impl Serve for Serving {
     fn spawn_tcp(&self, stream: tokio::net::TcpStream, peer: std::net::SocketAddr) {
         let mut info = ConnectionInfo::new().with_peer_addr(peer);
-        info.extensions_mut().insert(Addr::Inet(peer));
+        info.extensions_mut().insert(peer);
         self.spawn(stream, info);
     }
 }
