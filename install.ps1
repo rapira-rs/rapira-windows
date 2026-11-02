@@ -58,10 +58,27 @@ param(
         [IO.Directory]::CreateDirectory((Split-Path $InstallDirectory -Parent)) | Out-Null
         Copy-Item -LiteralPath $bundle -Destination $InstallDirectory -Recurse
 
-        $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-        if ($InstallDirectory -notin ($userPath -split ';')) {
-            [Environment]::SetEnvironmentVariable('Path', "$InstallDirectory;$userPath", 'User')
-        }
+        $environment = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+        try {
+            $userPath = $environment.GetValue('Path', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            if ($InstallDirectory -notin ($userPath -split ';')) {
+                $kind = if ($null -eq $userPath) { [Microsoft.Win32.RegistryValueKind]::String } else { $environment.GetValueKind('Path') }
+                if (-not ('RapiraInstallerEnvironment' -as [type])) {
+                    Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class RapiraInstallerEnvironment {
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern IntPtr SendMessageTimeout(IntPtr hwnd, uint message, UIntPtr wparam, string lparam, uint flags, uint timeout, out UIntPtr result);
+}
+'@
+                }
+                $environment.SetValue('Path', "$InstallDirectory;$userPath", $kind)
+                # Notify applications of the environment change: https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-settingchange
+                $result = [UIntPtr]::Zero
+                [RapiraInstallerEnvironment]::SendMessageTimeout([IntPtr] 0xffff, 0x1a, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref] $result) | Out-Null
+            }
+        } finally { $environment.Dispose() }
         if ($InstallDirectory -notin ($env:Path -split ';')) {
             $env:Path = "$InstallDirectory;$env:Path"
         }

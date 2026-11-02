@@ -28,7 +28,7 @@ The installer selects x64 or ARM64 and downloads the latest stable release with 
 The installer refuses an existing destination. Keep application files outside the install directory. To use PHP 8.4 or another directory, download [install.ps1](install.ps1) and run it:
 
 ```powershell
-.\install.ps1 -PhpVersion 8.4 -InstallDirectory C:\tools\rapira
+& ([scriptblock]::Create((Get-Content -LiteralPath .\install.ps1 -Raw))) -PhpVersion 8.4 -InstallDirectory C:\tools\rapira
 ```
 
 Run Rapira from any directory:
