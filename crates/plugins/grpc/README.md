@@ -56,7 +56,7 @@ connect-rust handles the framing, the compression, the timeout headers and the e
 
 ## Remote address
 
-The remote address is in the request extensions as `std::net::SocketAddr`. PHP gets it as `Context::$remote`.
+The request extensions store the remote address as `std::net::SocketAddr`. PHP receives a `Rapira\InetAddress` in `Context::$remote`.
 
 ## Interceptors
 
