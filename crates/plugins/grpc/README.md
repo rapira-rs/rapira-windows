@@ -114,6 +114,8 @@ The pool runs in dispatcher mode only. `\Rapira\get_dispatcher()` returns a `Rap
 
 A client sets a timeout with `grpc-timeout` (gRPC and gRPC-Web) or `connect-timeout-ms` (Connect). `default_timeout_secs` sets the timeout of a call that has none. `max_timeout_secs` reduces a longer client timeout to this value. Both keys are unset by default, so a call without a client timeout has no deadline.
 
+While the listener collects a request body, `keepalive_timeout_secs` limits each pause between data reads on HTTP/1.1 and HTTP/2. This limit also applies when the call deadline is absent or longer. On expiry, the client gets DEADLINE_EXCEEDED with `request body idle timeout`, and the body reservation is released. PHP execution and established health and reflection streams use their call deadlines.
+
 `Context::$deadline` is the deadline as a Unix timestamp, or null when the call has no deadline. When the deadline passes, the client gets DEADLINE_EXCEEDED and `isCancelled()` returns true. A client that cancels the call or closes the connection has the same effect on PHP.
 
 The plugin cannot stop PHP code, so PHP continues to run the call. A later `respond()` or `fail()` throws `Rapira\Exception\WorkDiscardedException`. Check `isCancelled()` during long work. Set `default_timeout_secs` so that each call has a deadline.
@@ -147,7 +149,7 @@ grpcurl -plaintext 127.0.0.1:50051 list
 
 On the stop signal the accept loop ends, health reports NOT_SERVING, and open `Watch` streams end. Calls in flight drain within the drain window (see Config). Connections that are open after the drain window are cut. Shutdown reports an error if a call or an HTTP/2 connection remains. An idle HTTP/1.1 connection does not cause an error. An open reflection stream, for example an Evans REPL session (https://github.com/ktr0731/evans), holds its connection until the drain window ends.
 
-The listener sends an HTTP/2 keepalive PING to a connection that sends no request, no request data and no PING answer for `keepalive_interval_secs`, and closes the connection when the peer does not answer within `keepalive_timeout_secs`. Both keys are 10 seconds by default. An HTTP/2 peer that is gone without a FIN keeps its connection open for at most the sum of both keys after its last frame. HTTP/1.1 has no PING, so these keys do not apply to a gRPC-Web or Connect client on HTTP/1.1.
+The listener sends an HTTP/2 keepalive PING to a connection that sends no request, no request data and no PING answer for `keepalive_interval_secs`, and closes the connection when the peer does not answer within `keepalive_timeout_secs`. Both keys are 10 seconds by default. An HTTP/2 peer that is gone without a FIN keeps its connection open for at most the sum of both keys after its last frame. HTTP/1.1 has no PING.
 
 ## Limits
 
@@ -168,7 +170,7 @@ The `[grpc]` table. Unknown keys fail the boot.
 - `default_timeout_secs`: the timeout of a call that has none. Default: unset, no deadline.
 - `max_timeout_secs`: the upper limit for a client timeout. Default: unset, no limit. `default_timeout_secs` must not be larger.
 - `keepalive_interval_secs`: the time without a new request, request data or a PING answer after which the listener sends an HTTP/2 keepalive PING. Default `10`. It must be at least 1.
-- `keepalive_timeout_secs`: the time the listener waits for the PING answer before it closes the connection. Default `10`. It must be at least 1.
+- `keepalive_timeout_secs`: the limit for idle request body reads and the wait for an HTTP/2 PING answer. Default `10`. It must be at least 1.
 - `[grpc.auth].tokens_file`: required when the `[grpc.auth]` table is present. The table enables authentication. The path must name a readable token file.
 - `[grpc.pool]`: the worker pool. It takes the keys of `[http.pool]`, and its `mode` must be `"dispatcher"`.
 

@@ -1312,6 +1312,118 @@ async fn configured_timeouts_bound_a_stalled_request() {
     stop(srv).await;
 }
 
+/// Idle body reads use keepalive_timeout_secs. DEADLINE_EXCEEDED maps to HTTP 504: https://connectrpc.com/docs/protocol/#error-codes.
+#[tokio::test]
+async fn idle_rpc_bodies_timeout_without_a_short_call_deadline() {
+    struct Case {
+        name: &'static str,
+        timeout: Option<&'static str>,
+    }
+    let cases = [
+        Case {
+            name: "no call deadline",
+            timeout: None,
+        },
+        Case {
+            name: "long client deadline",
+            timeout: Some("connect-timeout-ms: 60000\r\n"),
+        },
+    ];
+    let srv = Spawn::grpc(wire_worker())
+        .grpc_extra("keepalive_timeout_secs = 1")
+        .json_log()
+        .spawn();
+    let addr = listen(&srv);
+    for case in cases {
+        let timeout = case.timeout.unwrap_or_default();
+        let request = format!(
+            "POST {ECHO_PATH} HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\nContent-Type: application/proto\r\nContent-Length: 10\r\n{timeout}\r\nx"
+        );
+        let started = Instant::now();
+        let (status, body) = http_raw(addr, request.as_bytes(), Duration::from_secs(5))
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{}: idle body did not return a response: {error}",
+                    case.name
+                )
+            });
+        assert_eq!(status, 504, "{}", case.name);
+        let body = String::from_utf8(body).expect("Connect error");
+        assert!(
+            body.contains(r#""code":"deadline_exceeded""#),
+            "{}: {body}",
+            case.name
+        );
+        assert!(
+            body.contains(r#""message":"request body idle timeout""#),
+            "{}: {body}",
+            case.name
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            (Duration::from_millis(900)..Duration::from_secs(5)).contains(&elapsed),
+            "{}: took {elapsed:?}",
+            case.name
+        );
+    }
+    assert_eq!(
+        calls(&srv),
+        Vec::<Value>::new(),
+        "no incomplete call reaches PHP"
+    );
+    stop(srv).await;
+}
+
+#[tokio::test]
+async fn completed_rpc_bodies_do_not_limit_php_execution() {
+    struct Case {
+        name: &'static str,
+        wire: Wire,
+    }
+    let cases = [
+        Case {
+            name: "Connect over HTTP/1.1",
+            wire: Wire::Http1,
+        },
+        Case {
+            name: "Connect over HTTP/2",
+            wire: Wire::H2,
+        },
+    ];
+    for case in cases {
+        let srv = Spawn::grpc(fixture("grpc/unary-worker.php"))
+            .grpc_extra("keepalive_timeout_secs = 1")
+            .json_log()
+            .spawn();
+        let marker = srv.dir.join("marker");
+        let message = format!("hold:{}", marker.display());
+        let mut conn = Conn::open(&listen(&srv), case.wire).await.expect("connect");
+        let client = tokio::spawn(async move {
+            conn.send(
+                Method::POST,
+                ECHO_PATH,
+                &[("content-type", "application/proto")],
+                message.as_bytes(),
+            )
+            .await
+        });
+        let log = srv.log_file();
+        tokio::task::spawn_blocking(move || server_log::wait_app_record(&log, "held"))
+            .await
+            .expect("the complete body reached PHP");
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        std::fs::write(&marker, b"go").expect("release PHP");
+        let got = tokio::time::timeout(Duration::from_secs(5), client)
+            .await
+            .expect("PHP reply within 5 seconds")
+            .expect("client task")
+            .expect("response");
+        assert_eq!(got.status, 200, "{}: {got:?}", case.name);
+        assert_eq!(got.body.as_ref(), b"held", "{}", case.name);
+        stop(srv).await;
+    }
+}
+
 /// Sources: `grpc/health/v1/health.proto` (`HealthCheckRequest.service` and `HealthCheckResponse.status` are field 1, SERVING is 1), `grpc/reflection/v1/reflection.proto` (`list_services` is field 7), and PROTOCOL-HTTP2 (12 for an unknown method).
 #[tokio::test]
 async fn health_and_reflection_answer_from_the_plugin() {
